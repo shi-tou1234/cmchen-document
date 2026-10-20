@@ -432,7 +432,7 @@ pdf-reader/
     正式测试在 `scripts/test-*.js`（探针内容在 `scripts/probe-*.js`，由 `probe-runner.js` 统一驱动）。
 
 11. **Git 已本地初始化，未推送远端。**  
-    本地已有提交（v11/v12 快照 + 收尾）。目标仓库 `https://github.com/shi-tou1234/cmchen-document`；本机 `git ls-remote` 报 `CRYPT_E_NO_REVOCATION_CHECK`，推送前先解决网络（代理）或 `git config http.schannelCheckRevoke false`，并确认远端是否为空。
+    本地已有提交（v11/v12 快照 + 收尾）。目标仓库 `https://github.com/shi-tou1234/cmchen-document`；本机推送两次失败：schannel 报 `CRYPT_E_NO_REVOCATION_CHECK`，改 openssl 后端报 `unable to get local issuer certificate`——像是本机有代理解密 TLS 或缺 CA。需要人工配置代理/证书后 `git push -u origin main`（推送前确认远端是否为空，远端有内容先拉取合并，不要强推）。
 
 12. **新克隆环境需要先生成 pdfjs 浏览器构建。**  
     `src/renderer/pdfjs/` 被 git 忽略，首次运行要：
