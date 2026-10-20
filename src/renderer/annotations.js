@@ -395,6 +395,12 @@ const Anno = window.Anno = (() => {
   }
 
   // ---- 撤销 / 清除本页 ----
+  // 撤销栈是模块级状态。切换文档 / 关闭标签时必须清空：
+  // 否则上一份文档的 undo 操作会被作用到新文档上
+  // （clear 类操作会把上一份文档的形状整批写进新文档，并被自动保存到新文档的标注文件）。
+  function reset() {
+    undoStack.length = 0;
+  }
   function undo() {
     const op = undoStack.pop();
     if (!op) { App.toast('没有可撤销的标注'); return; }
@@ -494,5 +500,5 @@ const Anno = window.Anno = (() => {
     setTool('select');
   }
 
-  return { init, attachPage, setTool, undo, clearPage, renderPage, addShape, updateShape, get state() { return state; } };
+  return { init, attachPage, setTool, undo, clearPage, renderPage, addShape, updateShape, reset, get state() { return state; } };
 })();

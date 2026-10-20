@@ -15,6 +15,8 @@ window.LibraryUI = (function () {
     scope: { type: 'all' }, query: '', sort: 'added',
     selectedKey: null, detailTags: [], flash: '',
     selectedKeys: new Set(),
+    tagFilter: new Set(),   // v14：标签选择器（多选，命中任一即可）
+    citeStyle: 'gbt7714',   // v14：引用样式
     ft: { query: '', results: [], stats: null, loading: false, error: '' },
     settings: { theme: 'light', defaultSort: 'added', autoIndex: true, dataDir: '' },
     dupGroups: [],
@@ -75,6 +77,10 @@ window.LibraryUI = (function () {
     let list = state.items.filter((x) => (isTrash() ? !!x.deletedAt : !x.deletedAt));
     if (state.scope.type === 'uncollected') list = list.filter((x) => !itemCollections(x).length);
     else if (state.scope.type === 'coll') list = list.filter((x) => itemCollections(x).includes(state.scope.id));
+    // v14 标签选择器：选中多个标签时命中任一即可（与 Zotero 的标签选择器一致）
+    if (state.tagFilter.size) {
+      list = list.filter((x) => (x.tags || []).some((t) => state.tagFilter.has(t)));
+    }
     const saved = scopeSearch();
     const q = (saved ? saved.query : state.query).trim().toLowerCase();
     if (q) list = list.filter((x) => matchesQuery(x, q));
@@ -102,12 +108,57 @@ window.LibraryUI = (function () {
   // ---------- 渲染 ----------
   function render() {
     renderSidebar();
+    renderTagList();
     renderGrid();
     renderDetail();
     renderBulk();
     renderFt();
     if (el.sort) el.sort.value = state.sort;
     if (el.emptyTrash) el.emptyTrash.hidden = !isTrash();
+  }
+
+  // ---------- 标签选择器（v14） ----------
+  // 侧栏列出库里出现过的标签与条数，点一下就按这个标签筛；可多选。
+  function allTags() {
+    const cnt = new Map();
+    for (const it of state.items) {
+      if (it.deletedAt) continue;
+      for (const t of (it.tags || [])) {
+        const name = String(t || '').trim();
+        if (!name) continue;
+        cnt.set(name, (cnt.get(name) || 0) + 1);
+      }
+    }
+    return [...cnt.entries()].sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0], 'zh-Hans-CN'));
+  }
+
+  function renderTagList() {
+    if (!el.tagList) return;
+    const tags = allTags();
+    if (!tags.length) {
+      el.tagList.innerHTML = '<div class="lib-side-title">标签</div><div class="lib-side-empty">还没有标签</div>';
+      return;
+    }
+    let html = '<div class="lib-side-title">标签 <span class="lib-side-hint">点击筛选</span></div>';
+    if (state.tagFilter.size) {
+      html += '<button class="lib-tag-clear" data-tag-clear="1">清除筛选（' + state.tagFilter.size + '）</button>';
+    }
+    html += tags.map(([name, n]) => {
+      const on = state.tagFilter.has(name);
+      return '<button class="lib-tag-row' + (on ? ' active' : '') + '" data-tag-filter="' + esc(name) + '"' +
+        ' title="' + esc(name) + '（' + n + ' 条）">' +
+        '<span class="cname">' + esc(name) + '</span>' +
+        '<span class="lc-count">' + n + '</span></button>';
+    }).join('');
+    el.tagList.innerHTML = html;
+  }
+
+  function toggleTagFilter(name) {
+    const t = String(name || '').trim();
+    if (!t) return;
+    if (state.tagFilter.has(t)) state.tagFilter.delete(t);
+    else state.tagFilter.add(t);
+    render();
   }
 
   function renderSidebar() {
@@ -185,6 +236,8 @@ window.LibraryUI = (function () {
     el.grid.innerHTML = list.map((it) => cardHtml(it)).join('');
   }
 
+  // 条目渲染成「学术表格」的一行：标题 / 作者·年份·来源 / 类型 / 收藏集 / 标签 / 操作
+  // 类名保持不变（lib-card / lctitle / lctype / lcprog / lccoll…），探针与事件委托都依赖它们。
   function cardHtml(it) {
     const trashed = !!it.deletedAt;
     const selected = it.key === state.selectedKey;
@@ -194,31 +247,32 @@ window.LibraryUI = (function () {
     if (it.creators && it.creators.length) meta.push(esc(it.creators.join(', ')));
     if (it.year) meta.push(esc(it.year));
     if (it.publication) meta.push(esc(it.publication));
-    const tags = (it.tags || []).map((t) => '<span class="lctag">' + esc(t) +
-      (trashed ? '' : '<span class="tagdel" data-rmtag="' + esc(it.key) + '" data-tag="' + esc(t) + '" ' +
-      'style="cursor:pointer;margin-left:4px;color:#b06060">✕</span>') + '</span>').join('');
+    const tags = (it.tags || []).map((t) => '<span class="lctag" data-tag-filter="' + esc(t) + '" title="按这个标签筛选">' + esc(t) +
+      (trashed ? '' : '<span class="tagdel" data-rmtag="' + esc(it.key) + '" data-tag="' + esc(t) + '" title="移除标签">×</span>') + '</span>').join('');
     const colls = itemCollections(it).map((id) => collName(id)).filter(Boolean)
       .map((n) => '<span class="lccoll">' + esc(n) + '</span>').join('');
     const progress = it.page > 1 ? '<span class="lcprog">第 ' + it.page + ' 页</span>' : '';
     const openAttr = trashed ? '' : ' data-open="' + esc(it.key) + '"';
     const titleAttr = trashed ? '' : ' data-rename="' + esc(it.key) + '" title="点击重命名"';
-    const tagAdd = trashed ? '' : '<span class="tagadd" data-addtag="' + esc(it.key) + '" style="color:#1a73e8;font-size:11px;cursor:pointer">＋标签</span>';
+    const tagAdd = trashed ? '' : '<span class="lc-addtag" data-addtag="' + esc(it.key) + '" title="加标签">＋</span>';
     const actions = trashed
       ? '<button data-detail="' + esc(it.key) + '">详情</button>' +
         '<button data-restore="' + esc(it.key) + '">还原</button>' +
         '<button class="rm" data-delete="' + esc(it.key) + '">永久删除</button>'
       : '<button data-detail="' + esc(it.key) + '">详情</button>' +
-        '<button class="rm" data-trash="' + esc(it.key) + '">移入回收站</button>';
+        '<button class="rm" data-trash="' + esc(it.key) + '">回收站</button>';
+    const note = trashed
+      ? '<div class="lcpath">在回收站中 · 磁盘 PDF 未被删除</div>'
+      : (!it.hasFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
     return '<div class="lib-card' + (selected ? ' selected' : '') + (picked ? ' picked' : '') + (it.hasFile ? '' : ' missing') + '" data-key="' + esc(it.key) + '"' + openAttr + '>' +
       check +
       '<div class="lctitle"' + titleAttr + '>' + esc(it.title || '(无标题)') + '</div>' +
       '<div class="lcmeta">' + (meta.join(' · ') || esc((it.attachment && it.attachment.name) || '')) + '</div>' +
-      (!it.hasFile && !trashed ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '') +
-      (trashed ? '<div class="lcpath">在回收站中 · 磁盘 PDF 未被删除</div>' : '') +
       '<div class="lcmeta2"><span class="lctype">' + esc(typeLabel(it.itemType)) + '</span>' + progress + '</div>' +
-      (colls ? '<div class="lccolls">' + colls + '</div>' : '') +
+      '<div class="lccolls">' + colls + '</div>' +
       '<div class="lctags">' + tags + tagAdd + '</div>' +
       '<div class="lcbar">' + actions + '</div>' +
+      note +
     '</div>';
   }
 
@@ -338,6 +392,7 @@ window.LibraryUI = (function () {
     renderDetailTags(trashed);
     renderDetailColls(it, trashed);
     renderAttach(it, trashed);
+    renderCite(it, trashed);
 
     const fields = [el.ld.type, el.ld.title, el.ld.creators, el.ld.year, el.ld.publication,
       el.ld.volume, el.ld.issue, el.ld.pages, el.ld.doi, el.ld.url, el.ld.abstract, el.ld.note];
@@ -361,8 +416,41 @@ window.LibraryUI = (function () {
     state.flash = '';
   }
 
-  function renderDetailTags(trashed) {
-    el.ld.tags.innerHTML = state.detailTags.length
+  // ---------- 引用（v14） ----------
+  // 预览与复制都按「表单里当前的字段」算，改完标题不用先保存也能看到引用长什么样。
+  function citeOfForm() {
+    const it = selectedItem();
+    if (!it || !window.Cite) return '';
+    let merged = it;
+    try { merged = Object.assign({}, it, readDetailForm()); } catch (_) { merged = it; }
+    try { return window.Cite.format(merged, state.citeStyle); } catch (_) { return ''; }
+  }
+
+  function renderCite(it, trashed) {
+    if (!el.ld.citePreview) return;
+    if (el.ld.citeStyle) el.ld.citeStyle.value = state.citeStyle;
+    const text = it ? citeOfForm() : '';
+    el.ld.citePreview.textContent = text || '（先填标题）';
+    el.ld.citePreview.classList.toggle('empty', !text);
+    if (el.ld.citeCopy) el.ld.citeCopy.disabled = trashed || !text;
+    if (el.ld.citeStatus) el.ld.citeStatus.textContent = '';
+  }
+
+  async function copyCitation() {
+    const text = citeOfForm();
+    if (!text) { if (el.ld.citeStatus) el.ld.citeStatus.textContent = '先填标题'; return; }
+    try {
+      const r = await window.pdfBridge.copyText(text);
+      if (r && r.ok) {
+        if (el.ld.citeStatus) el.ld.citeStatus.textContent = '已复制到剪贴板';
+        window.App && window.App.toast && window.App.toast('引用已复制');
+      } else if (el.ld.citeStatus) el.ld.citeStatus.textContent = (r && r.error) || '复制失败';
+    } catch (err) {
+      if (el.ld.citeStatus) el.ld.citeStatus.textContent = '复制失败';
+    }
+  }
+
+  function renderDetailTags(trashed) {    el.ld.tags.innerHTML = state.detailTags.length
       ? state.detailTags.map((t) => '<span class="ld-tag">' + esc(t) +
           (trashed ? '' : '<button class="ld-tagd" data-ld-rmtag="' + esc(t) + '" title="移除标签">✕</button>') + '</span>').join('')
       : '<span class="ld-hint">暂无标签</span>';
@@ -441,7 +529,8 @@ window.LibraryUI = (function () {
   async function importPdf() {
     const res = await window.pdfBridge.openPdfDialog();
     if (res && res.ok && res.filePath) {
-      const added = await L().addPdf(res.filePath);
+      // dedupe: 同一个文件已经在库里就别再塞一条（导入/拖入的用户语义）
+      const added = await L().addPdf(res.filePath, { dedupe: true });
       if (added && added.ok && added.item) { state.selectedKey = added.item.key; state.scope = { type: 'all' }; }
       await refresh();
     }
@@ -456,7 +545,7 @@ window.LibraryUI = (function () {
       let p = '';
       try { p = window.pdfBridge.pathForFile(file) || ''; } catch (_) {}
       if (!p) continue;
-      const r = await L().addPdf(p);
+      const r = await L().addPdf(p, { dedupe: true });
       if (r && r.ok && r.item) { n++; lastKey = r.item.key; }
     }
     if (!n) { window.App && window.App.toast && window.App.toast('无法取得文件路径'); return; }
@@ -875,6 +964,8 @@ window.LibraryUI = (function () {
     el = {
       root: $('library'), search: $('lib-search'), collections: $('lib-collections'),
       searches: $('lib-searches'), saveSearch: $('lib-save-search'),
+      back: $('lib-back'),
+      tagList: $('lib-tags'),
       newColl: $('lib-new-coll'), scopeTitle: $('lib-scope-title'), count: $('lib-count'),
       import: $('lib-import'), grid: $('lib-grid'), empty: $('lib-empty'),
       sort: $('lib-sort'), emptyTrash: $('lib-empty-trash'),
@@ -889,6 +980,7 @@ window.LibraryUI = (function () {
       bulkYear: $('bulk-year'), bulkPublication: $('bulk-publication'),
       bulkAddTags: $('bulk-add-tags'), bulkRemoveTags: $('bulk-remove-tags'), bulkStatus: $('bulk-status'),
       detail: $('lib-detail'), ld: {
+        body: $('ld-body'),
         type: $('ld-type'), title: $('ld-title'), creators: $('ld-creators'), year: $('ld-year'),
         publication: $('ld-publication'), volume: $('ld-volume'), issue: $('ld-issue'), pages: $('ld-pages'),
         doi: $('ld-doi'), url: $('ld-url'), abstract: $('ld-abstract'), note: $('ld-note'),
@@ -897,6 +989,8 @@ window.LibraryUI = (function () {
         fetch: $('ld-fetch'), fetchStatus: $('ld-fetch-status'),
         save: $('ld-save'), trash: $('ld-trash'), restore: $('ld-restore'),
         del: $('ld-delete'), close: $('ld-close'),
+        citeStyle: $('ld-cite-style'), citeCopy: $('ld-cite-copy'),
+        citeStatus: $('ld-cite-status'), citePreview: $('ld-cite-preview'),
       },
     };
 
@@ -908,6 +1002,22 @@ window.LibraryUI = (function () {
       scheduleFulltext();
     });
     el.import.addEventListener('click', importPdf);
+    // v14：引用样式切换 + 复制引用
+    if (el.ld.citeStyle) el.ld.citeStyle.addEventListener('change', () => {
+      state.citeStyle = el.ld.citeStyle.value || 'gbt7714';
+      renderCite(selectedItem(), false);
+    });
+    if (el.ld.citeCopy) el.ld.citeCopy.addEventListener('click', copyCitation);
+    // 表单一改，引用预览跟着变
+    if (el.ld.body) {
+      el.ld.body.addEventListener('input', () => {
+        const it = selectedItem();
+        if (it) renderCite(it, false);
+      });
+    }
+    // 「返回阅读」：覆盖层是 absolute/inset:0，会盖住工具栏和标签栏，
+    // 没有这个按钮就没有应用内的退路（空库时尤其明显）。
+    if (el.back) el.back.addEventListener('click', () => hide());
     el.sort.addEventListener('change', () => {
       state.sort = el.sort.value;
       state.sortTouched = true;
@@ -1011,6 +1121,14 @@ window.LibraryUI = (function () {
 
     el.newColl.addEventListener('click', () => inlineNewCollection());
 
+    // v14：侧栏标签选择器（点标签筛选 / 清除筛选）
+    if (el.tagList) el.tagList.addEventListener('click', (e) => {
+      const clear = e.target.closest('[data-tag-clear]');
+      if (clear) { state.tagFilter.clear(); render(); return; }
+      const row = e.target.closest('[data-tag-filter]');
+      if (row) toggleTagFilter(row.dataset.tagFilter);
+    });
+
     // 卡片：打开 / 详情 / 改名 / 标签 / 回收站
     el.grid.addEventListener('click', async (e) => {
       const detailBtn = e.target.closest('[data-detail]');
@@ -1036,6 +1154,9 @@ window.LibraryUI = (function () {
       }
       const rmTag = e.target.closest('[data-rmtag]');
       if (rmTag) { await L().removeTag(rmTag.dataset.rmtag, rmTag.dataset.tag); await refresh(); return; }
+      // v14：点卡片上的标签 = 按这个标签筛选（别顺手把 PDF 打开了）
+      const tagFilter = e.target.closest('[data-tag-filter]');
+      if (tagFilter) { e.stopPropagation(); toggleTagFilter(tagFilter.dataset.tagFilter); return; }
       const addTag = e.target.closest('[data-addtag]');
       if (addTag) { inlineInput(addTag, '', async (tag) => { await L().addTag(addTag.dataset.addtag, tag); await refresh(); }); return; }
       const rename = e.target.closest('[data-rename]');
@@ -1117,10 +1238,16 @@ window.LibraryUI = (function () {
       }
     });
 
-    // 库内快捷键：Ctrl+F 搜标题/摘要；Esc 关详情
+    // 库内快捷键：Ctrl+F 搜标题/摘要；Esc 逐层关闭（弹窗 → 详情 → 整个库）
+    // 注意：不能一上来就 if (!isOpen()) return —— 库已经收起、但设置弹窗还留在
+    // 阅读器上时（loadPdf 会调 hide()），Esc 就再也关不掉那个弹窗了。
     document.addEventListener('keydown', (e) => {
-      if (!isOpen()) return;
+      const modalOpen = (el.settingsModal && !el.settingsModal.hidden)
+        || (el.dupModal && !el.dupModal.hidden)
+        || (el.bulkModal && !el.bulkModal.hidden);
+      if (!isOpen() && !modalOpen) return;
       if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
+        if (!isOpen()) return;
         e.preventDefault(); e.stopPropagation();
         el.search.focus(); el.search.select();
       } else if (e.key === 'Escape') {
@@ -1128,6 +1255,7 @@ window.LibraryUI = (function () {
         else if (el.dupModal && !el.dupModal.hidden) { e.preventDefault(); el.dupModal.hidden = true; }
         else if (el.bulkModal && !el.bulkModal.hidden) { e.preventDefault(); el.bulkModal.hidden = true; }
         else if (state.selectedKey) { e.preventDefault(); closeDetail(); }
+        else if (isOpen()) { e.preventDefault(); hide(); }   // Esc 收起整个库，回到阅读器
       }
     }, true);
   }
@@ -1142,14 +1270,29 @@ window.LibraryUI = (function () {
   }
 
   function show() { el.root.hidden = false; refresh(); }
-  function hide() { if (el.root) el.root.hidden = true; }
+  // 收起库时必须把子弹窗一起收掉：设置/查重/批量是独立的 fixed 节点（z-index 95），
+  // 只藏根节点的话，它们会留在阅读器上面，遮住整页。
+  function hide() {
+    if (el.root) el.root.hidden = true;
+    closeSettings();
+    if (el.dupModal) el.dupModal.hidden = true;
+    if (el.bulkModal) el.bulkModal.hidden = true;
+    closeDetail();
+  }
   function isOpen() { return el.root && !el.root.hidden; }
 
   function init() {
     if (inited) return; inited = true;
     bind();
     // 拖到库界面也能导入（支持一次多个 PDF）
-    document.addEventListener('drop', (e) => { if (isOpen()) { e.preventDefault(); handleDrop(e); } }, true);
+    // 必须 stopPropagation：否则同一次 drop 还会冒泡到阅读器的 drop 处理器，
+    // 那里会把第一个文件当「打开阅读」，库刚导入完就被覆盖层盖掉了。
+    document.addEventListener('drop', (e) => {
+      if (!isOpen()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      handleDrop(e);
+    }, true);
     document.addEventListener('dragover', (e) => { if (isOpen()) { e.preventDefault(); e.stopPropagation(); } }, true);
     // 菜单里导入/恢复/切数据目录后，主进程会广播；库开着就立刻刷新
     if (window.pdfBridge && window.pdfBridge.onLibChanged) {

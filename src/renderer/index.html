@@ -167,33 +167,40 @@
       <div class="lib-side-sep"></div>
       <div id="lib-searches"></div>
       <button id="lib-save-search" class="tbtn lib-side-btn" hidden>＋ 保存当前搜索</button>
+      <div class="lib-side-sep"></div>
+      <div id="lib-tags" class="lib-tags"></div>
     </aside>
     <section id="lib-main">
       <header id="lib-head">
+        <button id="lib-back" class="tbtn" title="返回阅读器（Esc）">← 阅读</button>
         <span id="lib-scope-title">全部条目</span>
         <span id="lib-count" class="lib-count"></span>
-        <span class="grow"></span>
-        <label class="lib-selectall" title="全选当前列表"><input id="lib-select-all" type="checkbox" />全选</label>
-        <label class="lib-sort-wrap">排序
-          <select id="lib-sort" title="条目排序">
-            <option value="added">添加时间</option>
-            <option value="modified">最近修改</option>
-            <option value="title">标题</option>
-            <option value="year">年份</option>
-          </select>
-        </label>
-        <button id="lib-dup" class="tbtn" title="按 DOI / 标题+年份查重">查重</button>
-        <button id="lib-import-refs" class="tbtn" title="导入 BibTeX / RIS">导入文献</button>
-        <button id="lib-export-refs" class="tbtn" title="导出 BibTeX / RIS">导出文献</button>
-        <button id="lib-settings" class="tbtn" title="设置 / 备份 / 全文索引">⚙ 设置</button>
-        <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
-        <button id="lib-import" class="tbtn accent">导入 PDF</button>
+        <div class="lib-head-actions">
+          <label class="lib-selectall" title="全选当前列表"><input id="lib-select-all" type="checkbox" />全选</label>
+          <label class="lib-sort-wrap">排序
+            <select id="lib-sort" title="条目排序">
+              <option value="added">添加时间</option>
+              <option value="modified">最近修改</option>
+              <option value="title">标题</option>
+              <option value="year">年份</option>
+            </select>
+          </label>
+          <button id="lib-dup" class="tbtn" title="按 DOI / 标题+年份查重">查重</button>
+          <button id="lib-import-refs" class="tbtn" title="导入 BibTeX / RIS">导入文献</button>
+          <button id="lib-export-refs" class="tbtn" title="导出 BibTeX / RIS">导出文献</button>
+          <button id="lib-settings" class="tbtn" title="设置 / 备份 / 全文索引">⚙ 设置</button>
+          <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
+          <button id="lib-import" class="tbtn accent">导入 PDF</button>
+        </div>
       </header>
       <div id="lib-bulk" class="lib-bulk" hidden>
         <span id="lib-bulk-count"></span>
         <button id="lib-bulk-edit" class="tbtn">批量编辑</button>
         <button id="lib-bulk-trash" class="tbtn danger">移入回收站</button>
         <button id="lib-bulk-clear" class="tbtn">取消选择</button>
+      </div>
+      <div class="lib-columns" aria-hidden="true">
+        <span>标题</span><span>作者 · 年份 · 来源</span><span>类型</span><span>收藏集</span><span>标签</span><span></span>
       </div>
       <div id="lib-ft" class="lib-ft" hidden></div>
       <div id="lib-grid"></div>
@@ -230,6 +237,19 @@
         </div>
         <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
         <label class="ld-row"><span class="ld-lbl">笔记</span><textarea id="ld-note" rows="3" placeholder="读后笔记"></textarea></label>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">引用 <span class="ld-hint">一键复制到剪贴板</span></div>
+          <div class="ld-inline">
+            <select id="ld-cite-style" title="引用样式">
+              <option value="gbt7714">GB/T 7714-2015</option>
+              <option value="apa">APA 7</option>
+            </select>
+            <button id="ld-cite-copy" class="ld-mini">复制引用</button>
+            <span id="ld-cite-status" class="ld-hint"></span>
+          </div>
+          <div id="ld-cite-preview" class="ld-cite-preview"></div>
+        </div>
 
         <div class="ld-sec">
           <div class="ld-sec-title">标签</div>
@@ -389,6 +409,7 @@
 
   <!-- PDF.js UMD 构建，暴露全局 pdfjsLib；worker 文件同目录 -->
   <script src="pdfjs/pdf.min.js"></script>
+  <script src="../cite.js"></script>
   <script src="annotations.js"></script>
   <script src="selection.js"></script>
   <script src="library-ui.js"></script>

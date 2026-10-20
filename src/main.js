@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -134,12 +134,33 @@ function openFromPath(filePath) {
   }
 }
 
+// 记住的窗口位置可能已经不在任何显示器上（副屏拔掉了、分辨率改了），
+// 那样窗口会开在屏幕外，看起来像「双击没反应」。这里校验一次，不在就交给系统居中。
+function safeWindowPos(x, y, w, h) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { x: undefined, y: undefined };
+  try {
+    const displays = screen.getAllDisplays();
+    for (const d of displays) {
+      const a = d.workArea || d.bounds;
+      // 至少露出一块（40px）算「还在屏幕上」
+      if (x < a.x + a.width - 40 && x + w > a.x + 40 && y < a.y + a.height - 40 && y + h > a.y + 40) {
+        return { x, y };
+      }
+    }
+  } catch (_) { /* screen 还没就绪就按原样来 */ }
+  return { x: undefined, y: undefined };
+}
+
 function createWindow(opts = {}) {
+  // 默认给宽一点：文献库是表格式布局，1000px 宽会把列挤没
+  const w = appState.width || 1180;
+  const h = appState.height || 780;
+  const pos = safeWindowPos(appState.x, appState.y, w, h);
   win = new BrowserWindow({
-    width: appState.width || 1000,
-    height: appState.height || 720,
-    x: Number.isFinite(appState.x) ? appState.x : undefined,
-    y: Number.isFinite(appState.y) ? appState.y : undefined,
+    width: w,
+    height: h,
+    x: pos.x,
+    y: pos.y,
     minWidth: 640,
     minHeight: 400,
     title: 'PDF Reader',
@@ -491,7 +512,23 @@ ipcMain.handle('lib-summary', () => library.summary());
 ipcMain.handle('lib-add-pdf', (_e, info) => {
   const p = info && info.path;
   if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
-  const item = library.addPdf(p, (info && info.opts) || {});
+  const o = (info && info.opts) || {};
+  // 去重是「导入 / 拖入」这类用户操作的语义，由调用方显式要求（opts.dedupe）：
+  // 同一路径不重复建条目；已在回收站里的那条顺手还原回来。
+  // 底层 API 默认仍然「建一条新的」，方便测试与将来的一对多场景。
+  if (o.dedupe) {
+    const exist = library.findItemByPath(p);
+    if (exist) {
+      if (exist.deletedAt) {
+        library.restoreItem(exist.key);
+        const back = library.findItem(exist.key);
+        fulltext.indexOne(back).catch((err) => console.warn('[fulltext] index add failed:', err && err.message));
+        return { ok: true, item: back, deduped: true, restored: true };
+      }
+      return { ok: true, item: exist, deduped: true };
+    }
+  }
+  const item = library.addPdf(p, o);
   fulltext.indexOne(item).catch((err) => console.warn('[fulltext] index add failed:', err && err.message));
   return { ok: true, item };
 });
@@ -680,15 +717,31 @@ ipcMain.handle('anno-load', (_e, info) => {
     return Array.isArray(obj.pages) ? obj.pages : [];
   } catch (_) { return []; }
 });
-// 导出批注为纯文本笔记
+// 导出批注为笔记
+// fmt: txt（默认，纯文本）/ md（Markdown）/ csv（表格）
+const NOTE_FORMATS = {
+  txt: { ext: 'txt', label: '纯文本文件' },
+  md: { ext: 'md', label: 'Markdown 文件' },
+  csv: { ext: 'csv', label: 'CSV 文件' },
+};
 ipcMain.handle('export-note', async (_e, info) => {
   if (!info || !info.text) return { ok: false, error: '没有内容' };
-  const base = String(info.fileName || 'document.pdf').replace(/\.pdf$/i, '') + '-批注笔记.txt';
+  const fmt = NOTE_FORMATS[info.fmt] ? info.fmt : 'txt';
+  const meta = NOTE_FORMATS[fmt];
+  const base = String(info.fileName || 'document.pdf').replace(/\.pdf$/i, '') + '-批注笔记.' + meta.ext;
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: '导出批注笔记', defaultPath: base, filters: [{ name: '文本文件', extensions: ['txt'] }],
+    title: '导出批注笔记', defaultPath: base, filters: [{ name: meta.label, extensions: [meta.ext] }],
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
-  try { fs.writeFileSync(filePath, info.text, 'utf8'); return { ok: true, path: filePath }; }
+  try { fs.writeFileSync(filePath, info.text, 'utf8'); return { ok: true, path: filePath, fmt }; }
+  catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
+
+// 复制纯文本到系统剪贴板
+ipcMain.handle('copy-text', (_e, info) => {
+  const text = String((info && info.text) || '');
+  if (!text) return { ok: false, error: '没有内容' };
+  try { clipboard.writeText(text); return { ok: true, text }; }
   catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 });
 

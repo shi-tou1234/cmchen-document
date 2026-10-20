@@ -28,7 +28,8 @@ const App = window.App = {
   activeTabId: null,
   tabSeq: 0,
   els: {},
-  io: null,
+  io: null,   // 预渲染观察器（视口上下 600px 提前渲染）
+  vo: null,   // 可见性观察器（真实视口，决定「当前页」）
   pageEl: (n) => document.getElementById('page-' + n),
 };
 
@@ -105,21 +106,41 @@ function freePage(n) {
   App.state.rendered.set(n, false);
 }
 
+// 两个观察器分工明确，不能混用：
+//   App.io —— 预渲染：视口上下 600px 内的页块提前渲染，远离时释放位图内存
+//   App.vo —— 当前页：以真实视口(rootMargin 0)为准，取视口里最靠上的一页
+// 早先只有一个观察器，既预渲染又更新页码，于是「还在 600px 预渲染区里」的下一页
+// 也把页码带跑了：状态栏页码提前跳、记住的阅读位置也跟着错。
 function setupObserver() {
   App.io = new IntersectionObserver((entries) => {
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) {
-        App.state.visible.add(n);
         if (!App.state.rendered.get(n)) renderPageNum(n);
-        updateCurrentPage(n);
       } else {
-        App.state.visible.delete(n);
         // 远离视口的页释放位图内存（标注在 SVG 层，不受影响）
         freePage(n);
       }
     }
   }, { root: App.els.viewer, rootMargin: '600px 0px' });
+
+  App.vo = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const n = +e.target.dataset.page;
+      if (e.isIntersecting) App.state.visible.add(n);
+      else App.state.visible.delete(n);
+    }
+    syncCurrentPage();
+  }, { root: App.els.viewer, rootMargin: '0px 0px' });
+}
+
+// 当前页 = 视口内最靠上的一页（上一页还露着边就仍算上一页，与常见阅读器一致）
+function syncCurrentPage() {
+  const s = App.state;
+  if (!s.visible.size) return;
+  let top = Infinity;
+  for (const n of s.visible) if (n < top) top = n;
+  if (top !== Infinity) updateCurrentPage(top);
 }
 
 function updateCurrentPage(n) {
@@ -144,9 +165,16 @@ function schedulePageReport() {
 }
 
 // ---------- 载入 PDF ----------
+// 载入代际号：快速切标签/连续打开时，两个 loadPdf 可能交错。
+// 旧的那次 await 晚回来时会把新文档 destroy 掉再把自己设成当前文档。
+let loadSeq = 0;
+// 搜索代际号：清空/换词后，旧的异步搜索必须立刻作废，
+// 否则它会在 await 之后把结果写回已经清空的状态（幽灵高亮 + 旧结果）。
+let searchSeq = 0;
 async function loadPdf(data, fileName, smoke, meta) {
   const s = App.state;
   const m = meta || {};
+  const my = ++loadSeq;
   try {
     setStatus('解析中…');
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -154,6 +182,8 @@ async function loadPdf(data, fileName, smoke, meta) {
     // 「导出副本」还要在主线程拿原始字节，所以传给 pdfjs 一份副本，bytes 自己留着。
     const task = window.pdfjsLib.getDocument({ data: bytes.slice() });
     const pdfDoc = await task.promise;
+    // 已经有更新的载入开始了：这份文档直接丢弃，别去 destroy 新文档
+    if (my !== loadSeq) { try { await pdfDoc.destroy(); } catch (_) {} return; }
     if (s.pdfDoc) { try { await s.pdfDoc.destroy(); } catch (_) {} }
 
     // 重置
@@ -168,6 +198,8 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.visible = new Set();
     s.textCache = new Map();
     s.search = { query: '', results: [], rects: new Map() };
+    searchSeq++;              // 作废上一份文档还在跑的搜索
+    if (window.Anno && Anno.reset) Anno.reset();  // 撤销栈不能跨文档
     $('sb-outline')._done = false;
     $('sb-thumbs')._docId = null;
     document.body.classList.add('has-doc');
@@ -176,6 +208,7 @@ async function loadPdf(data, fileName, smoke, meta) {
     App.els.fileName.textContent = s.fileName;
     if (window.pdfBridge.setTitle) window.pdfBridge.setTitle(s.fileName);
     if (App.io) App.io.disconnect();
+    if (App.vo) App.vo.disconnect();
     // 观察器必须先于页面块建立：buildPageBlocks 里会对每个页块调用 observe()，
     // 早先顺序颠倒导致首次加载时 App.io 仍为 null —— 一个元素都没被观察，
     // 滚轮滚动时后续页面永不渲染（◀▶/页码框因 scrollToPage 内部会强制渲染而看不出来）。
@@ -268,6 +301,9 @@ function closeDocument() {
   const s = App.state;
   if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
   if (App.io) { try { App.io.disconnect(); } catch (_) {} }
+  if (App.vo) { try { App.vo.disconnect(); } catch (_) {} }
+  if (window.Anno && Anno.reset) Anno.reset();   // 撤销栈不能跨文档
+  searchSeq++;
   s.pdfDoc = null; s.sourceBytes = null; s.numPages = 0; s.currentPage = 1;
   s.fileName = ''; s.filePath = ''; s.startPage = 1;
   s.annos = new Map(); s.rendered = new Map(); s.visible = new Set(); s.textCache = new Map();
@@ -368,7 +404,8 @@ async function buildPageBlocks(pdfDoc) {
     el._pdfPage = page; el._unit = { w, h }; el._task = null;
     host.appendChild(el);
     Anno.attachPage(el, n, anno);
-    App.io.observe(el); // 不加三元兜底：观察器缺失应当直接抛错暴露，而不是静默变成空白页
+    App.io.observe(el);  // 不加三元兜底：观察器缺失应当直接抛错暴露，而不是静默变成空白页
+    if (App.vo) App.vo.observe(el);
   }
 }
 
@@ -443,15 +480,23 @@ function paintSearchHl(n) {
 App.doSearch = async function (queryRaw) {
   const s = App.state;
   const q = String(queryRaw || '').trim().toLowerCase();
+  const seq = ++searchSeq;          // 本次搜索的代号：后面的 await 都要先验它
   s.search = { query: q, results: [], rects: new Map() };
-  if (!q || !s.pdfDoc) { renderSearchResults(); refreshAnnoPane(); return; }
+  if (!q || !s.pdfDoc) {
+    clearSearchHl();                // 清空时必须把已经画上的高亮擦掉
+    renderSearchResults();
+    refreshAnnoPane();
+    return;
+  }
   setStatus('搜索中…');
   for (let n = 1; n <= s.numPages; n++) {
+    if (seq !== searchSeq) return;  // 已被新的搜索/清空取代，直接放弃
     const el = App.pageEl(n);
     if (!el || !el._pdfPage) continue;
     const vp = el._pdfPage.getViewport({ scale: 1 });
     let items;
     try { items = await getTextContent(n); } catch (_) { continue; }
+    if (seq !== searchSeq) return;
     for (const item of items) {
       if (!item || !item.str) continue;
       const hay = item.str.toLowerCase();
@@ -473,11 +518,20 @@ App.doSearch = async function (queryRaw) {
       break; // 每个文本项只记一条结果，避免同一行刷屏
     }
   }
+  if (seq !== searchSeq) return;
   // 重画所有已渲染页的高亮
   for (const [n, v] of s.rendered) { if (v) paintSearchHl(n); }
   renderSearchResults();
   setStatus(`「${queryRaw}」共 ${s.search.results.length} 处命中`);
 };
+
+// 擦掉所有页面上已经画出的搜索高亮（清空搜索 / 换文档时调用）
+function clearSearchHl() {
+  for (const el of document.querySelectorAll('#pages .page')) {
+    const host = el.querySelector('.hl-layer');
+    if (host) host.innerHTML = '';
+  }
+}
 
 // 搜索结果渲染进批注面板上方（侧栏切到批注标签可见）；同时刷新批注列表
 function renderSearchResults() {
@@ -526,8 +580,8 @@ function initSidebar() {
     if (cmt) { editAnnoComment(+cmt.dataset.annoPage, +cmt.dataset.annoIdx); return; }
     const jump = e.target.closest('[data-anno-jump]');
     if (jump) scrollToPage(+jump.dataset.annoJump);
-    const ex = e.target.closest('#btn-note-export');
-    if (ex) exportAnnoNote();
+    const ex = e.target.closest('[data-note-fmt]');
+    if (ex) exportAnnoNote(ex.dataset.noteFmt);
   });
   // 搜索结果容器挂在批注面板顶部
   const sr = document.createElement('div');
@@ -638,10 +692,15 @@ function refreshAnnoPane() {
   if (!list) {
     const l = document.createElement('div');
     l.id = 'anno-list';
-    const btn = document.createElement('button');
-    btn.id = 'btn-note-export'; btn.className = 'tbtn sb-export-note';
-    btn.textContent = '导出批注为笔记 (.txt)';
-    host.appendChild(l); host.appendChild(btn);
+    // v14：批注可导出成 Markdown / CSV / 纯文本三种格式
+    const bar = document.createElement('div');
+    bar.className = 'anno-export-bar';
+    bar.innerHTML =
+      '<span class="anno-export-label">导出批注</span>' +
+      '<button class="tbtn sb-export-note" data-note-fmt="md" title="导出为 Markdown（可直接贴进笔记软件）">MD</button>' +
+      '<button class="tbtn sb-export-note" data-note-fmt="csv" title="导出为 CSV（表格）">CSV</button>' +
+      '<button class="tbtn sb-export-note" data-note-fmt="txt" title="导出为纯文本">TXT</button>';
+    host.appendChild(l); host.appendChild(bar);
   }
   const s = App.state;
   const rows = [];
@@ -695,7 +754,10 @@ function deleteAnno(page, idx) {
 }
 
 // 「导出批注为笔记」的纯文本内容：按页排列，供导出与回归断言共用
-App.buildNoteText = function buildNoteText() {
+App.buildNoteText = function buildNoteText(fmt) {
+  const f = fmt || 'txt';
+  if (f === 'md') return buildNoteMd();
+  if (f === 'csv') return buildNoteCsv();
   const s = App.state;
   const lines = [];
   const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
@@ -717,13 +779,79 @@ App.buildNoteText = function buildNoteText() {
   return lines.join('\n');
 };
 
-// 「导出批注为笔记」：纯文本，按页排列
-async function exportAnnoNote() {
+// 批注导出：Markdown 版（给 Obsidian / Logseq / Typora 这类笔记软件用）
+function buildNoteMd() {
+  const s = App.state;
+  const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
+  const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length).sort((a, b) => a - b);
+  const out = [];
+  out.push('# ' + (s.fileName || '文档') + ' 批注笔记');
+  out.push('');
+  out.push('> 导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }));
+  out.push('');
+  for (const n of pages) {
+    out.push('## 第 ' + n + ' 页');
+    out.push('');
+    for (const sh of s.annos.get(n)) {
+      if (sh.tool === 'mark') {
+        // 引用块：多行文本每行都加 '> '，粘进笔记软件仍是引用
+        out.push(String(sh.text || '').split('\n').map((x) => '> ' + x).join('\n'));
+        if (sh.comment) out.push('', '**评论**：' + String(sh.comment).split('\n').join(' '));
+        out.push('');
+      } else if (sh.tool === 'text' || sh.tool === 'note') {
+        out.push('- **' + toolName[sh.tool] + '**：' + String(sh.text || '').split('\n').join(' '));
+      } else {
+        out.push('- **' + (toolName[sh.tool] || sh.tool) + '**' + (sh.color ? '（' + colorName(sh.color) + '）' : ''));
+      }
+    }
+    out.push('');
+  }
+  return out.join('\n');
+}
+
+// 批注导出：CSV 版（给 Excel / 表格工具用）
+function buildNoteCsv() {
+  const s = App.state;
+  const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
+  const q = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""').replace(/\r?\n/g, ' ') + '"';
+  const rows = [['页码', '类型', '颜色', '内容/引用', '评论'].map(q).join(',')];
+  const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length).sort((a, b) => a - b);
+  for (const n of pages) {
+    for (const sh of s.annos.get(n)) {
+      const isText = sh.tool === 'mark' || sh.tool === 'text' || sh.tool === 'note';
+      rows.push([
+        q(n), q(toolName[sh.tool] || sh.tool), q(sh.color || ''),
+        q(isText ? (sh.text || '') : ''), q(sh.tool === 'mark' ? (sh.comment || '') : ''),
+      ].join(','));
+    }
+  }
+  return '﻿' + rows.join('\n');
+}
+
+// 标注颜色的中文名（认不出来的就退回色值本身）
+function colorName(hex) {
+  const map = {
+    '#e53935': '红', '#ff5252': '红', '#f44336': '红',
+    '#ffd54f': '黄', '#ffeb3b': '黄', '#ffca28': '黄',
+    '#81c784': '绿', '#4caf50': '绿', '#43a047': '绿',
+    '#64b5f6': '蓝', '#2196f3': '蓝', '#42a5f5': '蓝',
+    '#ba68c8': '紫', '#9c27b0': '紫', '#ab47bc': '紫',
+    '#ff8a65': '橙', '#ff9800': '橙',
+    '#9e9e9e': '灰', '#607d8b': '灰蓝', '#795548': '棕',
+    '#000000': '黑', '#ffffff': '白',
+  };
+  const k = String(hex || '').toLowerCase();
+  return map[k] || k;
+}
+
+// 「导出批注为笔记」：纯文本 / Markdown / CSV，按页排列
+async function exportAnnoNote(fmt) {
   const s = App.state;
   const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length);
   if (!pages.length) { toast('还没有标注'); return; }
-  const res = await window.pdfBridge.exportNote({ fileName: s.fileName, text: App.buildNoteText() });
-  if (res && res.ok) { toast('笔记已导出'); setStatus('笔记已导出：' + res.path); }
+  const f = fmt || 'txt';
+  const res = await window.pdfBridge.exportNote({ fileName: s.fileName, text: App.buildNoteText(f), fmt: f });
+  if (res && res.ok) { toast('批注已导出'); setStatus('批注已导出：' + res.path); }
   else if (res && res.canceled) setStatus('已取消导出');
   else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));
 }
@@ -750,6 +878,9 @@ async function restoreAnnos(filePath) {
   let saved = null;
   try { saved = await window.pdfBridge.loadAnnos(filePath); } catch (_) {}
   if (!saved || !saved.length) return;
+  // 读盘期间可能已经切到别的文档：这时把上一份文档的标注恢复到新文档里，
+  // 后续任何保存都会把它们写进新文档的标注文件。路径对不上就直接放弃。
+  if (filePath !== App.state.filePath) return;
   const s = App.state;
   for (const entry of saved) {
     const n = Math.min(s.numPages, Math.max(1, entry.page || 1));
@@ -781,10 +912,26 @@ function setNumericScale(next) {
   applyLayout();
 }
 function syncScaleSelect(scale) {
-  const pct = String(Math.round(scale * 100));
   const sel = App.els.scale;
-  const match = Array.from(sel.options).find((o) => o.value === pct);
-  sel.value = match ? match.value : '';
+  if (!sel) return;
+  // option 的 value 是 "0.5"/"1"/"1.25" 这种小数，不是百分比字符串，
+  // 早先拿 Math.round(scale*100) 去匹配，永远匹配不到 → 缩放后下拉框直接空了。
+  let opt = Array.from(sel.options).find((o) => {
+    const v = parseFloat(o.value);
+    return !Number.isNaN(v) && Math.abs(v - scale) < 0.005;
+  });
+  if (!opt) {
+    // 不是预设档位：补一个「自定义 xx%」选项，别让下拉框空着
+    opt = sel.querySelector('option[data-custom="1"]');
+    if (!opt) {
+      opt = document.createElement('option');
+      opt.setAttribute('data-custom', '1');
+      sel.appendChild(opt);
+    }
+    opt.value = String(scale);
+    opt.textContent = '自定义 ' + Math.round(scale * 100) + '%';
+  }
+  sel.value = opt.value;
 }
 
 // ---------- 状态栏 ----------
@@ -1006,6 +1153,9 @@ function bind() {
   document.addEventListener('keydown', (e) => {
     const tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    // 焦点在按钮/链接上时，别抢它的键盘语义：
+    // 早先只排除了输入类元素，按钮上按空格会翻页，还顺手 preventDefault 掉按钮的原生激活。
+    if (e.target && e.target.closest && e.target.closest('button, a, [role="button"], [contenteditable="true"]')) return;
     if (window.LibraryUI && window.LibraryUI.isOpen()) return; // 库开着时方向键不应在后台翻 PDF
     if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { Anno.undo(); e.preventDefault(); return; }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { doSave(); e.preventDefault(); return; }
@@ -1039,6 +1189,8 @@ function bind() {
   document.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
   document.addEventListener('drop', async (e) => {
     e.preventDefault(); e.stopPropagation();
+    // 库覆盖层开着时，拖放由库处理（导入条目），这里不要再顺手把文件打开
+    if (window.LibraryUI && window.LibraryUI.isOpen()) return;
     const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (!file) return;
     if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') { setStatus('请拖入 PDF 文件'); return; }
