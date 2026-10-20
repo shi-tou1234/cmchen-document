@@ -67,6 +67,9 @@
     <button class="ntool tbtn" data-tool="select" title="选择 / 浏览 (Esc)">
       <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 3l12 8-5.2.8 3.1 5.6-2.3 1.3-3.1-5.7L6 18z"/></svg>
     </button>
+    <button class="ntool tbtn" data-tool="image" title="看图：点页面里的图片放大看原图">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m4 17 5-4 4 3 3-2 4 3"/></svg>
+    </button>
     <span class="nsep"></span>
 
     <div class="dd-wrap">
@@ -410,6 +413,8 @@
   <!-- PDF.js UMD 构建，暴露全局 pdfjsLib；worker 文件同目录 -->
   <script src="pdfjs/pdf.min.js"></script>
   <script src="../cite.js"></script>
+  <script src="pdfimages.js"></script>
+  <script src="lightbox.js"></script>
   <script src="annotations.js"></script>
   <script src="selection.js"></script>
   <script src="library-ui.js"></script>

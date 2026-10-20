@@ -199,6 +199,7 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.textCache = new Map();
     s.search = { query: '', results: [], rects: new Map() };
     searchSeq++;              // 作废上一份文档还在跑的搜索
+    pageImageCache = new Map();  // 换文档了，图片位置缓存作废
     if (window.Anno && Anno.reset) Anno.reset();  // 撤销栈不能跨文档
     $('sb-outline')._done = false;
     $('sb-thumbs')._docId = null;
@@ -302,6 +303,7 @@ function closeDocument() {
   if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
   if (App.io) { try { App.io.disconnect(); } catch (_) {} }
   if (App.vo) { try { App.vo.disconnect(); } catch (_) {} }
+  pageImageCache = new Map();
   if (window.Anno && Anno.reset) Anno.reset();   // 撤销栈不能跨文档
   searchSeq++;
   s.pdfDoc = null; s.sourceBytes = null; s.numPages = 0; s.currentPage = 1;
@@ -856,6 +858,78 @@ async function exportAnnoNote(fmt) {
   else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));
 }
 
+// ---------- 看图模式：点页面里的内嵌位图，弹灯箱看原图 ----------
+// 灯箱的缩放/拖拽/捏合/翻页那套交互移植自博客站点的 markdown-image-lightbox
+// （D:\项目\博客站点\src\components\misc\Markdown.astro）。
+let pageImageCache = new Map();   // pageNum -> [{x,y,w,h}]（单位坐标，scale=1）
+
+function getPageImages(pageNum, pdfPage) {
+  if (pageImageCache.has(pageNum)) return Promise.resolve(pageImageCache.get(pageNum));
+  return PdfImages.collect(pdfPage)
+    .then((list) => { pageImageCache.set(pageNum, list); return list; })
+    .catch(() => []);
+}
+
+// 抽不到原图时的兜底：把图所在区域按较高分辨率重渲染再裁出来
+async function renderImageRegion(pdfPage, rect) {
+  try {
+    const vp1 = pdfPage.getViewport({ scale: 1 });
+    const pw = Math.max(1, vp1.width), ph = Math.max(1, vp1.height);
+    let scale = Math.min(4, Math.max(1.5, 1200 / Math.max(1, rect.w)));
+    const cap = Math.sqrt(12e6 / (pw * ph));   // 整页渲染别超过 ~1200 万像素
+    if (scale > cap) scale = cap;
+    const big = pdfPage.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(big.width);
+    canvas.height = Math.ceil(big.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await pdfPage.render({ canvasContext: ctx, viewport: big }).promise;
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(rect.w * scale));
+    out.height = Math.max(1, Math.round(rect.h * scale));
+    out.getContext('2d').drawImage(
+      canvas,
+      Math.round(rect.x * scale), Math.round(rect.y * scale), out.width, out.height,
+      0, 0, out.width, out.height,
+    );
+    return out;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function openImageLightbox(pageEl, clientX, clientY) {
+  const pageNum = +pageEl.dataset.page;
+  const pdfPage = pageEl._pdfPage;
+  if (!pdfPage) return;
+  const s = App.state;
+  const r = pageEl.getBoundingClientRect();
+  const ux = (clientX - r.left) / (s.scale || 1);
+  const uy = (clientY - r.top) / (s.scale || 1);
+  const images = await getPageImages(pageNum, pdfPage);
+  if (!images.length) { toast('这一页没有内嵌位图'); return; }
+  const hit = PdfImages.findAt(images, ux, uy);
+  if (!hit) { toast('这里没有图片（矢量插图用 Ctrl+滚轮 放大即可）'); return; }
+  const list = images.slice(0, 12);
+  const built = [];
+  for (let i = 0; i < list.length; i++) {
+    const c = await PdfImages.extract(pdfPage, list[i]) || await renderImageRegion(pdfPage, list[i]);
+    if (!c) continue;
+    built.push({
+      canvas: c,
+      srcIndex: i,
+      label: '第 ' + pageNum + ' 页 · 图 ' + (i + 1) + (list.length > 1 ? ' / ' + list.length : ''),
+    });
+  }
+  if (!built.length) { toast('这张图取不出来'); return; }
+  const want = list.indexOf(hit);
+  let idx = built.findIndex((b) => b.srcIndex === want);
+  if (idx < 0) idx = 0;
+  Lightbox.open({ items: built, index: idx });
+}
+
 // ---------- 标注自动保存 / 恢复（按文件路径存 userData/annotations/） ----------
 async function saveAnnosNow() {
   const s = App.state;
@@ -1177,6 +1251,16 @@ function bind() {
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     setNumericScale(App.state.scale * factor);
   }, { passive: false });
+
+  // 看图模式：点页面里的图片 → 灯箱放大看原图
+  E.pages.addEventListener('click', (e) => {
+    if (!document.body.classList.contains('tool-image')) return;
+    const pageEl = e.target.closest && e.target.closest('.page');
+    if (!pageEl) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openImageLightbox(pageEl, e.clientX, e.clientY);
+  });
 
   let rt = null;
   window.addEventListener('resize', () => {

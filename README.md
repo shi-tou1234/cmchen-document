@@ -13,7 +13,7 @@
 | 模块 | 能力 |
 |---|---|
 | **文献库** | 条目与元数据 · 标签 · 多级收藏集 · 智能收藏集（保存搜索条件）· 标签选择器 · 回收站与还原 · 查重合并 · 批量编辑 · BibTeX/RIS 导入导出 · DOI/arXiv 元数据抓取 · 复制引用（GB/T 7714-2015 / APA 7） |
-| **阅读器** | 连续滚动 + 懒渲染（400–1200 页实测流畅）· 适应宽度/页面/百分比缩放 · 多标签页 · 记住每份文件的页码 · 目录 / 缩略图 / 批注侧栏 · 文档内全文搜索 · 最近打开 · 单实例 |
+| **阅读器** | 连续滚动 + 懒渲染（400–1200 页实测流畅）· 适应宽度/页面/百分比缩放 · 多标签页 · 记住每份文件的页码 · 目录 / 缩略图 / 批注侧栏 · 文档内全文搜索 · **看图模式：点页面里的图片放大看原图** · 最近打开 · 单实例 |
 | **标注** | 画笔 · 荧光笔 · 直线 · 矩形 · 箭头 · 文字 · 便签 · 橡皮擦 · 撤销 / 清除本页 · 选中文字高亮 + 评论 · 自动保存 · 导出带标注的 PDF 副本 · 导出批注为 **Markdown / CSV / TXT** |
 | **检索** | 库级全文索引（后台自动建，AND 多关键词，片段 + 页码）· 命中结果直接跳页 |
 | **数据** | 全部本地 JSON：库 `library.json`、标注按路径哈希存、全文索引可重建不进备份 · 一键备份 / 恢复（恢复前自动快照）· 数据目录可迁移 / 合并 / 替换 · 浅色 / 深色主题 |
@@ -49,6 +49,8 @@ npm start
 | `Esc` | 取消输入 / 关闭弹窗 / 收起文献库 | | |
 
 文字批注：`Enter` 完成、`Shift+Enter` 换行、`Esc` 取消。
+
+看图：工具栏第二个按钮（放大镜图标）进入「看图」模式，点页面里的图片即弹灯箱——滚轮缩放、拖拽平移、`←` `→` 换图、`Esc` 关闭。
 
 ---
 
@@ -92,6 +94,7 @@ npm start
 | `node scripts/test-reader-plus.js` | 阅读器端到端：文本层 / 搜索 / 缩略图 / 标注恢复（17） |
 | `node scripts/test-bugfix.js` | 跨文档撤销隔离 / 页码指示 / 搜索清空 / 库退路 / 缩放 / 键盘（21） |
 | `node scripts/test-v14.js` | 标签选择器 / 复制引用 / 批注多格式导出（29） |
+| `node scripts/test-imageview.js` | 看图模式：定位内嵌位图 → 灯箱放大 / 缩放 / 翻页 / 关闭（14） |
 | `node scripts/test-packaged.js` | 打包产物冒烟（15） |
 | `electron.exe scripts/test-pen.js` | 画笔：串页 / 悬挂 / 误点 / 抽稀平滑 / 多行 / 竞态 |
 | `electron.exe scripts/test-real-input.js` | 真实鼠标（走命中测试）——合成事件抓不到的那类问题 |
@@ -155,7 +158,7 @@ pdf-reader/
 │  ├─ cite.js            # 引用格式化（GB/T 7714 + APA）
 │  ├─ preload.js         # contextBridge
 │  └─ renderer/          # index.html · styles.css · renderer.js · library-ui.js
-│                        # annotations.js · selection.js
+│                        # annotations.js · selection.js · lightbox.js · pdfimages.js
 ├─ scripts/              # 24 个回归脚本 + 探针 + 打包/图标/样本工具
 └─ assets/               # sample.pdf · icon.ico …
 ```

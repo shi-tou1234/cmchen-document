@@ -1,16 +1,21 @@
-# PDF Reader v11/v12/v13/v14/v15/v16 开发交接文档
+# PDF Reader v11/v12/v13/v14/v15/v16/v17 开发交接文档
 
-> 更新时间：2026-10-20（v16 学术编辑风重做）  
+> 更新时间：2026-10-20（v17 看图模式：点 PDF 图片放大看原图）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 把视觉换成「学术编辑风」并把文献库条目从卡片网格改成表格式紧凑列表。**
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点）。**
 
 ## 收尾后的一句话现状
 
 - 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 43 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
-- v13 起回归脚本共 22 个（新增 `test-bugfix.js` 21 项断言），v14 起共 24 个（新增 `test-cite.js` 33 项、`test-v14.js` 29 项），全部通过。
+- v13 起回归脚本共 22 个（新增 `test-bugfix.js` 21 项断言），v14 起 24 个（新增 `test-cite.js` 33 项、`test-v14.js` 29 项），v17 起 25 个（新增 `test-imageview.js` 14 项），全部通过。
+- **推送方式（v17 实测有效）**：SteamTools 证书那条路现在不通（`sslCAInfo` 指向 SteamTools CA，直连 GitHub 时证书链对不上，报 `unable to get local issuer certificate`）。hosts 里已没有 github 的劫持，直接用系统证书库即可：
+  ```powershell
+  git -c http.sslBackend=schannel push -u origin main
+  ```
 - **文档结构（v15）**：`README.md` 只讲「有什么 / 怎么用 / 怎么测 / 有什么边界」；逐版本演进记录在 `CHANGELOG.md`；交接细节与约定留在本文件。改 README 时不要再往里堆版本流水账。
 - **视觉约定（v16）**：暖纸底 + 墨色字 + 印泥红强调色；衬线标题 / 等宽元信息；发丝线分层，阴影只给浮层；条目是表格行不是卡片。**不要再往回加蓝底、圆角胶囊、软阴影卡片**——那是这轮要推翻的「AI 味」。
+- **跨项目复用（v17）**：图片灯箱的交互（缩放/拖拽/捏合/翻页/计数/滚动锁定）来自博客站点 `D:\项目\博客站点\src\components\misc\Markdown.astro` 的 markdown-image-lightbox，移植到 `src/renderer/lightbox.js`；博客那边只读不改。
 - v13 重新打包（2026-10-20）：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,276,569 B）、`PDF-Reader-Setup-1.0.0.exe`（83,641,859 B，NSIS）。打包冒烟在 win-unpacked 与 portable 上各跑过一遍，都是 PASS(15)；**NSIS 本轮没有在本机静默安装**（避免动用户机器），如需验证安装/卸载请手动跑一次 `/S /currentuser`。
 - 打包产物已产出并冒烟：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,277,787 B）、`PDF-Reader-Setup-1.0.0.exe`（83,635,175 B，NSIS）。
 - 安装 → 已安装版冒烟 → 静默卸载，全部通过（快捷方式/安装目录随之清理）。

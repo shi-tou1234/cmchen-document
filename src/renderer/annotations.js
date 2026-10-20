@@ -447,7 +447,7 @@ const Anno = window.Anno = (() => {
   // ---- 工具切换 + 绘制下拉 ----
   function setTool(t) {
     state.tool = t;
-    document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note');
+    document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image');
     document.body.classList.add('tool-' + t);
     for (const b of document.querySelectorAll('.ntool')) b.classList.toggle('active', b.dataset.tool === t);
     // 「绘制 ▾」按钮：非选择态高亮，并把当前工具图标回填到按钮上

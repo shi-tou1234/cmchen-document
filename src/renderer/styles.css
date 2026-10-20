@@ -616,6 +616,75 @@ body.tool-eraser .textlayer { pointer-events: none; }
 .dup-title { font-family: var(--font-serif); font-weight: 600; color: var(--ink); }
 .dup-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
 
+/* ---------- 看图模式 + 图片灯箱（v17） ---------- */
+body.tool-image .page { cursor: zoom-in; }
+body.tool-image .page .anno { pointer-events: none; cursor: zoom-in; }
+body.tool-image .page .textlayer { pointer-events: none; }
+body.tool-image .ntool.active { background: var(--accent); color: #fff; }
+
+.lb-root {
+  position: fixed; inset: 0; z-index: 120;
+  opacity: 0; pointer-events: none;
+  transition: opacity .16s ease;
+}
+.lb-root.is-open { opacity: 1; pointer-events: auto; }
+.lb-backdrop { position: absolute; inset: 0; background: rgba(20, 17, 13, .88); backdrop-filter: blur(6px); }
+.lb-dialog {
+  position: relative; z-index: 1; width: 100%; height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+.lb-toolbar {
+  position: absolute; top: 14px; left: 16px; right: 16px; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.lb-actions { display: flex; align-items: center; gap: 6px; }
+.lb-counter {
+  min-width: 4.5rem; padding: 5px 10px; border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: var(--r); background: rgba(20, 18, 15, .55); color: rgba(255, 255, 255, .92);
+  font-family: var(--font-mono); font-size: 11.5px; text-align: center;
+}
+.lb-btn, .lb-nav {
+  border: 1px solid rgba(255, 255, 255, .2); background: rgba(20, 18, 15, .58);
+  color: #f2ede4; border-radius: var(--r); cursor: pointer;
+  transition: background .14s ease, border-color .14s ease, color .14s ease, transform .14s ease;
+}
+.lb-btn {
+  min-width: 2.4rem; height: 2.4rem; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; font-family: inherit; line-height: 1;
+}
+.lb-zoom-label { min-width: 4.2rem; padding: 0 8px; font-size: 11.5px; font-family: var(--font-mono); }
+.lb-btn:hover:not(:disabled), .lb-nav:hover:not(:disabled) {
+  background: rgba(30, 27, 22, .9); border-color: rgba(255, 255, 255, .55); color: #fff;
+}
+.lb-btn:disabled, .lb-nav:disabled { opacity: .35; cursor: default; }
+.lb-content {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; overflow: hidden; padding: 62px 66px 54px;
+}
+.lb-content.is-zoomed { cursor: grab; }
+.lb-preview {
+  position: relative; z-index: 1; display: block; max-width: 100%; max-height: 100%;
+  width: auto; height: auto; background: #fff; border-radius: 1px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .5);
+  transform-origin: center center; transition: transform .16s ease;
+  will-change: transform; touch-action: none; user-select: none; -webkit-user-drag: none;
+}
+.lb-preview.is-panning { transition: none; }
+.lb-preview.is-zoomed { cursor: grab; }
+.lb-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 2.8rem; height: 2.8rem; display: inline-flex; align-items: center; justify-content: center;
+  z-index: 12;
+}
+.lb-prev { left: 14px; }
+.lb-next { right: 14px; }
+.lb-nav:disabled { transform: translateY(-50%); }
+.lb-caption {
+  position: absolute; bottom: 16px; left: 0; right: 0; text-align: center;
+  font-family: var(--font-mono); font-size: 11px; color: rgba(255, 255, 255, .62);
+  z-index: 12; pointer-events: none;
+}
+
 /* ---------- 窄窗口：按「表格实际可用宽度」收列（容器查询，比媒体查询准） ----------
    列序：标题 / 作者·年份·来源 / 类型 / 收藏集 / 标签 / 操作 */
 @container (max-width: 820px) {
