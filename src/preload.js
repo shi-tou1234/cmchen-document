@@ -1,0 +1,77 @@
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+contextBridge.exposeInMainWorld('pdfBridge', {
+  // 主应用窗口标记（main.js 的 additionalArguments）；独立测试窗口为 false
+  isApp: process.argv.includes('--pdfreader-app'),
+  // 主动请求主进程弹出打开对话框，返回 { ok, fileName, filePath, startPage, data }
+  openPdfDialog: () => ipcRenderer.invoke('open-pdf-dialog'),
+  // 订阅来自菜单「打开 PDF」/最近文件/命令行 的打开事件
+  onPdfOpened: (cb) => {
+    ipcRenderer.on('pdf-opened', (_e, payload) => cb(payload));
+  },
+  // 拖拽进来的 File 取真实磁盘路径（Electron 32 起 File.path 被移除，必须走 webUtils）
+  pathForFile: (file) => {
+    try { return webUtils.getPathForFile(file) || ''; } catch (_) { return ''; }
+  },
+  // 上报当前页码（主进程按文件记住，下次打开回到同一页）
+  reportPage: (path, page) => ipcRenderer.send('set-page', { path, page }),
+  // 拖拽打开的文件也要进「最近打开」
+  noteRecent: (path, page) => ipcRenderer.invoke('note-recent', { path, page }),
+  // 冒烟模式回报结果
+  reportSmoke: (data) => ipcRenderer.send('smoke-result', data),
+  // 导出带标注的 PDF 副本（payload: { fileName, data, pages, outPath? }）
+  exportPdf: (payload) => ipcRenderer.invoke('export-pdf', payload),
+  // 更新窗口标题
+  setTitle: (t) => ipcRenderer.send('set-title', t),
+  // 标注自动保存 / 恢复（按文件路径）
+  saveAnnos: (path, pages) => ipcRenderer.invoke('anno-save', { path, pages }),
+  loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path }),
+  // 批注导出为纯文本笔记
+  exportNote: (info) => ipcRenderer.invoke('export-note', info),
+  // 应用设置（v11）
+  getSettings: () => ipcRenderer.invoke('settings-get'),
+  setSettings: (patch) => ipcRenderer.invoke('settings-set', patch),
+  // 菜单/主进程改动库后通知库界面刷新
+  onLibChanged: (cb) => { ipcRenderer.on('lib-changed', () => cb()); },
+  onOpenSettings: (cb) => { ipcRenderer.on('open-settings', () => cb()); },
+  // 本地文献库 API
+  lib: {
+    summary: () => ipcRenderer.invoke('lib-summary'),
+    addPdf: (path, opts) => ipcRenderer.invoke('lib-add-pdf', { path, opts }),
+    openItem: (key, page) => ipcRenderer.invoke('lib-open-item', { key, page }),
+    updateItem: (key, patch) => ipcRenderer.invoke('lib-update-item', { key, patch }),
+    // 回收站：removeItem 现在等于“移入回收站”（软删除）
+    removeItem: (key) => ipcRenderer.invoke('lib-remove-item', { key }),
+    trashItem: (key) => ipcRenderer.invoke('lib-trash-item', { key }),
+    restoreItem: (key) => ipcRenderer.invoke('lib-restore-item', { key }),
+    deleteItem: (key) => ipcRenderer.invoke('lib-delete-item', { key }),
+    emptyTrash: () => ipcRenderer.invoke('lib-empty-trash'),
+    addCollection: (name, parentId) => ipcRenderer.invoke('lib-add-collection', { name, parentId }),
+    removeCollection: (id) => ipcRenderer.invoke('lib-remove-collection', { id }),
+    moveItem: (key, collectionId) => ipcRenderer.invoke('lib-move-item', { key, collectionId }),
+    setCollections: (key, collectionIds) => ipcRenderer.invoke('lib-set-collections', { key, collectionIds }),
+    addTag: (key, tag) => ipcRenderer.invoke('lib-add-tag', { key, tag }),
+    removeTag: (key, tag) => ipcRenderer.invoke('lib-remove-tag', { key, tag }),
+    revealItem: (key) => ipcRenderer.invoke('lib-reveal-item', { key }),
+    relinkItem: (key) => ipcRenderer.invoke('lib-relink-item', { key }),
+    // v11：库级全文检索 / 备份 / 数据目录
+    searchFull: (query) => ipcRenderer.invoke('lib-search-full', { query }),
+    ftStatus: () => ipcRenderer.invoke('lib-ft-status'),
+    indexAll: (force) => ipcRenderer.invoke('lib-ft-index', { force: !!force }),
+    ftClear: () => ipcRenderer.invoke('lib-ft-clear'),
+    backup: (outPath) => ipcRenderer.invoke('lib-backup', { outPath }),
+    restore: (filePath) => ipcRenderer.invoke('lib-restore', { path: filePath }),
+    chooseDataDir: (path, mode) => ipcRenderer.invoke('lib-choose-data-dir', { path, mode }),
+    openDataDir: () => ipcRenderer.invoke('lib-open-data-dir'),
+    // v12：元数据 / 文献格式 / 查重 / 批量 / 智能收藏集
+    fetchMetadata: (identifier) => ipcRenderer.invoke('lib-fetch-metadata', { identifier }),
+    importRefs: (text, name) => ipcRenderer.invoke('lib-import-refs', { text, name }),
+    exportRefs: (outPath) => ipcRenderer.invoke('lib-export-refs', { outPath }),
+    duplicates: () => ipcRenderer.invoke('lib-duplicates'),
+    mergeItems: (keepKey, otherKeys) => ipcRenderer.invoke('lib-merge-items', { keepKey, otherKeys }),
+    bulkUpdate: (keys, patch) => ipcRenderer.invoke('lib-bulk-update', { keys, patch }),
+    trashItems: (keys) => ipcRenderer.invoke('lib-trash-items', { keys }),
+    addSearch: (name, query) => ipcRenderer.invoke('lib-add-search', { name, query }),
+    removeSearch: (id) => ipcRenderer.invoke('lib-remove-search', { id }),
+  },
+});

@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data:;" />
+  <title>PDF Reader</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="toolbar">
+    <button id="btn-sidebar" class="tbtn" title="侧栏：目录 / 缩略图 / 批注">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+    </button>
+    <button id="btn-library" class="tbtn" title="文献库">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h3v18H6a2 2 0 0 1-2-2z"/><path d="M9 3h4v18h-4z"/><path d="M13 4l4 1 3 16-4-1z"/></svg>
+      <span>库</span>
+    </button>
+    <span class="sep"></span>
+    <button id="btn-open" class="tbtn" title="打开 PDF (Ctrl+O)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+      <span>打开</span>
+    </button>
+    <span class="sep"></span>
+    <button id="btn-zoom-out" class="tbtn" title="缩小">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8.2 11h5.6"/></svg>
+    </button>
+    <select id="scale-select" title="缩放比例">
+      <option value="page-actual">实际大小</option>
+      <option value="page-fit">适应页面</option>
+      <option value="page-width" selected>适应宽度</option>
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1">100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+      <option value="3">300%</option>
+    </select>
+    <button id="btn-zoom-in" class="tbtn" title="放大">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8.2v5.6M8.2 11h5.6"/></svg>
+    </button>
+    <span class="sep"></span>
+    <button id="btn-prev" class="tbtn" title="上一页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <span id="page-box">
+      <input id="page-input" type="number" min="1" value="1" /><span id="page-count">/ 0</span>
+    </span>
+    <button id="btn-next" class="tbtn" title="下一页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+    <span class="sep"></span>
+    <input id="search-box" type="search" placeholder="搜索全文，回车" title="文档内全文搜索 (Enter)" />
+    <span class="grow"></span>
+    <span id="file-name" class="filename"></span>
+  </div>
+
+  <!-- 多标签页（v12）：点标签切换，× 关闭；不关底层 PDF，只关阅读会话 -->
+  <div id="tabbar" hidden>
+    <div id="tabs"></div>
+    <button id="tab-new" class="tbtn tab-new" title="打开新标签页">＋</button>
+  </div>
+
+  <!-- 标注工具栏：绘制工具收进「绘制 ▾」下拉，保持 Edge 简洁 -->
+  <div id="notetools">
+    <button class="ntool tbtn" data-tool="select" title="选择 / 浏览 (Esc)">
+      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 3l12 8-5.2.8 3.1 5.6-2.3 1.3-3.1-5.7L6 18z"/></svg>
+    </button>
+    <span class="nsep"></span>
+
+    <div class="dd-wrap">
+      <button id="draw-btn" class="dd-btn tbtn" title="绘制工具" aria-haspopup="true" aria-expanded="false">
+        <span id="draw-current" class="dd-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg></span>
+        <span>绘制</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="draw-pop" class="dd-pop" hidden>
+        <div class="dd-tools">
+          <button class="ntool tbtn" data-tool="pen" title="画笔">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="highlight" title="荧光笔">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6-8 8H6v-6z"/><path d="M4 20h11"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="line" title="直线">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="rect" title="矩形">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="arrow" title="箭头">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M12 5h7v7"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="text" title="文字">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19l6-13 6 13"/><path d="M8.6 13.5h6.8"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="eraser" title="橡皮擦">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5l7-7 6 6-4.5 4.5H8z"/><path d="M4 20.5h16"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="note" title="便签（点击页面落一个气泡便签）">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v10l-6 6H5z"/><path d="M13 20v-6h6"/></svg>
+          </button>
+        </div>
+        <div class="dd-divider"></div>
+        <div class="dd-style">
+          <label class="nlbl" title="标注颜色"><input id="note-color" type="color" value="#e53935" /></label>
+          <label class="nlbl">粗细
+            <select id="note-width">
+              <option value="1.5">细</option>
+              <option value="3" selected>中</option>
+              <option value="6">粗</option>
+              <option value="14">荧光</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <span class="nsep"></span>
+    <button id="btn-undo" class="tbtn" title="撤销 (Ctrl+Z)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7L4 11l4 4"/><path d="M4 11h11a4 4 0 0 1 0 8h-3"/></svg>
+    </button>
+    <button id="btn-clear-page" class="tbtn" title="清除本页标注">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M6.5 7l1 12h9l1-12"/></svg>
+    </button>
+    <span class="grow"></span>
+    <button id="btn-save" class="tbtn accent" title="把标注导出为一个新的 PDF 副本">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>
+      <span>导出副本</span>
+    </button>
+  </div>
+
+  <!-- 侧栏：目录 / 缩略图 / 批注列表 -->
+  <div id="main-row">
+    <div id="sidebar" hidden>
+      <div id="sb-tabs">
+        <button class="sb-tab active" data-tab="outline">目录</button>
+        <button class="sb-tab" data-tab="thumbs">缩略图</button>
+        <button class="sb-tab" data-tab="annos">批注</button>
+      </div>
+      <div id="sb-panel">
+        <div id="sb-outline" class="sb-pane"></div>
+        <div id="sb-thumbs" class="sb-pane" hidden></div>
+        <div id="sb-annos" class="sb-pane" hidden></div>
+      </div>
+    </div>
+
+  <div id="viewer">
+    <div id="pages"></div>
+    <div id="empty-hint">打开或拖拽一个 PDF 文件开始阅读</div>
+  </div>
+  </div><!-- /main-row -->
+
+  <div id="statusbar">
+    <span id="status-text">就绪</span>
+    <span class="grow"></span>
+    <span id="zoom-text"></span>
+  </div>
+
+  <!-- 文献库覆盖层（独立于阅读器；点条目经 loadPdf 钩子进入阅读） -->
+  <div id="library" hidden>
+    <aside id="lib-side">
+      <input id="lib-search" type="search" placeholder="搜索标题 / 作者 / 全文…" />
+      <div id="lib-collections"></div>
+      <button id="lib-new-coll" class="tbtn lib-side-btn">＋ 新建收藏集</button>
+      <div class="lib-side-sep"></div>
+      <div id="lib-searches"></div>
+      <button id="lib-save-search" class="tbtn lib-side-btn" hidden>＋ 保存当前搜索</button>
+    </aside>
+    <section id="lib-main">
+      <header id="lib-head">
+        <span id="lib-scope-title">全部条目</span>
+        <span id="lib-count" class="lib-count"></span>
+        <span class="grow"></span>
+        <label class="lib-selectall" title="全选当前列表"><input id="lib-select-all" type="checkbox" />全选</label>
+        <label class="lib-sort-wrap">排序
+          <select id="lib-sort" title="条目排序">
+            <option value="added">添加时间</option>
+            <option value="modified">最近修改</option>
+            <option value="title">标题</option>
+            <option value="year">年份</option>
+          </select>
+        </label>
+        <button id="lib-dup" class="tbtn" title="按 DOI / 标题+年份查重">查重</button>
+        <button id="lib-import-refs" class="tbtn" title="导入 BibTeX / RIS">导入文献</button>
+        <button id="lib-export-refs" class="tbtn" title="导出 BibTeX / RIS">导出文献</button>
+        <button id="lib-settings" class="tbtn" title="设置 / 备份 / 全文索引">⚙ 设置</button>
+        <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
+        <button id="lib-import" class="tbtn accent">导入 PDF</button>
+      </header>
+      <div id="lib-bulk" class="lib-bulk" hidden>
+        <span id="lib-bulk-count"></span>
+        <button id="lib-bulk-edit" class="tbtn">批量编辑</button>
+        <button id="lib-bulk-trash" class="tbtn danger">移入回收站</button>
+        <button id="lib-bulk-clear" class="tbtn">取消选择</button>
+      </div>
+      <div id="lib-ft" class="lib-ft" hidden></div>
+      <div id="lib-grid"></div>
+      <div id="lib-empty" hidden>还没有条目。点右上角「导入 PDF」，或把 PDF 直接拖进来。</div>
+    </section>
+
+    <!-- 右侧条目详情：对齐 Zotero 的 Info 面板，元数据/标签/收藏集/附件都从这里改 -->
+    <aside id="lib-detail" hidden>
+      <header id="ld-head">
+        <span id="ld-kind">条目详情</span>
+        <span class="grow"></span>
+        <button id="ld-close" class="ld-x" title="关闭详情">✕</button>
+      </header>
+      <div id="ld-body">
+        <label class="ld-row"><span class="ld-lbl">类型</span><select id="ld-type"></select></label>
+        <label class="ld-row"><span class="ld-lbl">标题</span><input id="ld-title" type="text" placeholder="条目标题" /></label>
+        <label class="ld-row"><span class="ld-lbl">作者</span><input id="ld-creators" type="text" placeholder="多作者用逗号分隔" /></label>
+        <div class="ld-grid2">
+          <label class="ld-row"><span class="ld-lbl">年份</span><input id="ld-year" type="text" placeholder="2024" /></label>
+          <label class="ld-row"><span class="ld-lbl">出版物</span><input id="ld-publication" type="text" placeholder="期刊 / 会议 / 出版社" /></label>
+        </div>
+        <div class="ld-grid3">
+          <label class="ld-row"><span class="ld-lbl">卷</span><input id="ld-volume" type="text" /></label>
+          <label class="ld-row"><span class="ld-lbl">期</span><input id="ld-issue" type="text" /></label>
+          <label class="ld-row"><span class="ld-lbl">页码</span><input id="ld-pages" type="text" placeholder="1-12" /></label>
+        </div>
+        <div class="ld-grid2">
+          <label class="ld-row"><span class="ld-lbl">DOI</span><input id="ld-doi" type="text" /></label>
+          <label class="ld-row"><span class="ld-lbl">链接</span><input id="ld-url" type="text" placeholder="https://" /></label>
+        </div>
+        <div id="ld-fetch-row" class="ld-fetch-row">
+          <button id="ld-fetch" class="ld-mini">从 DOI / arXiv 抓取元数据</button>
+          <span id="ld-fetch-status" class="ld-hint"></span>
+        </div>
+        <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
+        <label class="ld-row"><span class="ld-lbl">笔记</span><textarea id="ld-note" rows="3" placeholder="读后笔记"></textarea></label>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">标签</div>
+          <div id="ld-tags" class="ld-tags"></div>
+          <div class="ld-inline">
+            <input id="ld-tag-input" type="text" placeholder="输入标签，回车添加" />
+            <button id="ld-tag-add" class="ld-mini">添加</button>
+          </div>
+        </div>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">收藏集 <span class="ld-hint">可同时属于多个</span></div>
+          <div id="ld-colls" class="ld-colls"></div>
+        </div>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">附件</div>
+          <div id="ld-attach" class="ld-attach"></div>
+        </div>
+
+        <div id="ld-dates" class="ld-dates"></div>
+      </div>
+      <footer id="ld-foot">
+        <span id="ld-status" class="ld-status"></span>
+        <span class="grow"></span>
+        <button id="ld-save" class="ld-btn primary">保存</button>
+        <button id="ld-trash" class="ld-btn danger">移入回收站</button>
+        <button id="ld-restore" class="ld-btn" hidden>还原</button>
+        <button id="ld-delete" class="ld-btn danger" hidden>永久删除</button>
+      </footer>
+    </aside>
+  </div>
+
+  <!-- 文字批注输入框（绝对定位到页面点击处） -->
+  <textarea id="text-editor" rows="1" spellcheck="false" placeholder="Enter 完成 · Esc 取消" hidden></textarea>
+
+  <!-- 选中文字后的浮动工具条（v11） -->
+  <div id="sel-bar" hidden>
+    <button class="sel-btn" data-sel="highlight">高亮</button>
+    <button class="sel-btn" data-sel="comment">高亮 + 评论</button>
+    <input id="sel-color" type="color" value="#ffd54f" title="高亮颜色" />
+  </div>
+
+  <!-- 设置 / 备份 / 全文索引 -->
+  <div id="settings-modal" class="modal" hidden>
+    <div class="modal-card">
+      <header class="modal-head">
+        <span>设置</span>
+        <span class="grow"></span>
+        <button id="settings-close" class="ld-x" title="关闭">✕</button>
+      </header>
+      <div class="modal-body">
+        <div class="set-grid2">
+          <label class="ld-row"><span class="ld-lbl">主题</span>
+            <select id="set-theme">
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+              <option value="system">跟随系统</option>
+            </select>
+          </label>
+          <label class="ld-row"><span class="ld-lbl">默认排序</span>
+            <select id="set-sort">
+              <option value="added">添加时间</option>
+              <option value="modified">最近修改</option>
+              <option value="title">标题</option>
+              <option value="year">年份</option>
+            </select>
+          </label>
+        </div>
+        <label class="set-check"><input id="set-auto-index" type="checkbox" /> 启动时自动建立全文索引</label>
+
+        <div class="set-sec">
+          <div class="set-title">存储位置 <span class="ld-hint">library.json 与全文索引所在目录</span></div>
+          <code id="set-data-dir" class="set-path"></code>
+          <div class="set-actions">
+            <button id="set-change-dir" class="ld-mini">更改位置…</button>
+            <button id="set-open-dir" class="ld-mini">打开目录</button>
+          </div>
+        </div>
+
+        <div class="set-sec">
+          <div class="set-title">备份与恢复 <span class="ld-hint">包含元数据、收藏集与标注；不含 PDF 原文件</span></div>
+          <div class="set-actions">
+            <button id="set-backup" class="ld-btn primary">一键备份…</button>
+            <button id="set-restore" class="ld-btn">从备份恢复…</button>
+          </div>
+          <div class="ld-hint">恢复前会自动把当前库快照到 <code>backups/pre-restore-*.json</code>。</div>
+        </div>
+
+        <div class="set-sec">
+          <div class="set-title">全文索引 <span id="set-ft-status" class="ld-hint">读取中…</span></div>
+          <div class="set-actions">
+            <button id="set-index" class="ld-mini">补建索引</button>
+            <button id="set-reindex" class="ld-mini">全部重建</button>
+            <button id="set-ft-clear" class="ld-mini danger">清空索引</button>
+          </div>
+        </div>
+        <div id="set-status" class="set-status"></div>
+      </div>
+      <footer class="modal-foot">
+        <span class="grow"></span>
+        <button id="set-save" class="ld-btn primary">保存设置</button>
+        <button id="set-close" class="ld-btn">关闭</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 查重 -->
+  <div id="dup-modal" class="modal" hidden>
+    <div class="modal-card wide">
+      <header class="modal-head"><span>重复条目</span><span class="grow"></span>
+        <button id="dup-close" class="ld-x" title="关闭">✕</button></header>
+      <div id="dup-body" class="modal-body"></div>
+      <footer class="modal-foot"><span id="dup-status" class="set-status"></span><span class="grow"></span>
+        <button id="dup-close2" class="ld-btn">关闭</button></footer>
+    </div>
+  </div>
+
+  <!-- 批量编辑 -->
+  <div id="bulk-modal" class="modal" hidden>
+    <div class="modal-card">
+      <header class="modal-head"><span id="bulk-title">批量编辑</span><span class="grow"></span>
+        <button id="bulk-close" class="ld-x" title="关闭">✕</button></header>
+      <div class="modal-body">
+        <div class="set-grid2">
+          <label class="ld-row"><span class="ld-lbl">类型（留空不改）</span><select id="bulk-type"><option value="">不改</option></select></label>
+          <label class="ld-row"><span class="ld-lbl">年份（留空不改）</span><input id="bulk-year" type="text" /></label>
+        </div>
+        <label class="ld-row"><span class="ld-lbl">出版物（留空不改）</span><input id="bulk-publication" type="text" /></label>
+        <div class="set-grid2">
+          <label class="ld-row"><span class="ld-lbl">添加标签（逗号分隔）</span><input id="bulk-add-tags" type="text" /></label>
+          <label class="ld-row"><span class="ld-lbl">移除标签（逗号分隔）</span><input id="bulk-remove-tags" type="text" /></label>
+        </div>
+        <label class="ld-row"><span class="ld-lbl">添加到收藏集</span><select id="bulk-add-coll"><option value="">不添加</option></select></label>
+        <div id="bulk-status" class="set-status"></div>
+      </div>
+      <footer class="modal-foot"><span class="grow"></span>
+        <button id="bulk-save" class="ld-btn primary">应用</button>
+        <button id="bulk-cancel" class="ld-btn">取消</button></footer>
+    </div>
+  </div>
+
+  <!-- 高亮评论编辑 -->
+  <div id="comment-modal" class="modal" hidden>
+    <div class="modal-card small">
+      <header class="modal-head"><span id="comment-title">高亮评论</span><span class="grow"></span>
+        <button id="comment-x" class="ld-x" title="关闭">✕</button></header>
+      <div class="modal-body">
+        <textarea id="comment-text" rows="5" placeholder="写点评论…"></textarea>
+        <div class="ld-hint" id="comment-quote"></div>
+      </div>
+      <footer class="modal-foot"><span class="grow"></span>
+        <button id="comment-save" class="ld-btn primary">保存评论</button>
+        <button id="comment-cancel" class="ld-btn">取消</button></footer>
+    </div>
+  </div>
+
+  <!-- PDF.js UMD 构建，暴露全局 pdfjsLib；worker 文件同目录 -->
+  <script src="pdfjs/pdf.min.js"></script>
+  <script src="annotations.js"></script>
+  <script src="selection.js"></script>
+  <script src="library-ui.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "name": "pdf-reader",
+  "version": "1.0.0",
+  "description": "轻量 PDF 阅读器（阅读 + 缩放 + 翻页导航）",
+  "main": "src/main.js",
+  "author": "me",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "copy-pdfjs": "node scripts/copy-pdfjs.js",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "3.11.174"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.me.pdfreader",
+    "productName": "PDF Reader",
+    "npmRebuild": false,
+    "directories": {
+      "output": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "!assets/icon-source.png",
+      "node_modules/pdf-lib/**/*",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
+    }
+  }
+}

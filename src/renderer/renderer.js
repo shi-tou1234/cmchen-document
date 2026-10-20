@@ -1,0 +1,1052 @@
+'use strict';
+
+// ---------- PDF.js worker ----------
+if (window.pdfjsLib) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdfjs/pdf.worker.min.js';
+}
+
+const $ = (id) => document.getElementById(id);
+
+const App = window.App = {
+  state: {
+    pdfDoc: null,
+    sourceBytes: null,   // Uint8Array，导出副本时回传给主进程
+    numPages: 0,
+    currentPage: 1,
+    scaleMode: 'page-width',
+    scale: 1,            // 已解析的实际缩放倍数
+    unitMaxW: 1, unitMaxH: 1,
+    fileName: '',
+    filePath: '',
+    annos: new Map(),    // pageNum -> shape[]
+    rendered: new Map(), // pageNum -> bool
+    visible: new Set(),  // 当前视口内的页
+    textCache: new Map(), // pageNum -> TextItem[]
+    search: { query: '', results: [], rects: new Map() }, // rects: pageNum -> [{x,y,w,h}]
+  },
+  tabs: [],          // v12：多标签页会话（内存里保留原始字节，切换不重新读盘）
+  activeTabId: null,
+  tabSeq: 0,
+  els: {},
+  io: null,
+  pageEl: (n) => document.getElementById('page-' + n),
+};
+
+// ---------- 尺寸 / 缩放 ----------
+function availW() { return Math.max(200, App.els.viewer.clientWidth - 32); }
+function availH() { return Math.max(200, App.els.viewer.clientHeight - 32); }
+
+function computeScale() {
+  const s = App.state;
+  if (s.scaleMode === 'page-actual') return 1;
+  if (s.scaleMode === 'page-width') return availW() / s.unitMaxW;
+  if (s.scaleMode === 'page-fit') return Math.min(availW() / s.unitMaxW, availH() / s.unitMaxH);
+  return parseFloat(s.scaleMode) || 1;
+}
+
+// 布局：设置每页 CSS 尺寸（占位稳定，滚动不跳动），重排已渲染页
+function applyLayout() {
+  const s = App.state;
+  s.scale = computeScale();
+  for (let n = 1; n <= s.numPages; n++) {
+    const el = App.pageEl(n);
+    if (!el) continue;
+    const u = el._unit;
+    const w = Math.round(u.w * s.scale), h = Math.round(u.h * s.scale);
+    el.style.width = w + 'px';
+    el.style.height = h + 'px';
+    const base = el.querySelector('.anno-base'), anno = el.querySelector('.anno');
+    for (const svg of [base, anno]) { if (svg) { svg.style.width = w + 'px'; svg.style.height = h + 'px'; } }
+    // 文本层 / 搜索高亮层与 SVG 同策略：内部用单位坐标，外层用 scale 拉伸
+    for (const cls of ['.textlayer', '.hl-layer']) {
+      const ly = el.querySelector(cls);
+      if (ly) { ly.style.width = u.w + 'px'; ly.style.height = u.h + 'px'; ly.style.transform = 'scale(' + s.scale + ')'; }
+    }
+    if (s.rendered.get(n)) renderPageNum(n);
+  }
+  App.els.zoom.textContent = Math.round(s.scale * 100) + '%';
+}
+
+// ---------- 懒渲染 ----------
+function renderPageNum(n) {
+  const s = App.state;
+  const el = App.pageEl(n);
+  if (!el || !el._pdfPage) return;
+  const dpr = window.devicePixelRatio || 1;
+  const viewport = el._pdfPage.getViewport({ scale: s.scale });
+  const canvas = el.querySelector('canvas');
+  canvas.width = Math.floor(viewport.width * dpr);
+  canvas.height = Math.floor(viewport.height * dpr);
+  canvas.style.width = Math.floor(viewport.width) + 'px';
+  canvas.style.height = Math.floor(viewport.height) + 'px';
+  const ctx = canvas.getContext('2d');
+  if (el._task) { try { el._task.cancel(); } catch (_) {} }
+  el._task = el._pdfPage.render({
+    canvasContext: ctx, viewport,
+    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+  });
+  el._task.promise.then(() => {
+    s.rendered.set(n, true);
+    buildTextLayer(n);   // 首次渲染后铺设可选中文本层（幂等）
+    paintSearchHl(n);    // 若该页有搜索命中，画高亮
+  }).catch((err) => {
+    // 只把「主动取消」当正常；其余错误必须冒出来，否则会出现「页面永远空白」这类静默故障
+    const msg = err && err.message ? err.message : String(err);
+    if (!/cancel/i.test(msg)) console.error('[render] page ' + n + ' failed:', msg);
+  });
+}
+
+function freePage(n) {
+  const el = App.pageEl(n);
+  if (!el) return;
+  if (el._task) { try { el._task.cancel(); } catch (_) {} el._task = null; }
+  const canvas = el.querySelector('canvas');
+  if (canvas) { canvas.width = 0; canvas.height = 0; }
+  App.state.rendered.set(n, false);
+}
+
+function setupObserver() {
+  App.io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const n = +e.target.dataset.page;
+      if (e.isIntersecting) {
+        App.state.visible.add(n);
+        if (!App.state.rendered.get(n)) renderPageNum(n);
+        updateCurrentPage(n);
+      } else {
+        App.state.visible.delete(n);
+        // 远离视口的页释放位图内存（标注在 SVG 层，不受影响）
+        freePage(n);
+      }
+    }
+  }, { root: App.els.viewer, rootMargin: '600px 0px' });
+}
+
+function updateCurrentPage(n) {
+  if (n !== App.state.currentPage) {
+    App.state.currentPage = n;
+    App.els.pageInput.value = String(n);
+    syncActiveTab();
+    schedulePageReport();
+    markCurrentThumb();
+  }
+}
+
+// 连续滚动时页码变化很密，去抖后再写盘，避免每次换页都落一次文件
+let pageReportTimer = null;
+function schedulePageReport() {
+  clearTimeout(pageReportTimer);
+  pageReportTimer = setTimeout(() => {
+    if (App.state.filePath && window.pdfBridge.reportPage) {
+      window.pdfBridge.reportPage(App.state.filePath, App.state.currentPage);
+    }
+  }, 500);
+}
+
+// ---------- 载入 PDF ----------
+async function loadPdf(data, fileName, smoke, meta) {
+  const s = App.state;
+  const m = meta || {};
+  try {
+    setStatus('解析中…');
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const task = window.pdfjsLib.getDocument({ data: bytes });
+    const pdfDoc = await task.promise;
+    if (s.pdfDoc) { try { await s.pdfDoc.destroy(); } catch (_) {} }
+
+    // 重置
+    s.pdfDoc = pdfDoc;
+    s.sourceBytes = bytes;
+    s.numPages = pdfDoc.numPages;
+    s.currentPage = 1;
+    s.fileName = fileName || '';
+    s.filePath = m.filePath || '';
+    s.annos = new Map();
+    s.rendered = new Map();
+    s.visible = new Set();
+    s.textCache = new Map();
+    s.search = { query: '', results: [], rects: new Map() };
+    $('sb-outline')._done = false;
+    $('sb-thumbs')._docId = null;
+    document.body.classList.add('has-doc');
+    App.els.pageCount.textContent = '/ ' + pdfDoc.numPages;
+    App.els.pageInput.max = String(pdfDoc.numPages);
+    App.els.fileName.textContent = s.fileName;
+    if (window.pdfBridge.setTitle) window.pdfBridge.setTitle(s.fileName);
+    if (App.io) App.io.disconnect();
+    // 观察器必须先于页面块建立：buildPageBlocks 里会对每个页块调用 observe()，
+    // 早先顺序颠倒导致首次加载时 App.io 仍为 null —— 一个元素都没被观察，
+    // 滚轮滚动时后续页面永不渲染（◀▶/页码框因 scrollToPage 内部会强制渲染而看不出来）。
+    setupObserver();
+    await buildPageBlocks(pdfDoc);
+    applyLayout();
+    const start = Math.min(pdfDoc.numPages, Math.max(1, m.startPage || 1));
+    s.startPage = start;
+    scrollToPage(start, true);
+    setStatus(`${s.fileName} · 共 ${pdfDoc.numPages} 页`);
+    if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
+    if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
+    if (window.LibraryUI) window.LibraryUI.hide(); // 进入阅读，收起库覆盖层
+    restoreAnnos(s.filePath);   // 恢复该文件上次保存的标注（异步，不阻塞首屏）
+    refreshSidebar();           // 侧栏若开着，立刻按新文档重建
+
+    syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
+    renderTabs();
+    if (smoke) runSmoke(fileName);
+  } catch (err) {
+    App.lastLoadError = String(err && err.stack || err);
+    console.error(err);
+    setStatus('打开失败：' + (err && err.message ? err.message : err));
+    if (smoke) window.pdfBridge.reportSmoke({ ok: false, error: String(err && err.message ? err.message : err) });
+  }
+}
+
+// ---------- 多标签页（v12） ----------
+// 每个标签保留原始字节和页码；切换时重载当前阅读区，不重新读盘。
+// 关闭标签只关阅读会话，不删 PDF、不删标注文件。
+function tabById(id) { return App.tabs.find((t) => t.id === id) || null; }
+// 注意：侧栏也有一个 activeTab()（返回 outline/thumbs/annos），这里用 currentTab() 区分。
+function currentTab() { return tabById(App.activeTabId); }
+
+function syncActiveTab(extra) {
+  const t = currentTab();
+  if (!t) return;
+  t.page = Math.max(1, App.state.currentPage || t.page || 1);
+  if (App.state.fileName) t.fileName = App.state.fileName;
+  if (App.state.filePath) t.filePath = App.state.filePath;
+  if (extra) Object.assign(t, extra);
+}
+
+function makeTab(payload) {
+  const raw = payload.data;
+  const data = raw instanceof Uint8Array ? raw.slice() : new Uint8Array(raw);
+  return {
+    id: 'tab-' + (++App.tabSeq),
+    fileName: payload.fileName || '未命名.pdf',
+    filePath: payload.filePath || '',
+    itemKey: payload.itemKey || '',
+    data,
+    page: Math.max(1, Math.floor(+payload.startPage || 1)),
+  };
+}
+
+function renderTabs() {
+  const bar = $('tabbar'), host = $('tabs');
+  if (!bar || !host) return;
+  bar.hidden = App.tabs.length === 0;
+  host.innerHTML = App.tabs.map((t) =>
+    '<div class="tab' + (t.id === App.activeTabId ? ' active' : '') + '" data-tab-id="' + t.id + '" title="' + escHtml(t.filePath || t.fileName) + '">' +
+    '<span class="tab-title">' + escHtml(t.fileName || '未命名.pdf') + '</span>' +
+    '<button class="tab-x" data-tab-close="' + t.id + '" title="关闭标签页">✕</button>' +
+    '</div>').join('');
+}
+
+function loadTab(tab) {
+  if (!tab) return;
+  App.activeTabId = tab.id;
+  loadPdf(tab.data.slice(), tab.fileName, false, {
+    filePath: tab.filePath, itemKey: tab.itemKey, startPage: tab.page,
+  });
+}
+
+function switchTab(id, page) {
+  const t = tabById(id);
+  if (!t) return;
+  if (id === App.activeTabId) {
+    if (page) scrollToPage(page);
+    return;
+  }
+  syncActiveTab();
+  App.flushAnnos();
+  if (page) t.page = Math.max(1, Math.floor(+page || 1));
+  loadTab(t);
+}
+
+function closeDocument() {
+  const s = App.state;
+  if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
+  if (App.io) { try { App.io.disconnect(); } catch (_) {} }
+  s.pdfDoc = null; s.sourceBytes = null; s.numPages = 0; s.currentPage = 1;
+  s.fileName = ''; s.filePath = ''; s.startPage = 1;
+  s.annos = new Map(); s.rendered = new Map(); s.visible = new Set(); s.textCache = new Map();
+  if (App.els.pages) App.els.pages.innerHTML = '';
+  if (App.els.pageCount) App.els.pageCount.textContent = '/ 0';
+  if (App.els.pageInput) { App.els.pageInput.value = '1'; App.els.pageInput.max = '1'; }
+  if (App.els.fileName) App.els.fileName.textContent = '';
+  document.body.classList.remove('has-doc');
+  setStatus('就绪');
+  renderTabs();
+  if (window.LibraryUI && window.pdfBridge.isApp) window.LibraryUI.show();
+}
+
+function closeTab(id) {
+  const idx = App.tabs.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  const wasActive = App.tabs[idx].id === App.activeTabId;
+  if (wasActive) { syncActiveTab(); App.flushAnnos(); }
+  App.tabs.splice(idx, 1);
+  if (!App.tabs.length) {
+    App.activeTabId = null;
+    closeDocument();
+    return;
+  }
+  if (wasActive) {
+    const next = App.tabs[Math.min(idx, App.tabs.length - 1)];
+    loadTab(next);
+  } else renderTabs();
+}
+
+// 文献库/菜单/拖拽统一入口。同一路径已经打开时直接切过去，避免开一堆重复标签。
+function openDocument(payload, opts) {
+  const o = opts || {};
+  if (!payload || !payload.ok) return;
+  if (payload.smoke) { loadPdf(payload.data, payload.fileName, true, payload); return; }
+  const p = payload.filePath || '';
+  const same = p ? App.tabs.find((t) => t.filePath === p) : null;
+  if (same && !o.forceNew) {
+    if (same.id === App.activeTabId) {
+      if (payload.startPage) scrollToPage(payload.startPage);
+    } else switchTab(same.id, payload.startPage);
+    return;
+  }
+  let tab;
+  if (!o.newTab && currentTab()) {
+    tab = currentTab();
+    const raw = payload.data;
+    tab.data = raw instanceof Uint8Array ? raw.slice() : new Uint8Array(raw);
+    tab.fileName = payload.fileName || tab.fileName;
+    tab.filePath = p;
+    tab.itemKey = payload.itemKey || '';
+    tab.page = Math.max(1, Math.floor(+payload.startPage || 1));
+  } else {
+    tab = makeTab(payload);
+    App.tabs.push(tab);
+  }
+  App.activeTabId = tab.id;
+  loadPdf(tab.data.slice(), tab.fileName, false, Object.assign({}, payload, {
+    startPage: tab.page, filePath: tab.filePath, itemKey: tab.itemKey,
+  }));
+}
+App.openDocument = openDocument;
+App.switchTab = switchTab;
+App.closeTab = closeTab;
+App.renderTabs = renderTabs;
+
+
+async function buildPageBlocks(pdfDoc) {
+  const s = App.state;
+  const host = App.els.pages;
+  host.innerHTML = '';
+  s.unitMaxW = 1; s.unitMaxH = 1;
+  const dims = [];
+  for (let n = 1; n <= s.numPages; n++) {
+    const page = await pdfDoc.getPage(n);
+    const vp = page.getViewport({ scale: 1 });
+    dims.push({ page, w: vp.width, h: vp.height });
+    s.unitMaxW = Math.max(s.unitMaxW, vp.width);
+    s.unitMaxH = Math.max(s.unitMaxH, vp.height);
+  }
+  for (let i = 0; i < dims.length; i++) {
+    const n = i + 1, { page, w, h } = dims[i];
+    const el = document.createElement('div');
+    el.className = 'page';
+    el.id = 'page-' + n;
+    el.dataset.page = String(n);
+    el.style.width = w + 'px'; el.style.height = h + 'px';
+    const canvas = document.createElement('canvas');
+    const base = mkSvg('anno-base', w, h);
+    const anno = mkSvg('anno', w, h);
+    const textlayer = document.createElement('div');
+    textlayer.className = 'textlayer';
+    textlayer.style.width = w + 'px'; textlayer.style.height = h + 'px';
+    const hlLayer = document.createElement('div');
+    hlLayer.className = 'hl-layer';
+    hlLayer.style.width = w + 'px'; hlLayer.style.height = h + 'px';
+    el.appendChild(canvas); el.appendChild(base); el.appendChild(textlayer); el.appendChild(hlLayer); el.appendChild(anno);
+    el._pdfPage = page; el._unit = { w, h }; el._task = null;
+    host.appendChild(el);
+    Anno.attachPage(el, n, anno);
+    App.io.observe(el); // 不加三元兜底：观察器缺失应当直接抛错暴露，而不是静默变成空白页
+  }
+}
+
+function mkSvg(cls, unitW, unitH) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', cls);
+  svg.setAttribute('viewBox', `0 0 ${unitW} ${unitH}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  return svg;
+}
+
+// ---------- 文本层（选中/复制）与全文搜索 ----------
+async function getTextContent(n) {
+  const s = App.state;
+  if (s.textCache.has(n)) return s.textCache.get(n);
+  const el = App.pageEl(n);
+  if (!el || !el._pdfPage) return [];
+  const tc = await el._pdfPage.getTextContent();
+  const items = (tc && tc.items) || [];
+  s.textCache.set(n, items);
+  return items;
+}
+
+// 铺设可选中文本：span 用单位坐标定位在 .textlayer 里（层本身被 scale 拉伸），
+// color 透明 → 平时不挡视觉，浏览器原生选中/Ctrl+C 直接可用。
+async function buildTextLayer(n) {
+  const el = App.pageEl(n);
+  if (!el || !el._pdfPage || el._textDone) return;
+  el._textDone = true;
+  const host = el.querySelector('.textlayer');
+  if (!host) return;
+  const vp = el._pdfPage.getViewport({ scale: 1 });
+  let items;
+  try { items = await getTextContent(n); } catch (_) { items = []; }
+  const frag = document.createDocumentFragment();
+  for (const item of items) {
+    if (!item || !item.str) continue;
+    const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
+    const fh = Math.hypot(tx[2], tx[3]);
+    if (!fh || !isFinite(fh)) continue;
+    const span = document.createElement('span');
+    span.textContent = item.str;
+    span.style.left = tx[4] + 'px';
+    span.style.top = (tx[5] - fh) + 'px';
+    span.style.fontSize = fh + 'px';
+    const ang = Math.atan2(tx[1], tx[0]);
+    if (Math.abs(ang) > 0.001) span.style.transform = 'rotate(' + ang + 'rad)';
+    frag.appendChild(span);
+  }
+  host.appendChild(frag);
+}
+
+// 画当前页的搜索命中高亮（rect 存单位坐标）
+function paintSearchHl(n) {
+  const el = App.pageEl(n);
+  if (!el) return;
+  const host = el.querySelector('.hl-layer');
+  if (!host) return;
+  host.innerHTML = '';
+  const rects = App.state.search.rects.get(n) || [];
+  for (const r of rects) {
+    const d = document.createElement('div');
+    d.className = 'hl';
+    d.style.left = r.x + 'px'; d.style.top = r.y + 'px';
+    d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
+    host.appendChild(d);
+  }
+}
+
+// 全文搜索：遍历所有页文本，命中处生成「跳转结果 + 单位坐标高亮矩形」。
+// 限制：命中必须落在单个文本项内（跨行/跨项的关键词匹配不到，和 PDF.js viewer 的行为一致）。
+App.doSearch = async function (queryRaw) {
+  const s = App.state;
+  const q = String(queryRaw || '').trim().toLowerCase();
+  s.search = { query: q, results: [], rects: new Map() };
+  if (!q || !s.pdfDoc) { renderSearchResults(); refreshAnnoPane(); return; }
+  setStatus('搜索中…');
+  for (let n = 1; n <= s.numPages; n++) {
+    const el = App.pageEl(n);
+    if (!el || !el._pdfPage) continue;
+    const vp = el._pdfPage.getViewport({ scale: 1 });
+    let items;
+    try { items = await getTextContent(n); } catch (_) { continue; }
+    for (const item of items) {
+      if (!item || !item.str) continue;
+      const hay = item.str.toLowerCase();
+      let idx = hay.indexOf(q);
+      if (idx === -1) continue;
+      const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
+      const fh = Math.hypot(tx[2], tx[3]);
+      // 高亮框：整行级别（item.width 是 scale=1 下的近似像素宽）
+      const w = Math.max(8, item.width || (item.str.length * fh * 0.5));
+      const rect = { x: tx[4], y: tx[5] - fh, w: w, h: fh * 1.25 };
+      const list = s.search.rects.get(n) || [];
+      list.push(rect);
+      s.search.rects.set(n, list);
+      while (idx !== -1) {
+        const snippet = item.str.length > 60 ? item.str.slice(0, 60) + '…' : item.str;
+        s.search.results.push({ page: n, snippet });
+        idx = hay.indexOf(q, idx + q.length);
+      }
+      break; // 每个文本项只记一条结果，避免同一行刷屏
+    }
+  }
+  // 重画所有已渲染页的高亮
+  for (const [n, v] of s.rendered) { if (v) paintSearchHl(n); }
+  renderSearchResults();
+  setStatus(`「${queryRaw}」共 ${s.search.results.length} 处命中`);
+};
+
+// 搜索结果渲染进批注面板上方（侧栏切到批注标签可见）；同时刷新批注列表
+function renderSearchResults() {
+  const host = document.getElementById('sb-search-results');
+  if (!host) return;
+  const s = App.state;
+  if (!s.search.query) { host.innerHTML = ''; host.hidden = true; return; }
+  host.hidden = false;
+  if (!s.search.results.length) { host.innerHTML = '<div class="sb-empty">无命中</div>'; return; }
+  host.innerHTML = s.search.results.slice(0, 200).map((r, i) =>
+    '<div class="search-result" data-goto="' + r.page + '"><span class="pg">P' + r.page + '</span>' +
+    '<span class="snip">' + escHtml(r.snippet) + '</span></div>').join('');
+}
+function escHtml(t) {
+  return String(t == null ? '' : t).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- 侧栏：目录 / 缩略图 / 批注 ----------
+function initSidebar() {
+  const sb = $('sidebar');
+  if (!sb || sb._inited) return;
+  sb._inited = true;
+  $('btn-sidebar').addEventListener('click', () => {
+    sb.hidden = !sb.hidden;
+    if (!sb.hidden) refreshSidebar();
+    // 侧栏显隐改变 viewer 宽度，适应宽度模式需要重排
+    setTimeout(applyLayout, 30);
+  });
+  for (const tab of document.querySelectorAll('.sb-tab')) {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.sb-tab').forEach((t) => t.classList.toggle('active', t === tab));
+      for (const pane of ['outline', 'thumbs', 'annos']) {
+        $('sb-' + pane).hidden = pane !== tab.dataset.tab;
+      }
+      refreshSidebar();
+    });
+  }
+  // 搜索结果点击跳转（委托）
+  $('sb-annos').addEventListener('click', (e) => {
+    const r = e.target.closest('[data-goto]');
+    if (r) { scrollToPage(+r.dataset.goto); return; }
+    const del = e.target.closest('[data-anno-del]');
+    if (del) { deleteAnno(+del.dataset.annoPage, +del.dataset.annoIdx); return; }
+    const cmt = e.target.closest('[data-anno-comment]');
+    if (cmt) { editAnnoComment(+cmt.dataset.annoPage, +cmt.dataset.annoIdx); return; }
+    const jump = e.target.closest('[data-anno-jump]');
+    if (jump) scrollToPage(+jump.dataset.annoJump);
+    const ex = e.target.closest('#btn-note-export');
+    if (ex) exportAnnoNote();
+  });
+  // 搜索结果容器挂在批注面板顶部
+  const sr = document.createElement('div');
+  sr.id = 'sb-search-results'; sr.hidden = true;
+  $('sb-annos').prepend(sr);
+}
+
+function activeTab() {
+  const t = document.querySelector('.sb-tab.active');
+  return t ? t.dataset.tab : 'outline';
+}
+
+function refreshSidebar() {
+  const sb = $('sidebar');
+  if (!sb || sb.hidden || !App.state.pdfDoc) return;
+  const tab = activeTab();
+  if (tab === 'outline') buildOutlinePane();
+  else if (tab === 'thumbs') buildThumbsPane();
+  else refreshAnnoPane();
+}
+
+// 目录：pdfDoc.getOutline() → 解析目标页 → 可点击树
+async function buildOutlinePane() {
+  const host = $('sb-outline');
+  if (host._done) return;
+  host._done = true;
+  host.innerHTML = '<div class="sb-empty">载入目录…</div>';
+  const s = App.state;
+  let outline = null;
+  try { outline = await s.pdfDoc.getOutline(); } catch (_) {}
+  if (!outline || !outline.length) { host.innerHTML = '<div class="sb-empty">此文档没有目录书签</div>'; return; }
+  const destPage = async (dest) => {
+    try {
+      let d = dest;
+      if (typeof d === 'string') d = await s.pdfDoc.getDestination(d);
+      if (!Array.isArray(d) || !d[0]) return null;
+      if (typeof d[0] === 'object' && d[0] !== null) return (await s.pdfDoc.getPageIndex(d[0])) + 1;
+      if (typeof d[0] === 'number') return d[0] + 1;
+    } catch (_) {}
+    return null;
+  };
+  const build = async (nodes, depth) => {
+    const wrap = document.createElement('div');
+    if (depth > 0) wrap.className = 'outline-kids';
+    for (const node of nodes) {
+      const btn = document.createElement('button');
+      btn.className = 'outline-node';
+      btn.textContent = node.title || '(无标题)';
+      const pg = await destPage(node.dest);
+      if (pg) btn.addEventListener('click', () => scrollToPage(pg));
+      wrap.appendChild(btn);
+      if (node.items && node.items.length) wrap.appendChild(await build(node.items, depth + 1));
+    }
+    return wrap;
+  };
+  host.innerHTML = '';
+  host.appendChild(await build(outline, 0));
+}
+
+// 缩略图：占位 + IntersectionObserver 懒渲染（1200 页文档也只画看得见的那几张）
+let thumbIO = null;
+function buildThumbsPane() {
+  const host = $('sb-thumbs');
+  if (host._docId === App.state.fileName + App.state.numPages) { markCurrentThumb(); return; }
+  host._docId = App.state.fileName + App.state.numPages;
+  host.innerHTML = '';
+  if (thumbIO) thumbIO.disconnect();
+  thumbIO = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) { thumbIO.unobserve(e.target); renderThumb(+e.target.dataset.page); }
+    }
+  }, { root: $('sb-panel'), rootMargin: '200px 0px' });
+  for (let n = 1; n <= App.state.numPages; n++) {
+    const d = document.createElement('div');
+    d.className = 'thumb';
+    d.dataset.page = String(n);
+    d.innerHTML = '<div class="tph"></div><div class="tno">' + n + '</div>';
+    d.addEventListener('click', () => scrollToPage(n));
+    host.appendChild(d);
+    thumbIO.observe(d);
+  }
+  markCurrentThumb();
+}
+async function renderThumb(n) {
+  const el = App.pageEl(n);
+  const holder = $('sb-thumbs').querySelector('.thumb[data-page="' + n + '"] .tph');
+  if (!el || !el._pdfPage || !holder || holder._done) return;
+  holder._done = true;
+  try {
+    const vp = el._pdfPage.getViewport({ scale: 130 / el._unit.w });
+    const cv = document.createElement('canvas');
+    cv.width = Math.floor(vp.width); cv.height = Math.floor(vp.height);
+    await el._pdfPage.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+    holder.replaceWith(cv);
+  } catch (err) { console.error('[thumb] page ' + n + ' failed:', err && err.message ? err.message : err); /* 取消/失败留占位 */ }
+}
+function markCurrentThumb() {
+  const cur = App.state.currentPage;
+  for (const t of $('sb-thumbs').querySelectorAll('.thumb')) t.classList.toggle('current', +t.dataset.page === cur);
+}
+
+// 批注面板：当前文档全部标注列表（点击跳页 / 单条删除 / 导出笔记）
+function refreshAnnoPane() {
+  const host = $('sb-annos');
+  if (!host) return;
+  renderSearchResults();
+  const list = host.querySelector('#anno-list');
+  if (!list) {
+    const l = document.createElement('div');
+    l.id = 'anno-list';
+    const btn = document.createElement('button');
+    btn.id = 'btn-note-export'; btn.className = 'tbtn sb-export-note';
+    btn.textContent = '导出批注为笔记 (.txt)';
+    host.appendChild(l); host.appendChild(btn);
+  }
+  const s = App.state;
+  const rows = [];
+  const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
+  for (const [n, shapes] of s.annos) {
+    shapes.forEach((sh, i) => {
+      let label;
+      if (sh.tool === 'mark') {
+        label = (sh.text || '选区高亮').slice(0, 90);
+        if (sh.comment) label += ' · 评论：' + sh.comment;
+      } else if (sh.tool === 'text' || sh.tool === 'note') {
+        label = sh.text || '(空)';
+      } else {
+        label = toolName[sh.tool] || sh.tool;
+      }
+      rows.push({ n, i, sh, label });
+    });
+  }
+  const l2 = host.querySelector('#anno-list');
+  if (!rows.length) { l2.innerHTML = '<div class="sb-empty">还没有标注。选中文字可高亮/评论，或用「绘制 ▾」里的工具画点什么。</div>'; return; }
+  l2.innerHTML = rows.map((r) =>
+    '<div class="anno-item" data-anno-jump="' + r.n + '" title="跳到第 ' + r.n + ' 页">' +
+    '<span class="dot" style="background:' + r.sh.color + '"></span>' +
+    '<span class="txt">' + escHtml(r.label) + '</span>' +
+    '<span class="pg">P' + r.n + '</span>' +
+    (r.sh.tool === 'mark'
+      ? '<button class="edit" data-anno-comment="1" data-anno-page="' + r.n + '" data-anno-idx="' + r.i + '" title="编辑评论">✎</button>'
+      : '') +
+    '<button class="del" data-anno-del="1" data-anno-page="' + r.n + '" data-anno-idx="' + r.i + '" title="删除这条">✕</button>' +
+    '</div>').join('');
+}
+
+// 选区高亮的评论可随时补写/修改；空评论等于纯高亮
+function editAnnoComment(page, idx) {
+  const arr = App.state.annos.get(page);
+  const sh = arr && arr[idx];
+  if (!sh || sh.tool !== 'mark') return;
+  if (!window.SelectionUI) return;
+  window.SelectionUI.openComment(sh.comment || '', (text) => {
+    Anno.updateShape(page, idx, { comment: text });
+    toast(text ? '评论已更新' : '已清空评论');
+  }, { title: '编辑高亮评论', quote: sh.text || '' });
+}
+function deleteAnno(page, idx) {
+  const shapes = App.state.annos.get(page);
+  if (!shapes || !shapes[idx]) return;
+  shapes.splice(idx, 1);
+  Anno.renderPage(page);
+  refreshAnnoPane();
+  App.notifyAnnoChanged();
+}
+
+// 「导出批注为笔记」：纯文本，按页排列
+async function exportAnnoNote() {
+  const s = App.state;
+  const lines = [];
+  const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
+  const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length).sort((a, b) => a - b);
+  if (!pages.length) { toast('还没有标注'); return; }
+  lines.push('# ' + (s.fileName || '文档') + ' 批注笔记');
+  lines.push('');
+  for (const n of pages) {
+    lines.push('── 第 ' + n + ' 页 ──');
+    for (const sh of s.annos.get(n)) {
+      if (sh.tool === 'mark') {
+        lines.push('[选区高亮] ' + String(sh.text || '').replace(/\n/g, ' / '));
+        if (sh.comment) lines.push('  评论：' + String(sh.comment).replace(/\n/g, ' / '));
+      } else if (sh.tool === 'text' || sh.tool === 'note') {
+        lines.push('[' + toolName[sh.tool] + '] ' + String(sh.text || '').replace(/\n/g, ' / '));
+      } else lines.push('[' + (toolName[sh.tool] || sh.tool) + ']');
+    }
+    lines.push('');
+  }
+  const res = await window.pdfBridge.exportNote({ fileName: s.fileName, text: lines.join('\n') });
+  if (res && res.ok) { toast('笔记已导出'); setStatus('笔记已导出：' + res.path); }
+  else if (res && res.canceled) setStatus('已取消导出');
+  else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));
+}
+
+// ---------- 标注自动保存 / 恢复（按文件路径存 userData/annotations/） ----------
+async function saveAnnosNow() {
+  const s = App.state;
+  if (!s.filePath || !window.pdfBridge.saveAnnos) return;
+  const pages = [];
+  for (const [n, shapes] of s.annos) {
+    if (shapes && shapes.length) pages.push({ page: n, shapes: JSON.parse(JSON.stringify(shapes)) });
+  }
+  try { await window.pdfBridge.saveAnnos(s.filePath, pages); } catch (_) {}
+}
+App.flushAnnos = saveAnnosNow;
+App.notifyAnnoChanged = function () {
+  refreshAnnoPane();
+  clearTimeout(App._annoSaveTimer);
+  App._annoSaveTimer = setTimeout(saveAnnosNow, 600);
+};
+
+async function restoreAnnos(filePath) {
+  if (!filePath || !window.pdfBridge.loadAnnos) return;
+  let saved = null;
+  try { saved = await window.pdfBridge.loadAnnos(filePath); } catch (_) {}
+  if (!saved || !saved.length) return;
+  const s = App.state;
+  for (const entry of saved) {
+    const n = Math.min(s.numPages, Math.max(1, entry.page || 1));
+    const arr = s.annos.get(n) || [];
+    for (const sh of (entry.shapes || [])) arr.push(sh);
+    s.annos.set(n, arr);
+  }
+  for (const n of s.annos.keys()) Anno.renderPage(n);
+  refreshAnnoPane();
+}
+
+// ---------- 翻页导航（滚动定位） ----------
+function scrollToPage(n, instant) {
+  n = Math.min(App.state.numPages, Math.max(1, n));
+  const el = App.pageEl(n);
+  if (!el) return;
+  el.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'start' });
+  if (!App.state.rendered.get(n)) renderPageNum(n);
+  updateCurrentPage(n);
+}
+const nextPage = () => scrollToPage(App.state.currentPage + 1);
+const prevPage = () => scrollToPage(App.state.currentPage - 1);
+
+// ---------- 缩放控制 ----------
+function setNumericScale(next) {
+  const clamped = Math.min(6, Math.max(0.2, next));
+  App.state.scaleMode = String(clamped);
+  syncScaleSelect(clamped);
+  applyLayout();
+}
+function syncScaleSelect(scale) {
+  const pct = String(Math.round(scale * 100));
+  const sel = App.els.scale;
+  const match = Array.from(sel.options).find((o) => o.value === pct);
+  sel.value = match ? match.value : '';
+}
+
+// ---------- 状态栏 ----------
+function setStatus(t) { App.els.status.textContent = t; }
+
+// ---------- 导出副本 ----------
+App.buildExportPayload = function (outPath) {
+  const s = App.state;
+  const pages = [];
+  for (const [n, shapes] of s.annos) {
+    if (!shapes || !shapes.length) continue;
+    const el = App.pageEl(n);
+    if (!el || !el._pdfPage) continue;
+    const vp = el._pdfPage.getViewport({ scale: 1 });
+    const conv = (p) => { const r = vp.convertToPdfPoint(p.x, p.y); return { x: r[0], y: r[1] }; };
+    const out = shapes.map((sh) => {
+      // 便签在导出副本里按「文字」处理（前缀已加 [便签]）
+      const g = { tool: sh.tool === 'note' ? 'text' : sh.tool, color: sh.color, width: sh.width };
+      if (sh.tool === 'pen' || sh.tool === 'highlight') g.pts = sh.pts.map(conv);
+      else if (sh.tool === 'text' || sh.tool === 'note') { g.at = conv(sh.at); g.size = sh.size; g.text = (sh.tool === 'note' ? '[便签] ' : '') + sh.text; }
+      else if (sh.tool === 'mark') {
+        // 单位坐标（左上原点）→ PDF 坐标（左下原点）：两个角都转换后取最小/最大
+        g.rects = (sh.rects || []).map((r) => {
+          const a = conv({ x: r.x, y: r.y });
+          const b = conv({ x: r.x + r.w, y: r.y + r.h });
+          return {
+            x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
+            w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y),
+          };
+        });
+        g.text = sh.text || ''; g.comment = sh.comment || '';
+      }
+      else { g.a = conv(sh.a); g.b = conv(sh.b); }
+      return g;
+    });
+    pages.push({ index: n - 1, shapes: out });
+  }
+  return { fileName: s.fileName, data: s.sourceBytes, pages, outPath };
+};
+
+async function doSave() {
+  const payload = App.buildExportPayload();
+  if (!payload.pages.length) { toast('还没有任何标注'); return; }
+  setStatus('导出中…');
+  const res = await window.pdfBridge.exportPdf(payload);
+  if (res && res.ok) { setStatus('已导出副本：' + res.path); toast('已保存副本'); }
+  else if (res && res.canceled) setStatus('已取消导出');
+  else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));
+}
+
+// ---------- toast ----------
+let toastTimer = null;
+function toast(msg) {
+  let t = $('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+App.toast = toast;
+
+// ---------- 主题（light / dark / system） ----------
+let themeMedia = null;
+function applyTheme(theme) {
+  const t = theme === 'dark' || theme === 'light' ? theme : 'system';
+  App._theme = t;
+  const dark = t === 'dark' || (t === 'system' && window.matchMedia
+    && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.body.classList.toggle('theme-dark', !!dark);
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+  if (t === 'system' && window.matchMedia && !themeMedia) {
+    themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => applyTheme('system');
+    if (themeMedia.addEventListener) themeMedia.addEventListener('change', onChange);
+    else if (themeMedia.addListener) themeMedia.addListener(onChange);
+  }
+}
+App.applyTheme = applyTheme;
+
+// ---------- 冒烟 ----------
+function runSmoke(fileName) {
+  const s = App.state;
+  // 会话恢复的观测点必须赶在下面的 scrollToPage(1) 之前抓，否则会被自己覆盖掉
+  const session = { hasFilePath: !!s.filePath, startPage: s.startPage || 1, landedPage: s.currentPage };
+    // 轮询等渲染完成，别用固定 sleep（启动负载变化会让固定等待忽冷忽热）
+    const waitRendered = async (n, ms) => {
+      const t0 = performance.now();
+      while (!s.rendered.get(n)) { if (performance.now() - t0 > ms) return false; await new Promise((r) => setTimeout(r, 30)); }
+      return true;
+    };
+    setTimeout(async () => {
+      try {
+        scrollToPage(1, true);
+        if (!s.rendered.get(1)) renderPageNum(1);
+        await waitRendered(1, 4000);
+        const c1 = App.pageEl(1).querySelector('canvas');
+        let drawn = false;
+        const cctx = c1.getContext('2d');
+        const img = cctx.getImageData(0, 0, c1.width, c1.height).data;
+        // 必须同时要求 alpha>0：未绘制的 canvas 是透明黑（r=g=b=0），只看 r<250 会假阳性
+        for (let i = 0; i < img.length; i += 4) {
+          if (img[i + 3] > 0 && (img[i] < 250 || img[i + 1] < 250 || img[i + 2] < 250)) { drawn = true; break; }
+        }
+        const w1 = c1.width;
+
+        // 缩放：page1 已 rendered，applyLayout 会同步把 canvas 尺寸改到 2x
+        App.state.scaleMode = '2'; applyLayout();
+        await new Promise((r) => setTimeout(r, 120));
+        const w2 = App.pageEl(1).querySelector('canvas').width;
+
+        // 翻页（滚动定位到末页）
+        scrollToPage(s.numPages, true);
+        await new Promise((r) => setTimeout(r, 120));
+        const navOk = s.currentPage === s.numPages;
+
+      // 标注模型 + 导出 payload（含坐标单位→PDF 点转换）
+      const shapes = s.annos.get(s.numPages) || [];
+      shapes.push({ tool: 'pen', color: '#e53935', width: 3, pts: [{ x: 50, y: 50 }, { x: 120, y: 90 }] });
+      s.annos.set(s.numPages, shapes);
+      const payload = App.buildExportPayload();
+      const geomOk = payload.pages.length === 1 && payload.pages[0].shapes[0].pts
+        && Number.isFinite(payload.pages[0].shapes[0].pts[0].x);
+
+      // 模拟「读到末页」：上报页码，供下一次启动验证是否真被记住
+      if (s.filePath && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, s.numPages);
+      await new Promise((r) => setTimeout(r, 60));
+
+      window.pdfBridge.reportSmoke({
+        ok: true, numPages: s.numPages, drawnPixels: drawn,
+        continuousPages: !!App.pageEl(2) || s.numPages === 1,
+        zoomWorks: w2 !== w1 && w2 > 0, navWorks: navOk, exportGeomOk: geomOk,
+        session,
+      });
+    } catch (err) {
+      window.pdfBridge.reportSmoke({ ok: false, error: String(err && err.message ? err.message : err) });
+    }
+  }, 200);
+}
+
+// ---------- 事件绑定 ----------
+function bind() {
+  const E = App.els = {
+    open: $('btn-open'), zoomOut: $('btn-zoom-out'), zoomIn: $('btn-zoom-in'),
+    scale: $('scale-select'), prev: $('btn-prev'), next: $('btn-next'),
+    pageInput: $('page-input'), pageCount: $('page-count'), fileName: $('file-name'),
+    status: $('status-text'), zoom: $('zoom-text'), hint: $('empty-hint'),
+    viewer: $('viewer'), pages: $('pages'),
+    save: $('btn-save'),
+  };
+
+  E.open.addEventListener('click', async () => {
+    const res = await window.pdfBridge.openPdfDialog();
+    if (res && res.ok) openDocument(res, { newTab: true });
+  });
+  window.pdfBridge.onPdfOpened((res) => {
+    if (!res || !res.ok) return;
+    if (res.smoke) loadPdf(res.data, res.fileName, true, res);
+    else openDocument(res, { newTab: true });
+  });
+
+  // 标签栏：+ 打开新 PDF；点标签切换；点 × 关闭
+  const tabNew = $('tab-new');
+  if (tabNew) tabNew.addEventListener('click', async () => {
+    const res = await window.pdfBridge.openPdfDialog();
+    if (res && res.ok) openDocument(res, { newTab: true });
+  });
+  const tabsHost = $('tabs');
+  if (tabsHost) tabsHost.addEventListener('click', (e) => {
+    const x = e.target.closest('[data-tab-close]');
+    if (x) { e.stopPropagation(); closeTab(x.dataset.tabClose); return; }
+    const t = e.target.closest('[data-tab-id]');
+    if (t) switchTab(t.dataset.tabId);
+  });
+
+  // 文献库：暴露打开钩子给覆盖层用；工具栏「库」按钮回到库；启动即显示库
+  window.__libOpen = (payload) => openDocument(payload, { newTab: true });
+  if (window.LibraryUI) {
+    window.LibraryUI.init();
+    const libBtn = $('btn-library');
+    if (libBtn) libBtn.addEventListener('click', () => window.LibraryUI.show());
+    // 只有主应用窗口启动即进库；test-pen 等独立测试窗口不自动展开（也没有 lib-* IPC）
+    if (window.pdfBridge.isApp) window.LibraryUI.show();
+  }
+  if (window.pdfBridge.getSettings) {
+    window.pdfBridge.getSettings().then((s) => applyTheme(s && s.theme)).catch(() => {});
+  }
+  if (window.pdfBridge.onOpenSettings) {
+    window.pdfBridge.onOpenSettings(() => {
+      if (window.LibraryUI) {
+        window.LibraryUI.show();
+        if (window.LibraryUI.openSettings) window.LibraryUI.openSettings();
+      }
+    });
+  }
+
+  E.zoomIn.addEventListener('click', () => setNumericScale(App.state.scale * 1.25));
+  E.zoomOut.addEventListener('click', () => setNumericScale(App.state.scale / 1.25));
+  E.scale.addEventListener('change', () => { App.state.scaleMode = E.scale.value; applyLayout(); });
+
+  E.prev.addEventListener('click', prevPage);
+  E.next.addEventListener('click', nextPage);
+  E.pageInput.addEventListener('change', () => scrollToPage(parseInt(E.pageInput.value, 10) || 1));
+  E.save.addEventListener('click', doSave);
+
+  // 侧栏 + 全文搜索
+  initSidebar();
+  const sbx = $('search-box');
+  if (sbx) {
+    sbx.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); App.doSearch(sbx.value); }
+      else if (e.key === 'Escape') { sbx.value = ''; App.doSearch(''); }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    // 库覆盖层开着时，Ctrl+F 属于“库内搜索”，别再抢去聚焦阅读器的全文搜索框
+    if (window.LibraryUI && window.LibraryUI.isOpen()) return;
+    if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); sbx.focus(); sbx.select(); }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (window.LibraryUI && window.LibraryUI.isOpen()) return; // 库开着时方向键不应在后台翻 PDF
+    if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { Anno.undo(); e.preventDefault(); return; }
+    if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { doSave(); e.preventDefault(); return; }
+    switch (e.key) {
+      case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;
+      case 'ArrowRight': case 'PageDown': case ' ': nextPage(); e.preventDefault(); break;
+      case 'Home': scrollToPage(1); e.preventDefault(); break;
+      case 'End': scrollToPage(App.state.numPages); e.preventDefault(); break;
+      case '+': case '=': if (e.ctrlKey) { setNumericScale(App.state.scale * 1.25); e.preventDefault(); } break;
+      case '-': if (e.ctrlKey) { setNumericScale(App.state.scale / 1.25); e.preventDefault(); } break;
+      case '0': if (e.ctrlKey) { App.state.scaleMode = 'page-width'; E.scale.value = 'page-width'; applyLayout(); e.preventDefault(); } break;
+    }
+  });
+
+  // Ctrl+滚轮缩放；普通滚轮保持原生连续滚动（不劫持）
+  E.viewer.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey || !App.state.pdfDoc) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    setNumericScale(App.state.scale * factor);
+  }, { passive: false });
+
+  let rt = null;
+  window.addEventListener('resize', () => {
+    if (App.state.scaleMode === 'page-width' || App.state.scaleMode === 'page-fit') {
+      clearTimeout(rt); rt = setTimeout(applyLayout, 120);
+    }
+  });
+
+  // 拖拽打开
+  document.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
+  document.addEventListener('drop', async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') { setStatus('请拖入 PDF 文件'); return; }
+    // 取真实路径：拖拽进来的文件也要能进「最近打开」并恢复页码。
+    // 拿不到路径（例如非本地来源）时静默降级为「仅本次阅读」，不影响打开。
+    let realPath = '';
+    try { if (window.pdfBridge.pathForFile) realPath = window.pdfBridge.pathForFile(file) || ''; } catch (_) {}
+    let startPage = 1;
+    if (realPath && window.pdfBridge.noteRecent) {
+      try { const r = await window.pdfBridge.noteRecent(realPath); if (r && r.page) startPage = r.page; } catch (_) {}
+    }
+    const buf = await file.arrayBuffer();
+    openDocument({ ok: true, data: new Uint8Array(buf), fileName: file.name, filePath: realPath, startPage }, { newTab: true });
+  });
+
+  Anno.init();
+  if (window.SelectionUI) window.SelectionUI.init();
+}
+
+document.addEventListener('DOMContentLoaded', bind);

@@ -1,0 +1,47 @@
+module.exports = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const $ = (s) => document.querySelector(s);
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+  const checks = [];
+  const push = (n, ok, d) => checks.push([n, !!ok, d === undefined ? '' : String(d)]);
+  const waitFor = async (fn, ms) => { const t0 = Date.now(); while (Date.now() - t0 < (ms || 10000)) { if (fn()) return true; await sleep(80); } return !!fn(); };
+  await waitFor(() => $$('#lib-grid .lib-card').length === 2, 5000);
+  const open = async (key) => {
+    const c = $('[data-open="' + key + '"]');
+    if (!c) return false;
+    c.click();
+    return await waitFor(() => document.body.classList.contains('has-doc') && App.state.numPages === 3, 10000);
+  };
+  push('标签页初始为空', App.tabs.length === 0 && $('#tabbar').hidden);
+  await open('itA');
+  await waitFor(() => App.tabs.length === 1, 4000);
+  push('打开第一条生成一个标签', App.tabs.length === 1 && !$('#tabbar').hidden, 'tabs=' + App.tabs.length);
+  const firstPath = App.state.filePath;
+  $('#btn-library').click();
+  await waitFor(() => !$('#library').hidden && $$('#lib-grid .lib-card').length === 2, 4000);
+  await open('itB');
+  await waitFor(() => App.tabs.length === 2, 6000);
+  push('打开不同 PDF 生成第二个标签', App.tabs.length === 2, 'tabs=' + App.tabs.length + ' html=' + $('#tabs').innerHTML);
+  if (App.tabs.length !== 2) return { checks, stage: 'afterB', hasDoc: document.body.classList.contains('has-doc'), path: App.state.filePath, tabsHtml: $('#tabs').innerHTML };
+  push('第二个标签处于激活态', App.tabs.find((t) => t.id === App.activeTabId).fileName.indexOf('copy') >= 0, App.state.filePath);
+  const secondPath = App.state.filePath;
+
+  App.renderTabs();
+  const tabs = $$('#tabs .tab');
+  push('标签栏渲染两个标签', tabs.length === 2, 'rendered=' + tabs.length + ' err=' + (App.lastLoadError || ''));
+  if (tabs.length < 2) return { checks, stage: 'render', tabsHtml: $('#tabs').innerHTML };
+  tabs[0].click();
+  await waitFor(() => App.state.filePath === firstPath, 10000);
+  push('点标签切回第一个文档', App.state.filePath === firstPath, App.state.filePath);
+  push('切回后页码恢复到条目进度', App.state.currentPage === 2, 'page=' + App.state.currentPage);
+  await sleep(300);
+  const secondTab = $$('#tabs .tab')[1];
+  secondTab.querySelector('.tab-x').click();
+  await waitFor(() => App.tabs.length === 1, 3000);
+  push('关闭非激活标签只移除一个', App.tabs.length === 1 && $$('#tabs .tab').length === 1, 'tabs=' + App.tabs.length);
+  $$('#tabs .tab')[0].querySelector('.tab-x').click();
+  await waitFor(() => App.tabs.length === 0, 4000);
+  push('关闭最后一个标签回到空态', App.tabs.length === 0 && !document.body.classList.contains('has-doc') && $('#tabbar').hidden);
+  push('空态自动显示文献库', !$('#library').hidden);
+  return { checks, firstPath, secondPath };
+})()`;
