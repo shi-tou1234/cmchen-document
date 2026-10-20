@@ -157,6 +157,21 @@ const Lightbox = (function () {
     zoomToPoint(state.scale + step, r.left + r.width / 2, r.top + r.height / 2);
   }
 
+  // 把预览按「位图像素」摆进内容区：不超过原始像素（避免糊），也不小于原始像素（等于原始大小）
+  // 博客那边是 max-width:100% —— 小图不会被放大；这里同样不放大，但内容区留白更少。
+  function fitPreview() {
+    const e = els();
+    if (!e.preview || !e.content) return;
+    const natW = e.preview.width || 1;
+    const natH = e.preview.height || 1;
+    const box = e.content.getBoundingClientRect();
+    const availW = Math.max(40, box.width - 140);   // 给左右翻图箭头留位置
+    const availH = Math.max(40, box.height - 120);  // 给上下工具条与图注留位置
+    const fit = Math.min(availW / natW, availH / natH, 1);
+    e.preview.style.width = Math.max(1, Math.round(natW * fit)) + 'px';
+    e.preview.style.height = Math.max(1, Math.round(natH * fit)) + 'px';
+  }
+
   // 换图：把新图的内容画进预览 canvas
   function showIndex(i, opts) {
     const it = state.items[i];
@@ -169,6 +184,7 @@ const Lightbox = (function () {
       const ctx = e.preview.getContext('2d');
       ctx.clearRect(0, 0, e.preview.width, e.preview.height);
       ctx.drawImage(it.canvas, 0, 0);
+      fitPreview();
     }
     if (e.caption) e.caption.textContent = it.label || '';
     if (!opts || opts.resetZoom !== false) resetZoom();

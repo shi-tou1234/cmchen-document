@@ -459,6 +459,9 @@ const Anno = window.Anno = (() => {
         || (t === 'select' ? document.querySelector('.ntool[data-tool="pen"] svg') : null);
       if (src) cur.innerHTML = src.outerHTML;
     }
+    if (t === 'image') {
+      App.toast && App.toast('看图模式：点页面任意位置放大查看');
+    }
   }
 
   function setPop(open) {

@@ -870,12 +870,13 @@ function getPageImages(pageNum, pdfPage) {
     .catch(() => []);
 }
 
-// 抽不到原图时的兜底：把图所在区域按较高分辨率重渲染再裁出来
+// 抽不到原图时的兜底：把这一块按较高分辨率重渲染再裁出来
+// （矢量手写/插图不是位图时走这条：矢量重渲染是清晰的，放大不糊）
 async function renderImageRegion(pdfPage, rect) {
   try {
     const vp1 = pdfPage.getViewport({ scale: 1 });
     const pw = Math.max(1, vp1.width), ph = Math.max(1, vp1.height);
-    let scale = Math.min(4, Math.max(1.5, 1200 / Math.max(1, rect.w)));
+    let scale = Math.min(5, Math.max(2, 1200 / Math.max(1, rect.w)));
     const cap = Math.sqrt(12e6 / (pw * ph));   // 整页渲染别超过 ~1200 万像素
     if (scale > cap) scale = cap;
     const big = pdfPage.getViewport({ scale });
@@ -900,6 +901,16 @@ async function renderImageRegion(pdfPage, rect) {
   }
 }
 
+// 点在没有位图的地方时，取点击处周围一块当「局部放大」的区域
+function regionAround(ux, uy, unit) {
+  const u = unit || { w: 600, h: 800 };
+  const rw = Math.min(u.w, u.w * 0.3);
+  const rh = Math.min(u.h, u.h * 0.3);
+  const x = Math.max(0, Math.min(Math.max(0, u.w - rw), ux - rw / 2));
+  const y = Math.max(0, Math.min(Math.max(0, u.h - rh), uy - rh / 2));
+  return { x, y, w: rw, h: rh };
+}
+
 async function openImageLightbox(pageEl, clientX, clientY) {
   const pageNum = +pageEl.dataset.page;
   const pdfPage = pageEl._pdfPage;
@@ -909,25 +920,37 @@ async function openImageLightbox(pageEl, clientX, clientY) {
   const ux = (clientX - r.left) / (s.scale || 1);
   const uy = (clientY - r.top) / (s.scale || 1);
   const images = await getPageImages(pageNum, pdfPage);
-  if (!images.length) { toast('这一页没有内嵌位图'); return; }
-  const hit = PdfImages.findAt(images, ux, uy);
-  if (!hit) { toast('这里没有图片（矢量插图用 Ctrl+滚轮 放大即可）'); return; }
-  const list = images.slice(0, 12);
-  const built = [];
-  for (let i = 0; i < list.length; i++) {
-    const c = await PdfImages.extract(pdfPage, list[i]) || await renderImageRegion(pdfPage, list[i]);
-    if (!c) continue;
-    built.push({
-      canvas: c,
-      srcIndex: i,
-      label: '第 ' + pageNum + ' 页 · 图 ' + (i + 1) + (list.length > 1 ? ' / ' + list.length : ''),
-    });
+  const hit = images.length ? PdfImages.findAt(images, ux, uy) : null;
+
+  // 命中位图 → 给原图像素；没命中 → 给点击处周围一块的高清重渲染（矢量内容也清晰）
+  let items = [];
+  let index = 0;
+  if (hit) {
+    const list = images.slice(0, 12);
+    const built = [];
+    for (let i = 0; i < list.length; i++) {
+      const c = await PdfImages.extract(pdfPage, list[i]) || await renderImageRegion(pdfPage, list[i]);
+      if (!c) continue;
+      built.push({
+        canvas: c,
+        srcIndex: i,
+        label: '第 ' + pageNum + ' 页 · 图 ' + (i + 1) + (list.length > 1 ? ' / ' + list.length : ''),
+      });
+    }
+    if (built.length) {
+      const want = list.indexOf(hit);
+      items = built;
+      index = Math.max(0, built.findIndex((b) => b.srcIndex === want));
+    }
   }
-  if (!built.length) { toast('这张图取不出来'); return; }
-  const want = list.indexOf(hit);
-  let idx = built.findIndex((b) => b.srcIndex === want);
-  if (idx < 0) idx = 0;
-  Lightbox.open({ items: built, index: idx });
+  if (!items.length) {
+    const region = regionAround(ux, uy, pageEl._unit);
+    const c = await renderImageRegion(pdfPage, region);
+    if (!c) { toast('这一块取不出来'); return; }
+    items = [{ canvas: c, label: '第 ' + pageNum + ' 页 · 局部放大' }];
+    index = 0;
+  }
+  Lightbox.open({ items, index });
 }
 
 // ---------- 标注自动保存 / 恢复（按文件路径存 userData/annotations/） ----------
@@ -1233,6 +1256,11 @@ function bind() {
     if (window.LibraryUI && window.LibraryUI.isOpen()) return; // 库开着时方向键不应在后台翻 PDF
     if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { Anno.undo(); e.preventDefault(); return; }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { doSave(); e.preventDefault(); return; }
+    if (e.key === 'v' || e.key === 'V') {
+      Anno.setTool(Anno.state.tool === 'image' ? 'select' : 'image');
+      e.preventDefault();
+      return;
+    }
     switch (e.key) {
       case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;
       case 'ArrowRight': case 'PageDown': case ' ': nextPage(); e.preventDefault(); break;

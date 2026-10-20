@@ -72,15 +72,23 @@ module.exports = `(async () => {
   await sleep(200);
   push('Esc 能关闭灯箱', !Lightbox.isOpen(), 'isOpen=' + Lightbox.isOpen());
 
-  // 点非图片区域 → 不应该开灯箱
+  // 点非图片区域 → 应该开「局部放大」，而不是毫无反应
   await toolBtn.click();
   await sleep(100);
   const el2 = App.pageEl(1);
   const r2 = el2.getBoundingClientRect();
-  const px = r2.left + 8, py = r2.top + 8;
+  const px = r2.left + 12, py = r2.top + 12;
   el2.dispatchEvent(new MouseEvent('click', { clientX: px, clientY: py, bubbles: true, cancelable: true }));
-  await sleep(400);
-  push('点空白处不会开灯箱', !Lightbox.isOpen(), 'isOpen=' + Lightbox.isOpen());
+  const openedRegion = await waitFor(() => window.Lightbox && Lightbox.isOpen(), 12000);
+  push('点空白处会开「局部放大」', openedRegion, 'isOpen=' + (window.Lightbox ? Lightbox.isOpen() : 'n/a'));
+  if (openedRegion) {
+    const cap2 = document.querySelector('#pdf-image-lightbox .lb-caption');
+    push('局部放大有说明文字', !!cap2 && /局部放大/.test(cap2.textContent || ''), cap2 ? cap2.textContent : 'null');
+    const pv = document.querySelector('#pdf-image-lightbox .lb-preview');
+    push('局部放大画出了内容', !!pv && pv.width > 10 && pv.height > 10, pv ? pv.width + 'x' + pv.height : 'null');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await sleep(200);
+  }
 
   return { checks };
 })()`;
