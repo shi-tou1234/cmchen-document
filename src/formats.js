@@ -12,6 +12,7 @@ function cleanTex(v) {
   let out = s(v);
   out = out.replace(/\\&/g, '&').replace(/\\%/g, '%').replace(/\\_/g, '_');
   out = out.replace(/\\[a-zA-Z]+\s*\{([^{}]*)\}/g, '$1');
+  out = out.replace(/\\([{}])/g, '$1'); // 导出时转义的花括号还原，避免留下孤立反斜杠
   out = out.replace(/[{}]/g, '');
   out = out.replace(/~+/g, ' ');
   return out.replace(/\s+/g, ' ').trim();
@@ -160,7 +161,10 @@ function bibToRecord(f, key, bibType) {
   const publication = cleanTex(fields.journal || fields.booktitle || fields.publisher || fields.school || fields.institution || '');
   const type = mapBibType(bibType || '', fields);
   const doi = cleanTex(fields.doi || '').replace(/^https?:\/\/doi\.org\//i, '');
-  const tags = splitTop(cleanTex(fields.keywords || ''), ',').map((x) => s(x)).filter(Boolean);
+  // 关键词既可能用逗号也可能用分号分隔，两种都切开
+  const tags = splitTop(cleanTex(fields.keywords || ''), ',')
+    .flatMap((x) => x.split(/;/))
+    .map((x) => s(x)).filter(Boolean);
   return {
     itemType: ITEM_TYPES.has(type) ? type : 'document',
     title: cleanTex(fields.title || '') || key || '未命名文献',
@@ -169,7 +173,8 @@ function bibToRecord(f, key, bibType) {
     publication,
     volume: cleanTex(fields.volume || ''),
     issue: cleanTex(fields.number || fields.issue || ''),
-    pages: cleanTex(fields.pages || ''),
+    // BibTeX 页码惯例是 45--67，统一成 45-67，导出 RIS 时才能正确拆 SP/EP
+    pages: cleanTex(fields.pages || '').replace(/--+/g, '-'),
     doi,
     url: cleanTex(fields.url || fields.howpublished || ''),
     abstract: cleanTex(fields.abstract || ''),

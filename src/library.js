@@ -183,6 +183,8 @@ function migrateItem(it) {
   for (const k of ['title', 'year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'note', 'language']) {
     x[k] = str(src[k]);
   }
+  // DOI 统一成裸标识符（去掉 https://doi.org/ 与 doi: 前缀），查重/导出才不会出现两种写法
+  x.doi = normDoi(src.doi);
   x.creators = strList(src.creators);
   x.tags = strList(src.tags);
 
@@ -281,6 +283,7 @@ function updateItem(key, patch) {
   // 只允许改这些字段；attachment/回收站状态走专门接口，防止误覆盖
   const textFields = ['title', 'year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'note', 'language'];
   for (const k of textFields) if (k in patch) it[k] = str(patch[k]);
+  if ('doi' in patch) it.doi = normDoi(patch.doi);
   if ('itemType' in patch) it.itemType = ITEM_TYPE_IDS.has(patch.itemType) ? patch.itemType : 'document';
   if ('creators' in patch) it.creators = strList(patch.creators);
   if ('tags' in patch) it.tags = strList(patch.tags);
@@ -495,6 +498,7 @@ function bulkUpdate(keys, patch) {
   for (const it of s.items) {
     if (!set.has(it.key) || it.deletedAt) continue;
     for (const k of textFields) if (k in p) it[k] = str(p[k]);
+    if ('doi' in p) it.doi = normDoi(p.doi);
     if ('itemType' in p) it.itemType = ITEM_TYPE_IDS.has(p.itemType) ? p.itemType : it.itemType;
     if ('creators' in p) it.creators = strList(p.creators);
     if ('tags' in p) it.tags = strList(p.tags);
@@ -548,7 +552,16 @@ function findDuplicates() {
     if (!parent.has(a)) parent.set(a, a);
     if (!parent.has(b)) parent.set(b, b);
     const ra = find(a), rb = find(b);
-    if (ra !== rb) parent.set(rb, ra);
+    if (ra !== rb) {
+      parent.set(rb, ra);
+      // 根合并时把旧根上的原因并过来，否则原因会随根变化而丢失
+      const old = reasons.get(rb);
+      if (old) {
+        if (!reasons.has(ra)) reasons.set(ra, new Set());
+        for (const x of old) reasons.get(ra).add(x);
+        reasons.delete(rb);
+      }
+    }
     const root = find(a);
     if (!reasons.has(root)) reasons.set(root, new Set());
     reasons.get(root).add(why);

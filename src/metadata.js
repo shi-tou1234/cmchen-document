@@ -91,6 +91,15 @@ function arxivEntry(xml) {
   const doi = one('arxiv:doi');
   const journal = one('arxiv:journal_ref');
   const title = one('title').replace(/^arXiv:\s*\S+\s*/i, '');
+  // arXiv 的分类是自闭合标签 <category term="cs.CL"/>，不能按 <category>…</category> 取
+  const tags = [];
+  const catRe = /<category\b[^>]*\bterm\s*=\s*"([^"]*)"[^>]*\/?>/gi;
+  let cm;
+  while ((cm = catRe.exec(e))) {
+    const t = flat(cm[1]);
+    if (t && !tags.includes(t)) tags.push(t);
+  }
+  if (!tags.length) for (const t of all('category')) if (t && !tags.includes(t)) tags.push(t);
   return {
     itemType: journal ? 'journalArticle' : 'document',
     title,
@@ -102,7 +111,7 @@ function arxivEntry(xml) {
     url: id || '',
     abstract: one('summary'),
     language: '',
-    tags: all('category'),
+    tags,
   };
 }
 

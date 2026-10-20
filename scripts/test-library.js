@@ -178,6 +178,84 @@ ok('带 BOM 的库文件能正常读取', lib.summary().items.length === 1 && li
 ok('BOM 文件的 v1 字段也迁移', JSON.stringify(lib.summary().items[0].collectionIds) === '["nope"]');
 process.env.PDFREADER_LIBRARY = storeFile; lib.init(); lib.resetCache(); // 复原
 
+// ---------- v3 新能力：智能收藏集 / 批量编辑 / 查重合并 / BibTeX 导入 ----------
+// 用独立的库文件，避免前面「损坏自愈」留下的空库影响计数
+const v3File = path.join(tmp, 'v3-library.json');
+process.env.PDFREADER_LIBRARY = v3File; lib.init(); lib.resetCache();
+const colX = lib.addCollection('查重集');
+const pdfA = path.join(tmp, 'a.pdf'); fs.writeFileSync(pdfA, '%PDF-1.4\n');
+const pdfB = path.join(tmp, 'b.pdf'); fs.writeFileSync(pdfB, '%PDF-1.4\n');
+
+// 智能收藏集 = 保存的搜索条件
+const s1 = lib.addSearch('深度学习', 'transformer');
+ok('addSearch 生成收藏集', !!s1 && s1.name === '深度学习' && s1.query === 'transformer', JSON.stringify(s1));
+ok('空查询不建智能收藏集', lib.addSearch('空', '   ') === null);
+ok('summary 暴露 searches', lib.summary().searches.length === 1);
+ok('removeSearch 生效', lib.removeSearch(s1.id) === true && lib.summary().searches.length === 0);
+ok('removeSearch 不存在返回 false', lib.removeSearch('nope') === false);
+
+// 查重：DOI（含 doi.org URL 形式）+ 标准化标题 & 年份；太短标题不参与
+const A = lib.addItem({
+  title: 'Deep Learning', year: '2020', doi: '10.1000/dup', publication: 'Nature',
+  creators: ['Ada Lovelace'], tags: ['ML'], collectionIds: [colX.id],
+  attachment: { path: pdfA, name: 'a.pdf' }, page: 5,
+});
+const B = lib.addItem({ title: 'Deep   Learning', year: '2020', attachment: { path: pdfB, name: 'b.pdf' } });
+const C = lib.addItem({ title: 'Deep Learning', year: '2019' });
+const D = lib.addItem({ title: 'AI', year: '2020', doi: '10.1000/ai' });
+const E = lib.addItem({ title: 'Another Title', year: '2021', doi: 'https://doi.org/10.1000/dup' });
+const dup = lib.findDuplicates();
+ok('查重只返回 1 组', dup.length === 1, 'groups=' + dup.length);
+ok('DOI 与标题+年份把 A/B/E 并成一组', dup[0] && dup[0].keys.length === 3 &&
+  [A.key, B.key, E.key].every((k) => dup[0].keys.includes(k)), JSON.stringify(dup[0] && dup[0].keys));
+ok('不同年份不误判', dup[0] && !dup[0].keys.includes(C.key));
+ok('过短标题不参与查重', dup[0] && !dup[0].keys.includes(D.key));
+ok('查重原因包含两种规则', dup[0] && dup[0].reasons.length >= 2, JSON.stringify(dup[0] && dup[0].reasons));
+ok('查重组带条目摘要', dup[0] && dup[0].items.length === 3 && dup[0].items.every((x) => !!x.key));
+
+// 合并：保留项补空字段、合并作者/标签/收藏集/页码；被合并项只删索引，不删 PDF
+const merged = lib.mergeItems(B.key, [A.key, E.key]);
+ok('mergeItems 返回保留项', !!merged && merged.key === B.key, JSON.stringify(merged && merged.key));
+ok('合并补齐 DOI/出版物', merged.doi === '10.1000/dup' && merged.publication === 'Nature', JSON.stringify([merged.doi, merged.publication]));
+ok('合并作者/标签/收藏集', merged.creators.includes('Ada Lovelace') && merged.tags.includes('ML') && merged.collectionIds.includes(colX.id), JSON.stringify([merged.creators, merged.tags, merged.collectionIds]));
+ok('合并带过页码', merged.page === 5, String(merged.page));
+ok('被合并条目已从索引移除', !lib.findItem(A.key) && !lib.findItem(E.key));
+ok('合并后原 PDF 都还在', fs.existsSync(pdfA) && fs.existsSync(pdfB));
+ok('mergeItems 找不到保留项返回 null', lib.mergeItems('nope', [B.key]) === null);
+
+// 批量编辑：只动选中且未删除的条目；标签/收藏集支持增删
+const b1 = lib.addItem({ title: 'Bulk 1', year: '2000', tags: ['old'], collectionIds: [colX.id] });
+const b2 = lib.addItem({ title: 'Bulk 2', year: '2001', tags: ['old'] });
+const b3 = lib.addItem({ title: 'Bulk 3', year: '2002' });
+lib.trashItem(b3.key);
+let bulk = lib.bulkUpdate([b1.key, b2.key, b3.key], { year: '2024', addTags: ['批量'], addCollectionIds: [colX.id] });
+ok('批量编辑命中 2 条', bulk.updated === 2, JSON.stringify(bulk));
+ok('批量改年份生效', lib.findItem(b1.key).year === '2024' && lib.findItem(b2.key).year === '2024');
+ok('批量加标签去重', lib.findItem(b2.key).tags.includes('批量') && lib.findItem(b2.key).tags.filter((t) => t === '批量').length === 1, JSON.stringify(lib.findItem(b2.key).tags));
+ok('批量加收藏集', lib.findItem(b2.key).collectionIds.includes(colX.id), JSON.stringify(lib.findItem(b2.key).collectionIds));
+ok('回收站条目不被批量修改', lib.findItem(b3.key).year === '2002' && lib.findItem(b3.key).tags.length === 0);
+bulk = lib.bulkUpdate([b1.key], { removeTags: ['old'], removeCollectionIds: [colX.id], itemType: 'martian' });
+ok('批量删标签/收藏集', !lib.findItem(b1.key).tags.includes('old') && !lib.findItem(b1.key).collectionIds.includes(colX.id), JSON.stringify([lib.findItem(b1.key).tags, lib.findItem(b1.key).collectionIds]));
+ok('非法 itemType 不覆盖原值', lib.findItem(b1.key).itemType === 'document', lib.findItem(b1.key).itemType);
+bulk = lib.bulkUpdate([b1.key], { addCollectionIds: ['ghost'] });
+ok('批量加幽灵收藏集被过滤', lib.findItem(b1.key).collectionIds.length === 0, JSON.stringify(lib.findItem(b1.key).collectionIds));
+
+// BibTeX/RIS 导入：按 DOI 或标题+年份去重
+const beforeImport = lib.summary().items.length;
+let imp = lib.importItems([
+  { title: 'Imported One', year: '2021', doi: '10.1000/imp', creators: ['X Y'], itemType: 'journalArticle', tags: ['t1'] },
+  { title: 'Imported One', year: '2021' },                       // 同标题+年份 → 跳过
+  { title: 'Imported Two', year: '2022', doi: '10.1000/dup' },    // DOI 已存在 → 跳过
+  { title: '' },                                                   // 无标题 → 跳过
+]);
+ok('导入只加 1 条', imp.added === 1 && imp.skipped === 3, JSON.stringify(imp));
+ok('导入后条目数 +1', lib.summary().items.length === beforeImport + 1);
+const imported = lib.findItem(imp.keys[0]);
+ok('导入字段完整', imported.title === 'Imported One' && imported.year === '2021' && imported.creators[0] === 'X Y' && imported.itemType === 'journalArticle', JSON.stringify(imported));
+ok('导入 DOI 去前缀', imported.doi === '10.1000/imp', imported.doi);
+imp = lib.importItems([{ title: 'Imported One', year: '2021' }], { skipDuplicates: false });
+ok('关闭去重后可重复导入', imp.added === 1 && imp.skipped === 0, JSON.stringify(imp));
+
 // 清理
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
 

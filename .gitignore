@@ -3,3 +3,4 @@ build/
 dist/
 src/renderer/pdfjs/
 *.log
+assets/sample-annotated.pdf

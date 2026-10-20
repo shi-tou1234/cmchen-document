@@ -117,6 +117,9 @@ async function extractPages(pdfPath) {
 }
 
 async function indexFile(pdfPath, opts) {
+  if (typeof pdfPath !== 'string' || !pdfPath.trim()) {
+    return { ok: false, path: '', error: '条目没有附件' };
+  }
   const abs = path.resolve(pdfPath);
   const force = !!(opts && opts.force);
   const st = statOf(abs);
@@ -153,7 +156,12 @@ function enqueue(fn) {
 }
 
 function indexOne(item, opts) {
-  const p = item && (item.attachment ? item.attachment.path : item.path) || item;
+  // 兼容三种入参：条目对象 / 路径字符串 / 带 attachment 的对象。
+  // 没有附件的条目必须在这里拦住，否则对象会被当成路径传给 path.resolve 并抛错。
+  const raw = item && typeof item === 'object'
+    ? (item.attachment ? item.attachment.path : item.path)
+    : item;
+  const p = typeof raw === 'string' ? raw.trim() : '';
   if (!p) return Promise.resolve({ ok: false, error: '条目没有附件' });
   return enqueue(() => indexFile(p, opts));
 }

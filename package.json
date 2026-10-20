@@ -30,12 +30,33 @@
       "assets/**/*",
       "!assets/icon-source.png",
       "node_modules/pdf-lib/**/*",
+      "node_modules/pdfjs-dist/package.json",
+      "node_modules/pdfjs-dist/build/pdf.js",
+      "node_modules/pdfjs-dist/build/pdf.worker.js",
+      "node_modules/pdfjs-dist/cmaps/**/*",
+      "node_modules/pdfjs-dist/standard_fonts/**/*",
       "!**/*.map"
     ],
     "win": {
-      "target": "portable",
+      "target": [
+        "portable",
+        "nsis"
+      ],
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PDF Reader",
+      "artifactName": "PDF-Reader-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "PDF-Reader-${version}-portable.${ext}"
     }
   }
 }

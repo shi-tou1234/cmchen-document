@@ -150,7 +150,9 @@ async function loadPdf(data, fileName, smoke, meta) {
   try {
     setStatus('解析中…');
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    const task = window.pdfjsLib.getDocument({ data: bytes });
+    // PDF.js 会把传入 data 的底层 ArrayBuffer 转移给 worker，转移后原数组变成 detached。
+    // 「导出副本」还要在主线程拿原始字节，所以传给 pdfjs 一份副本，bytes 自己留着。
+    const task = window.pdfjsLib.getDocument({ data: bytes.slice() });
     const pdfDoc = await task.promise;
     if (s.pdfDoc) { try { await s.pdfDoc.destroy(); } catch (_) {} }
 
@@ -692,13 +694,12 @@ function deleteAnno(page, idx) {
   App.notifyAnnoChanged();
 }
 
-// 「导出批注为笔记」：纯文本，按页排列
-async function exportAnnoNote() {
+// 「导出批注为笔记」的纯文本内容：按页排列，供导出与回归断言共用
+App.buildNoteText = function buildNoteText() {
   const s = App.state;
   const lines = [];
   const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
   const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length).sort((a, b) => a - b);
-  if (!pages.length) { toast('还没有标注'); return; }
   lines.push('# ' + (s.fileName || '文档') + ' 批注笔记');
   lines.push('');
   for (const n of pages) {
@@ -713,7 +714,15 @@ async function exportAnnoNote() {
     }
     lines.push('');
   }
-  const res = await window.pdfBridge.exportNote({ fileName: s.fileName, text: lines.join('\n') });
+  return lines.join('\n');
+};
+
+// 「导出批注为笔记」：纯文本，按页排列
+async function exportAnnoNote() {
+  const s = App.state;
+  const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length);
+  if (!pages.length) { toast('还没有标注'); return; }
+  const res = await window.pdfBridge.exportNote({ fileName: s.fileName, text: App.buildNoteText() });
   if (res && res.ok) { toast('笔记已导出'); setStatus('笔记已导出：' + res.path); }
   else if (res && res.canceled) setStatus('已取消导出');
   else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));

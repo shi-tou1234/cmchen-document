@@ -17,6 +17,14 @@ module.exports = `(async () => {
   await waitFor(() => App.tabs.length === 1, 4000);
   push('打开第一条生成一个标签', App.tabs.length === 1 && !$('#tabbar').hidden, 'tabs=' + App.tabs.length);
   const firstPath = App.state.filePath;
+
+  // 给第一个文档种一条标注：用于验证切换/关闭标签后标注不丢
+  App.state.annos.set(1, [{ tool: 'mark', color: '#ffeb3b', rects: [{ x: 10, y: 20, w: 80, h: 12 }], text: 'tab-anno', comment: 'tab comment' }]);
+  App.notifyAnnoChanged();
+  await App.flushAnnos();
+  const seeded = await pdfBridge.loadAnnos(firstPath);
+  push('标注已写入磁盘', JSON.stringify(seeded).indexOf('tab-anno') >= 0, JSON.stringify(seeded).slice(0, 160));
+
   $('#btn-library').click();
   await waitFor(() => !$('#library').hidden && $$('#lib-grid .lib-card').length === 2, 4000);
   await open('itB');
@@ -34,6 +42,10 @@ module.exports = `(async () => {
   await waitFor(() => App.state.filePath === firstPath, 10000);
   push('点标签切回第一个文档', App.state.filePath === firstPath, App.state.filePath);
   push('切回后页码恢复到条目进度', App.state.currentPage === 2, 'page=' + App.state.currentPage);
+  await waitFor(() => (App.state.annos.get(1) || []).some((s) => s.text === 'tab-anno'), 5000);
+  const backMark = (App.state.annos.get(1) || []).find((s) => s.text === 'tab-anno');
+  push('切换标签不丢标注', !!backMark && backMark.comment === 'tab comment', JSON.stringify(backMark && { text: backMark.text, comment: backMark.comment }));
+
   await sleep(300);
   const secondTab = $$('#tabs .tab')[1];
   secondTab.querySelector('.tab-x').click();
@@ -43,5 +55,13 @@ module.exports = `(async () => {
   await waitFor(() => App.tabs.length === 0, 4000);
   push('关闭最后一个标签回到空态', App.tabs.length === 0 && !document.body.classList.contains('has-doc') && $('#tabbar').hidden);
   push('空态自动显示文献库', !$('#library').hidden);
+
+  // 关闭标签只是结束阅读会话：标注文件与磁盘 PDF 都必须还在
+  const afterClose = await pdfBridge.loadAnnos(firstPath);
+  push('关闭标签不删标注文件', JSON.stringify(afterClose).indexOf('tab-anno') >= 0, JSON.stringify(afterClose).slice(0, 160));
+  const sum = await pdfBridge.lib.summary();
+  const a = sum.items.find((x) => x.key === 'itA');
+  const b = sum.items.find((x) => x.key === 'itB');
+  push('关闭标签不删磁盘 PDF', !!(a && a.hasFile) && !!(b && b.hasFile), JSON.stringify([a && a.hasFile, b && b.hasFile]));
   return { checks, firstPath, secondPath };
 })()`;

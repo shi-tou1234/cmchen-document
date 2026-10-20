@@ -22,9 +22,12 @@ if (!TEST_MODE) {
   } else {
     app.on('second-instance', (_e, argv) => {
       if (win) {
-        if (win.isMinimized()) win.restore();
-        win.show();
-        win.focus();
+        // 测试时窗口是隐藏的，不要因为第二个实例把它弹出来
+        if (!process.env.PDFREADER_HIDDEN) {
+          if (win.isMinimized()) win.restore();
+          win.show();
+          win.focus();
+        }
       }
       const p = pdfArgFrom(argv);
       if (p) openFromPath(p);
@@ -855,8 +858,10 @@ function rebuildMenu() {
 app.whenReady().then(() => {
   if (!hasLock) return;
   buildMenu();
-  // 冒烟/截图/探针模式一律不起可见窗口，避免测试时屏幕上反复闪窗
-  const headless = process.env.SMOKE_PDF || process.env.PDFREADER_LIBUI || process.env.PDFREADER_PROBE;
+  // 冒烟/截图/探针模式一律不起可见窗口，避免测试时屏幕上反复闪窗；
+  // PDFREADER_HIDDEN 只隐藏窗口，不影响单实例锁（单实例测试要用）。
+  const headless = process.env.SMOKE_PDF || process.env.PDFREADER_LIBUI
+    || process.env.PDFREADER_PROBE || process.env.PDFREADER_HIDDEN;
   createWindow({ show: !headless });
 
   // 启动后低优先级补索引：不阻塞首屏，也不在用户正打开文件时抢 CPU
@@ -889,6 +894,10 @@ app.whenReady().then(() => {
         res = await win.webContents.executeJavaScript(probe, true);
       } catch (e) { res = { fatal: String((e && e.message) || e) }; }
       console.log('[probe-result] ' + JSON.stringify(res));
+      // 打包产物是 GUI 子系统，标准输出有时拿不到；测试可指定文件落盘作为证据
+      if (process.env.PDFREADER_PROBE_OUT) {
+        try { fs.writeFileSync(process.env.PDFREADER_PROBE_OUT, JSON.stringify(res)); } catch (_) {}
+      }
       // 可选：探针跑完后抓一帧，供离线核对 UI（不会影响正常使用）。
       // 隐藏窗口的 rAF 会被降到 ~1Hz，300ms 抓到的可能是过期帧，这里等足一帧多一点。
       if (process.env.PDFREADER_PROBE_SHOT) {

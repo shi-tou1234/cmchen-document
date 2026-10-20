@@ -1,13 +1,20 @@
 # PDF Reader v11/v12 开发交接文档
 
-> 更新时间：2026-10-20  
+> 更新时间：2026-10-20（收尾完成）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**P0/P1 的功能代码基本已经落地，核心链路做过真机探针验证；但正式测试、安装包、打包产物验证、README、Git 提交/推送都还没有完成。现在不能算“已交付”，只能算“可运行的功能开发版”。**
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。当前目录是本地 Git 仓库（已有提交）；因本机访问 GitHub 失败（CRYPT_E_NO_REVOCATION_CHECK），尚未推送远端。**
+
+## 收尾后的一句话现状
+
+- 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 43 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
+- 打包产物已产出并冒烟：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,277,787 B）、`PDF-Reader-Setup-1.0.0.exe`（83,635,175 B，NSIS）。
+- 安装 → 已安装版冒烟 → 静默卸载，全部通过（快捷方式/安装目录随之清理）。
+- 收尾过程中修掉 8 个真实缺陷（详见 README v11/v12 章节），其中**「导出副本在真实链路失效」是 v10 起就存在的高危 bug**。
 
 ---
 
-## 1. 一句话现状
+## 1. 一句话现状（收尾前存档）
 
 - 文献库、阅读器、全文检索、文字高亮/评论、备份恢复、设置、元数据抓取、BibTeX/RIS、查重/批量编辑/智能收藏集、多标签页都已有代码。
 - 已有回归：数据层 51 项、库 UI 43 项、v11 主流程 12 项、文字高亮 8 项、多标签 10 项，当前全部通过。
@@ -274,20 +281,28 @@ node scripts\_tabstest.js             # 10 项 checks 全 true
 - 探针里的 `checks` 是数组，没有统一退出码；建议转成正式脚本时用“失败即非零退出”的方式。
 - 旧版回归（`test-pen` / `test-real-input` / `test-lazy-render` / `test-session` / `test-export` / app-smoke）在 v10 全部通过，但**本轮 v11/v12 改动后没有全部重跑**，交接后应补跑。
 
-### 4.1 尚未验证的清单
+### 4.1 收尾验证结果（2026-10-20）
 
-- [ ] 备份恢复完整流程（库、设置、标注、pre-restore 快照）。
-- [ ] 数据目录：移动、合并、替换；目标已有库时的选择。
-- [ ] 单实例：真实双开、第二个实例聚焦、命令行 PDF 转交。
-- [ ] 查重弹窗与合并。
-- [ ] RIS 导入导出。
-- [ ] arXiv 抓取与真实网络 DOI 抓取。
-- [ ] 导入/导出 UI 的文件选择、取消、错误提示。
-- [ ] 真实 PDF 导出中的高亮烧录。
-- [ ] 打包后的全文索引。
-- [ ] NSIS 安装包安装/卸载/图标。
-- [ ] 深色主题截图核对。
-- [ ] v10 旧回归全套重跑。
+| 清单项 | 结果 |
+|---|---|
+| 备份恢复完整流程（库/设置/标注/pre-restore 快照） | ✅ `test-backup-restore.js` 32 项 |
+| 数据目录 move / merge / replace | ✅ `test-datadir.js` 19 项（注意：测试不能用 `PDFREADER_DATA_DIR` 钉住目录） |
+| 单实例真实双开 + 命令行 PDF 转交 | ✅ `test-single-instance.js` 7 项（新增 `PDFREADER_HIDDEN` 只藏窗口不跳锁） |
+| 查重弹窗与合并 | ✅ `test-ui-v12.js` + `test-library.js` |
+| RIS 导入导出 | ✅ `test-formats.js` 59 项 + 导入去重 |
+| arXiv 抓取 | ✅ `test-metadata.js`（fake fetch 47 项；真实网络需 `PDFREADER_LIVE=1`，本机 GitHub 不通未跑） |
+| 导入/导出 UI 的文件选择 | ⚠️ 原生对话框无法在无头测试中断言，IPC 层已覆盖；真实弹窗路径请人工点一次 |
+| 真实 PDF 导出中的高亮烧录 | ✅ `test-export-highlight.js`（探针 5 + 文件级 7）——**顺带修掉导出失效的大 bug** |
+| 打包后的全文索引 | ✅ `test-packaged.js` 15 项（asar 含 pdfjs-dist，索引/搜索/导出全过） |
+| NSIS 安装包安装/卸载/图标 | ✅ 静默安装→已安装版冒烟→静默卸载全过；升级前注意清理 `HKCU\Software\45ff96a2-*` 残留 |
+| 深色主题截图核对 | ⚠️ 探针断言 `theme-dark` class 生效；肉眼观感请自行 `npm start` 切一次主题 |
+| v10 旧回归全套重跑 | ✅ pen / real-input / lazy-render / export / library-ui 全部重跑通过 |
+
+**遗留（下轮可做，不阻塞交付）**
+- [ ] GitHub 推送（本机 `git ls-remote` 报 CRYPT_E_NO_REVOCATION_CHECK；可试代理或 `git config http.schannelCheckRevoke false`）。
+- [ ] 元数据真实网络抓取（本机网络受限时只测了 fake fetch 与错误分支）。
+- [ ] 关闭标签前「有未保存标注」的确认交互（当前会自动落盘，不丢数据，只是没有确认弹窗）。
+- [ ] 大 PDF 多开内存策略（LRU/磁盘回读）与 `restoreTabs`（预留字段，本版未启用）。
 
 ---
 
@@ -384,30 +399,25 @@ pdf-reader/
 
 ---
 
-## 7. 已知风险 / 交接注意
+## 7. 已知风险 / 交接注意（✅ = 收尾已处理）
 
-1. **打包配置是当前最大的交付风险。**  
-   `package.json` 的 `build.files` 目前是：
-   ```json
-   ["src/**/*", "assets/**/*", "!assets/icon-source.png",
-    "node_modules/pdf-lib/**/*", "!**/*.map"]
-   ```
-   没有 `node_modules/pdfjs-dist/**/*`。主进程 `fulltext.js` 会 `require('pdfjs-dist/build/pdf.js')`，打包后很可能找不到模块。至少要包含 `pdfjs-dist/build/pdf.js`、`pdfjs-dist/build/pdf.worker.js`，以及实际运行需要的 cmaps/standard_fonts；打包后必须实跑一次“建索引 + 搜索”。
+1. ✅ **打包配置已修正。**  
+   `build.files` 已包含 `pdfjs-dist/build/pdf.js`、`pdf.worker.js`、`cmaps/**`、`standard_fonts/**`；`test-packaged.js` 在产物上实跑「建索引 + 搜索 + 导出」验证。
 
-2. **安装包还没做。**  
-   当前只有 `portable`。要满足“安装包”需求，需要加 NSIS target，并确认安装/卸载/开始菜单/图标。`win.signAndEditExecutable:false` 和 `npmRebuild:false` 是这台机器的既有规避配置，不要随意删。
+2. ✅ **NSIS 安装包已做。**  
+   `win.target: ["portable","nsis"]`，NSIS 为非一键安装（可选目录、建快捷方式）。`win.signAndEditExecutable:false` 和 `npmRebuild:false` 是这台机器的既有规避配置，不要随意删。
 
-3. **现有 exe 是旧包。**  
-   `build\PDF Reader 1.0.0.exe` 为 74,254,876 字节，是 v10 基线。v11/v12 改动没有进入该产物。
+3. ✅ **旧包已替换。**  
+   v10 旧 exe 已删除，当前产物为 `PDF-Reader-1.0.0-portable.exe`（74,277,787 B）与 `PDF-Reader-Setup-1.0.0.exe`（83,635,175 B），均为 v11/v12 代码。
 
-4. **v10 回归没有全部重跑。**  
-   数据层和库 UI 已过；画笔、真实输入、懒渲染、session、export 需要补跑，特别是 renderer 改了标签/选区/主题之后。
+4. ✅ **v10 回归已全部重跑。**  
+   pen / real-input / lazy-render / session / export / library-ui 全部通过。
 
-5. **备份/恢复只验证了“备份文件能生成”。**  
-   恢复会替换库和标注集，风险较高；必须用临时目录做完整演练，确认恢复前快照存在、失败可回滚。
+5. ✅ **备份/恢复已完整演练。**  
+   `test-backup-restore.js` 覆盖备份内容、恢复替换、pre-restore 快照、坏备份拒绝。
 
-6. **数据目录切换是高风险操作。**  
-   `switchDataDir` 有 `move/merge/replace` 三条路径；`replace` 会覆盖目标库，虽然会先备份当前库，但仍需端到端测试。切换后 `library.init()` / `fulltext.init()` 的缓存重置顺序也要重点看。
+6. ✅ **数据目录切换已端到端验证。**  
+   `test-datadir.js` 覆盖 move/merge/replace；注意测试环境不能用 `PDFREADER_DATA_DIR`（会把 currentDataDir 钉死）。
 
 7. **标注和索引都按绝对路径哈希。**  
    移动/重命名 PDF 会丢标注关联、索引失效；“重新定位”只改库路径，不迁移标注文件。这是当前设计边界，不是本次遗漏。
@@ -418,12 +428,11 @@ pdf-reader/
 9. **不要恢复 `activeTab` 同名函数。**  
    侧栏的 `activeTab()` 和多标签的 `currentTab()` 必须保持区分；这是本轮实际踩过的 bug。
 
-10. **不要删除临时探针前先转正。**  
-    `_v11test.js`、`_seltest.js`、`_tabstest.js` 目前是唯一的 v11/v12 行为证据。建议先复制成正式 `test-*.js`，再删除下划线文件。
+10. ✅ **临时探针已转正并删除。**  
+    正式测试在 `scripts/test-*.js`（探针内容在 `scripts/probe-*.js`，由 `probe-runner.js` 统一驱动）。
 
-11. **Git 尚未初始化。**  
-    当前没有 `.git`、没有 remote、没有 commit。`.gitignore` 已忽略 `node_modules/`、`build/`、`dist/`、`src/renderer/pdfjs/`、`*.log`。  
-    目标仓库是 `https://github.com/shi-tou1234/cmchen-document`；推送前先确认远端是否为空、是否允许覆盖/合并。
+11. **Git 已本地初始化，未推送远端。**  
+    本地已有提交（v11/v12 快照 + 收尾）。目标仓库 `https://github.com/shi-tou1234/cmchen-document`；本机 `git ls-remote` 报 `CRYPT_E_NO_REVOCATION_CHECK`，推送前先解决网络（代理）或 `git config http.schannelCheckRevoke false`，并确认远端是否为空。
 
 12. **新克隆环境需要先生成 pdfjs 浏览器构建。**  
     `src/renderer/pdfjs/` 被 git 忽略，首次运行要：
@@ -440,11 +449,9 @@ pdf-reader/
 
 ---
 
-## 8. 建议的收尾顺序
+## 8. 建议的收尾顺序（✅ 已全部执行，以下留档）
 
-### 第一步：先保住现有工作
-
-当前没有 Git，建议立刻：
+### 第一步：先保住现有工作（✅ 已完成）
 
 ```powershell
 cd D:\项目\pdf阅读\pdf-reader
@@ -502,7 +509,7 @@ git commit -m "chore: snapshot v11/v12 implementation before verification"
 
 ---
 
-## 9. 当前可直接运行的命令
+## 9. 当前可直接运行的命令（✅ 已更新）
 
 ```powershell
 cd D:\项目\pdf阅读\pdf-reader
@@ -511,19 +518,29 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 # 开发启动
 npm start
 
-# 数据层
-node scripts\test-library.js
+# 数据层 / 库 UI
+node scripts\test-library.js        # [library] PASS (82)
+node scripts\test-library-ui.js     # [lib-ui] PASS (43)
 
-# 真实 Electron 库 UI
-node scripts\test-library-ui.js
+# v11/v12 正式回归（完整清单见 README「v11/v12 回归测试」）
+node scripts\test-fulltext.js       # [fulltext] PASS (36)
+node scripts\test-formats.js        # [formats] PASS (59)
+node scripts\test-settings.js       # [settings] PASS (22)
+node scripts\test-metadata.js       # [metadata] PASS (47)
+node scripts\test-selection.js      # [selection] PASS (14)
+node scripts\test-tabs.js           # [tabs] PASS (14)
+node scripts\test-ui-v11.js         # [ui-v11] PASS
+node scripts\test-ui-v12.js         # [ui-v12] PASS
+node scripts\test-backup-restore.js # [backup] PASS (32)
+node scripts\test-datadir.js        # [datadir] PASS (19)
+node scripts\test-single-instance.js  # [single-instance] PASS (7)
+node scripts\test-export-highlight.js # [export-highlight] PASS (12)
 
-# 临时 v11/v12 探针
-node scripts\_v11test.js
-node scripts\_seltest.js
-node scripts\_tabstest.js
+# 打包产物冒烟
+node scripts\test-packaged.js       # [packaged] PASS (15)
 ```
 
-> 探针会创建临时目录并清理；不要在没有隔离环境变量的情况下让测试指向真实 `userData`。
+> 所有测试自建临时目录并在结束时清理；不要在没有隔离环境变量的情况下让测试指向真实 `userData`。
 
 ---
 

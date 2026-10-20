@@ -65,8 +65,12 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     openDataDir: () => ipcRenderer.invoke('lib-open-data-dir'),
     // v12：元数据 / 文献格式 / 查重 / 批量 / 智能收藏集
     fetchMetadata: (identifier) => ipcRenderer.invoke('lib-fetch-metadata', { identifier }),
-    importRefs: (text, name) => ipcRenderer.invoke('lib-import-refs', { text, name }),
-    exportRefs: (outPath) => ipcRenderer.invoke('lib-export-refs', { outPath }),
+    // 同时兼容 importRefs(text, name) 与 importRefs({ text, name })；
+    // 无参调用表示“弹系统文件对话框”，由主进程判断。
+    importRefs: (text, name) => ipcRenderer.invoke('lib-import-refs',
+      (text && typeof text === 'object') ? text : { text, name }),
+    exportRefs: (outPath) => ipcRenderer.invoke('lib-export-refs',
+      (outPath && typeof outPath === 'object') ? outPath : { outPath }),
     duplicates: () => ipcRenderer.invoke('lib-duplicates'),
     mergeItems: (keepKey, otherKeys) => ipcRenderer.invoke('lib-merge-items', { keepKey, otherKeys }),
     bulkUpdate: (keys, patch) => ipcRenderer.invoke('lib-bulk-update', { keys, patch }),

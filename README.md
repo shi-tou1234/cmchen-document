@@ -153,6 +153,58 @@
 
 **已知边界**：元数据仍需手填/靠文件名，未做联网抓取与 BibTeX/CSL；回收站是索引级软删除，不做文件回收；附件重定位是手动选文件，不自动扫描目录；详情面板固定右栏，窗口很窄时列表会被压缩；仍是单窗口、无同步/群组库。**「移除/清空/永久删除都不删磁盘 PDF」是永久约定，不是临时实现细节。**
 
+## v11 更新（库级全文检索 / 选区高亮 / 备份恢复 / 设置 / 单实例）
+
+- **库级全文检索**：`src/fulltext.js` 在主进程用 `pdfjs-dist/build/pdf.js` 抽文本，不依赖渲染窗口、不引 SQLite。索引按 `<dataDir>/fulltext/<sha1(路径)>.json` 存放，`mtime+size` 判新鲜；索引是**可重建缓存**，不进备份、不进备份恢复。搜索多词 AND、大小写不敏感、片段高亮、主进程按 `key+page` 去重最多 120 条。设置面板可手动重建/清空，启动后低优先级自动补索引（`autoIndex` / `PDFREADER_NO_AUTO_INDEX=1` 可关）。
+- **选中文字高亮 + 评论**：`selection.js` 把浏览器选区转成页面矩形，弹浮动工具条（高亮 / 高亮+评论）；标注形状 `{tool:'mark', color, rects, text, comment}` 存进标注文件，侧栏批注列表可跳页/改评/删除，「导出批注为笔记 (.txt)」同步覆盖。已知边界：移动/重命名 PDF 后旧标注不会跟随（按路径哈希存储）。
+- **一键备份 / 恢复**：备份 = JSON（设置 + 库 + 标注；**不含 PDF 本体与全文索引**）。恢复是「替换库 + 替换标注集」，恢复前自动写 `pre-restore-<时间戳>.json` 快照到 `<dataDir>/backups/`，失败可回滚；恢复保留当前 `dataDir`，避免把库路径改回旧机器路径。损坏的备份文件会被拒绝且不影响当前库。
+- **设置面板**：存储位置（切换时 move / merge / replace 三选一，目标已有库时弹窗询问）、默认排序、主题（light/dark/system）、启动自动索引。设置文件固定在 `<userData>/settings.json`，不随数据目录移动。
+- **单实例锁**：非测试模式 `requestSingleInstanceLock()`；第二个实例自动退出并把命令行里的 PDF 转交给第一个实例。
+
+**验证（都是真跑）**
+- `scripts/test-fulltext.js`（36）：索引/新鲜度/搜索片段/重建/清空/重复附件/坏 PDF/坏索引容错。
+- `scripts/test-selection.js`（14）：文本层选中 → 工具条 → 矩形 → SVG 渲染 → 评论 → 侧栏列表 → 标注文件 → 导出 payload → 笔记文本。
+- `scripts/test-backup-restore.js`（32）：备份内容 → 改库/改设置/改标注 → 恢复 → 库/设置/标注/pre-restore 快照逐项核对 + 坏备份拒绝。
+- `scripts/test-datadir.js`（19）：数据目录 move / merge / replace 三条路径，切换前后磁盘 `library.json` 逐项核对。
+- `scripts/test-single-instance.js`（7）：真实双开，第二个实例退出 + PDF 转交（用 `window-state.json` 做磁盘证据）。
+- `scripts/test-ui-v11.js`（22）：库 UI 全文检索 / 智能收藏集 / 批量编辑 / 设置 / 备份文件内容。
+
+**这轮修掉的真 bug（v11 收尾时发现）**
+1. **「导出副本」在真实链路里是坏的**：PDF.js 会把 `getDocument({data})` 传入的 ArrayBuffer **转移**给 worker，`App.state.sourceBytes` 从此变成 detached，`exportPdf` IPC 结构化克隆直接抛「An object could not be cloned」。之前只有纯 pdf-lib 的 `test-export.js`，测不到这条链路。修法：传给 pdfjs 一份副本（`bytes.slice()`），原字节自己留着。
+2. 无附件条目走 `fulltext.indexOne` 会把对象当路径传给 `path.resolve` 抛错，现在在入口拦住。
+3. 第二实例聚焦逻辑加了 `PDFREADER_HIDDEN` 测试开关（隐藏窗口不影响锁），探针结果可经 `PDFREADER_PROBE_OUT` 落盘，打包产物（GUI 子系统拿不到 stdout）也能验收。
+
+## v12 更新（元数据抓取 / BibTeX·RIS / 查重合并 / 批量 / 智能收藏集 / 多标签）
+
+- **DOI / arXiv 元数据抓取**：详情面板「从 DOI / arXiv 抓取元数据」，Crossref + arXiv export API，只依赖 Node 自带 fetch（可注入 `fetchImpl` 测试）；识别失败 / HTTP 错误 / 解析失败都返回中文错误，**不覆盖**已有元数据。
+- **BibTeX / RIS 导入导出**：`formats.js` 纯字符串解析，坏条目跳过不抛错；导入按 DOI 或「标准化标题+年份」去重；导出按扩展名选 `.bib`/`.ris`。
+- **查重 / 合并**：DOI 相同或标题+年份相同即并组（并查集）；合并时保留项补空字段、合并作者/标签/收藏集/附件/页码，**被合并项只删索引，绝不删磁盘 PDF**。查重弹窗可自选保留项。
+- **批量编辑 / 批量回收站**：全选进批量条，改标题/年份/类型/作者/标签/收藏集，支持增删标签与收藏集、批量移入回收站；回收站条目不会被批量修改波及。
+- **智能收藏集**：`searches: [{id,name,query}]`，保存当前搜索条件，不复制条目。
+- **多标签页**：打开不同 PDF 建新标签，同路径直接切过去；切换不丢标注（切走前先落盘）、恢复条目进度；关闭标签只结束阅读会话，不删 PDF、不删标注文件；关到最后一个回空态并自动显示文献库。
+
+**验证（都是真跑）**
+- `scripts/test-formats.js`（59）：BibTeX/RIS 解析、多作者、页码 `--` 归一、关键词逗号/分号、花括号转义往返、类型映射、坏数据容错。
+- `scripts/test-metadata.js`（47，默认不联网，`PDFREADER_LIVE=1` 加测真实网络）：标识符识别、Crossref/arXiv 字段映射、类型映射、HTTP/JSON/网络/超时错误分支。
+- `scripts/test-tabs.js`（14）：开/切/关标签、页码恢复、**切换不丢标注**、关闭不删标注文件与磁盘 PDF。
+- `scripts/test-ui-v12.js`（21）：查重弹窗 → 自选保留项合并 → 详情面板 → 无效 DOI 错误提示不覆盖标题 → BibTeX 导入导出 IPC。
+- `scripts/test-library.js` 扩到 **82**：智能收藏集、批量编辑、查重分组与原因、合并补字段、导入去重。
+
+**这轮修掉的真 bug（v12 收尾时发现）**
+1. **arXiv 分类标签永远为空**：arXiv API 返回 `<category term="cs.CL"/>`（自闭合），原实现按 `<category>…</category>` 成对标签匹配，一个都抓不到。
+2. **查重原因会随并查集根合并而丢失**：A/B 因标题+年份成组、E 又因 DOI 并进来时，旧根上的「DOI 相同」被丢掉，弹窗只显示一条原因。现在根合并时把原因集合并过去。
+3. **DOI 不归一**：`https://doi.org/10.x/yy` 与 `10.x/yy` 会被当成两条、合并后字段也不统一。现在入库/更新/批量统一存裸 DOI。
+4. BibTeX 页码 `45--67` 没归一成 `45-67`（导出 RIS 时 SP/EP 拆不开）；关键词只按逗号切、不认分号；导出时转义的花括号 `\{` 解析后留下孤立反斜杠——都已修。
+5. preload 的 `importRefs/exportRefs` 只收位置参数，传对象会静默掉进文件对话框；现在两种都兼容。
+
+## 打包产物（v11/v12 已打包并冒烟）
+
+- `build/win-unpacked/`：常规目录版（图标已嵌）。
+- `build/PDF-Reader-1.0.0-portable.exe`（约 74.3 MB）：免安装单文件。
+- `build/PDF-Reader-Setup-1.0.0.exe`（约 83.6 MB）：NSIS 安装包，可选安装目录、建桌面/开始菜单快捷方式，自带卸载器。
+- 打包冒烟 `scripts/test-packaged.js`（15 项）：在产物上验证渲染、主进程全文索引（asar 里的 pdfjs-dist）、库级搜索、导出副本（可重新打开且含高亮填充）。portable / win-unpacked / 已安装版都跑过全绿。
+- 安装 → 运行 → 卸载已验证（静默 `/S`）；**升级安装注意**：若之前用带中文/非法 `/D=` 路径装过，`HKCU\Software\45ff96a2-*` 里会残留损坏的 InstallLocation，导致升级安装写到无效路径（表现为只建快捷方式不落文件），删掉该键即可恢复。
+
 ### 应用图标
 
 - 源图为 `assets/icon-source.png`（成品方形图，四周带留白）。`scripts/make-icon.js` 先按中心裁掉约 7% 白边，再高质量缩放成 256/128/64/48/32/16 六档 PNG；`scripts/make-ico.js` 把它们打包成 `assets/icon.ico`。
@@ -232,13 +284,43 @@ node scripts\test-session.js
 ```powershell
 # 数据层（纯 Node，临时目录隔离，不碰真实 library.json）
 node scripts\test-library.js
-# 期望：[library] PASS (51)
+# 期望：[library] PASS (82)
 
 Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 # 界面端到端：内部 spawn 真实 app（含 lib-* IPC），执行 libui-check 探针
 node scripts\test-library-ui.js
 # 期望：[lib-ui] PASS (43)
 ```
+
+## v11/v12 回归测试（全部失败即退出码非 0）
+
+```powershell
+Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+
+# ---- 纯 Node（不启 Electron）----
+node scripts\test-fulltext.js      # [fulltext] PASS (36)   全文索引/搜索/新鲜度/容错
+node scripts\test-formats.js       # [formats] PASS (59)    BibTeX/RIS 解析与导出
+node scripts\test-settings.js      # [settings] PASS (22)   设置白名单/BOM/损坏自愈
+node scripts\test-metadata.js      # [metadata] PASS (47)   DOI/arXiv（fake fetch，PDFREADER_LIVE=1 加测真实网络）
+
+# ---- 真实 Electron（探针经 scripts/probe-runner.js 驱动）----
+node scripts\test-selection.js         # [selection] PASS (14)        选区高亮/评论/侧栏/笔记
+node scripts\test-tabs.js              # [tabs] PASS (14)             多标签开/切/关/标注不丢
+node scripts\test-ui-v11.js            # [ui-v11] PASS                全文检索/智能收藏集/批量/设置/备份
+node scripts\test-ui-v12.js            # [ui-v12] PASS                查重/合并/详情/导入导出 IPC
+node scripts\test-backup-restore.js    # [backup] PASS (32)           备份/恢复/pre-restore 快照
+node scripts\test-datadir.js           # [datadir] PASS (19)          数据目录 move/merge/replace
+node scripts\test-single-instance.js   # [single-instance] PASS (7)   真实双开 + PDF 转交
+node scripts\test-export-highlight.js  # [export-highlight] PASS (探针 5 + 文件级 7)  真实导出后高亮确实烧进 PDF
+
+# ---- 打包产物冒烟 ----
+node scripts\test-packaged.js                                  # 默认测 build\win-unpacked
+node scripts\test-packaged.js "build\PDF-Reader-1.0.0-portable.exe"
+node scripts\test-packaged.js "C:\...\Programs\PDF Reader\PDF Reader.exe"   # 已安装版
+# 期望：[packaged] PASS (15)
+```
+
+> 单实例测试会真的启动两个进程（窗口隐藏）；备份/数据目录/查重测试全部使用临时目录，不碰真实文献库。
 
 > 若在 PowerShell 里直接 `& electron.exe ...` 发现命令秒退且没有输出，改用
 > `Start-Process ... -NoNewWindow -Wait -RedirectStandardOutput out.txt` —— Electron 是 GUI 子系统，
@@ -264,23 +346,31 @@ Get-Process | Where-Object { $_.Name -like '*PDF Reader*' } | Stop-Process -Forc
 $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
 $env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
 
+# 0.5) 渲染层 pdfjs 构建必须先就位（gitignore，新环境必跑）
+npm run copy-pdfjs
+
 # 1) 常规打包（signAndEditExecutable=false，builder 不动图标）
-npx electron-builder --win portable
+npx electron-builder --win dir
 
 # 2) 给「应用本体」嵌图标 —— 只对 win-unpacked 里的普通 PE 做
 & "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign\837415951\rcedit-x64.exe" `
   "build\win-unpacked\PDF Reader.exe" --set-icon "assets\icon.ico"
 
-# 3) 用已嵌图标的目录重新生成 portable（这一步之后绝不能再碰 rcedit）
+# 3) 用已嵌图标的目录重新生成 portable 与 NSIS 安装包（这一步之后绝不能再碰 rcedit）
 npx electron-builder --win portable --prepackaged "build\win-unpacked"
+npx electron-builder --win nsis   --prepackaged "build\win-unpacked"
 
-# 4) 验收：体积必须约 70MB+
-(Get-Item "build\PDF Reader 1.0.0.exe").Length
+# 4) 验收：portable 约 74MB，Setup 约 84MB；然后跑打包冒烟
+node scripts\test-packaged.js "build\PDF-Reader-1.0.0-portable.exe"
 ```
 
 > ⚠️ **切勿对 portable exe 直接跑 rcedit。** 它是 NSIS 自解压格式，rcedit 重写 PE 资源时会把尾部追加的 app 数据整体丢弃——实测 74,043,319 字节被截成 62,976 字节（只剩 stub），**而退出码仍是 0**，只会静默产出一个双击打不开的残缺文件。
+>
+> ⚠️ **`build.files` 必须包含 pdfjs-dist 的主进程构建**（`build/pdf.js`、`build/pdf.worker.js`、`cmaps/`、`standard_fonts/`）。主进程 `fulltext.js` 直接 `require('pdfjs-dist/build/pdf.js')`，漏了会在打包后报 `Cannot find module`——打包冒烟里的「主进程能建全文索引」就是防这条回归的。
+>
+> NSIS 静默安装/卸载：`PDF-Reader-Setup-1.0.0.exe /S /currentuser`；卸载 `...\Uninstall PDF Reader.exe /S /currentuser`。曾踩坑：用非法 `/D=` 路径装过一次后，`HKCU\Software\45ff96a2-*` 残留损坏的 InstallLocation 会让后续升级只建快捷方式不落文件，删掉该键即可。
 
-双击 `build\PDF Reader 1.0.0.exe` 即可运行，不需要 `npm start`。
+双击 `build\PDF-Reader-1.0.0-portable.exe` 即可运行，不需要 `npm start`。
 
 ## 目录结构
 
@@ -292,26 +382,46 @@ pdf-reader/
 │  ├─ make-sample.js       # 生成 3 页冒烟样本 assets/sample.pdf
 │  ├─ make-icon.js         # 从 assets/icon-source.png 裁切并生成多尺寸 icon-*.png
 │  ├─ make-ico.js          # 合成 assets/icon.ico
+│  ├─ probe-runner.js      # Electron 探针运行器：spawn 真实 app + 解析 [probe-result] + 退出码
+│  ├─ probe-*.js           # 在渲染进程执行的探针内容（selection/tabs/ui-v11/ui-v12/backup/datadir/packaged…）
 │  ├─ test-pen.js          # 合成 pointer 事件：串页/悬挂/误点/抽稀/多行/竞态
 │  ├─ test-real-input.js   # sendInputEvent 真实鼠标（走命中测试）
 │  ├─ test-lazy-render.js  # 只滚 scrollTop，验证懒渲染观察器确实工作
-│  ├─ test-export.js       # pdf-lib 导出副本（纯 Node）
-│  ├─ test-session.js       # 真实 app 跑三次：记页码/恢复页码/命令行打开
-│  ├─ test-library.js       # 数据层：CRUD/多集合/回收站/迁移/持久化/BOM（纯 Node）
-│  ├─ libui-check.js        # 库界面探针（在真实渲染进程执行的 DOM 断言脚本）
-│  ├─ test-library-ui.js    # 库界面端到端：spawn 真实 app 跑 libui-check 并断言
-│  ├─ libui-shot.js         # 截图探针：打开详情面板供 PDFREADER_PROBE_SHOT 抓图
-│  └─ perf-big-pdf.js       # 400~1200 页大文件分段计时
+│  ├─ test-export.js       # pdf-lib 导出管线（纯 Node）
+│  ├─ test-export-highlight.js # 真实选区→导出→pdfjs 重开验证高亮烧录
+│  ├─ test-session.js      # 真实 app 跑三次：记页码/恢复页码/命令行打开
+│  ├─ test-library.js      # 数据层 v3：CRUD/回收站/迁移/查重/合并/批量/导入/持久化（纯 Node）
+│  ├─ test-library-ui.js   # 库界面端到端：spawn 真实 app 跑 libui-check 并断言
+│  ├─ libui-check.js       # 库界面探针（在真实渲染进程执行的 DOM 断言脚本）
+│  ├─ libui-shot.js        # 截图探针：打开详情面板供 PDFREADER_PROBE_SHOT 抓图
+│  ├─ test-fulltext.js     # 全文索引/搜索/新鲜度/容错（纯 Node）
+│  ├─ test-formats.js      # BibTeX/RIS 解析与导出（纯 Node）
+│  ├─ test-settings.js     # 设置白名单/BOM/损坏自愈（纯 Node）
+│  ├─ test-metadata.js     # DOI/arXiv 抓取（fake fetch，可选联网）
+│  ├─ test-selection.js    # 选区高亮 + 评论 + 侧栏 + 笔记
+│  ├─ test-tabs.js         # 多标签开/切/关 + 标注不丢
+│  ├─ test-ui-v11.js       # 全文检索/智能收藏集/批量/设置/备份 UI 流程
+│  ├─ test-ui-v12.js       # 查重/合并/详情/导入导出 IPC 流程
+│  ├─ test-backup-restore.js # 备份/恢复/pre-restore 快照端到端
+│  ├─ test-datadir.js      # 数据目录 move/merge/replace 端到端
+│  ├─ test-single-instance.js # 真实双开 + 命令行 PDF 转交
+│  ├─ test-packaged.js     # 打包产物冒烟（win-unpacked / portable / 已安装版）
+│  └─ perf-big-pdf.js      # 400~1200 页大文件分段计时
 ├─ src/
-│  ├─ main.js               # 窗口/对话框/IPC/菜单/最近打开/页码/命令行/库 IPC/探针钩子
-│  ├─ library.js            # 本地库数据层 v2（JSON 索引，零依赖，原子写+损坏/BOM 自愈，v1 自动迁移）
+│  ├─ main.js               # 窗口/对话框/IPC/菜单/最近打开/页码/命令行/库 IPC/备份恢复/单实例/探针钩子
+│  ├─ library.js            # 本地库数据层 v3（+智能收藏集/查重合并/批量/导入）
+│  ├─ fulltext.js           # 主进程全文索引（pdfjs 抽文本，按路径哈希存 JSON）
+│  ├─ settings.js           # 设置读写、白名单、BOM、损坏备份
+│  ├─ formats.js            # BibTeX/RIS 解析与导出
+│  ├─ metadata.js           # DOI/arXiv 元数据抓取
 │  ├─ preload.js            # contextBridge：pdfBridge.* 与 pdfBridge.lib.*
 │  └─ renderer/
-│     ├─ index.html         # 工具栏 + 绘制下拉 + 页容器 + 库覆盖层 + 状态栏
-│     ├─ styles.css         # Edge 风浅色扁平
-│     ├─ renderer.js        # PDF.js 连续渲染 + 缩放 + 翻页 + 导出 payload
-│     ├─ library-ui.js      # 文献库 UI（详情面板/多收藏集/回收站/排序/导入/拖拽）
+│     ├─ index.html         # 工具栏 + 绘制下拉 + 标签栏 + 页容器 + 库覆盖层 + 弹窗
+│     ├─ styles.css         # Edge 风浅色扁平 + 深色主题
+│     ├─ renderer.js        # PDF.js 连续渲染 + 缩放 + 翻页 + 多标签 + 导出 payload
+│     ├─ library-ui.js      # 文献库 UI（详情/多收藏集/回收站/排序/查重/批量/设置/导入导出）
 │     ├─ annotations.js     # 标注：SVG 叠加层 + window 级指针手势
+│     ├─ selection.js       # 文字选区 → 矩形 → 浮动工具条/评论
 │     └─ pdfjs/            # pdf.min.js / pdf.worker.min.js（npm run copy-pdfjs 生成，已 gitignore）
 └─ assets/
    ├─ sample.pdf           # 冒烟样本
