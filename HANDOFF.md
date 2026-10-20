@@ -3,7 +3,7 @@
 > 更新时间：2026-10-20（收尾完成）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。当前目录是本地 Git 仓库（已有提交）；因本机访问 GitHub 失败（CRYPT_E_NO_REVOCATION_CHECK），尚未推送远端。**
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。**
 
 ## 收尾后的一句话现状
 
@@ -431,8 +431,17 @@ pdf-reader/
 10. ✅ **临时探针已转正并删除。**  
     正式测试在 `scripts/test-*.js`（探针内容在 `scripts/probe-*.js`，由 `probe-runner.js` 统一驱动）。
 
-11. **Git 已本地初始化，未推送远端。**  
-    本地已有提交（v11/v12 快照 + 收尾）。目标仓库 `https://github.com/shi-tou1234/cmchen-document`；本机推送两次失败：schannel 报 `CRYPT_E_NO_REVOCATION_CHECK`，改 openssl 后端报 `unable to get local issuer certificate`——像是本机有代理解密 TLS 或缺 CA。需要人工配置代理/证书后 `git push -u origin main`（推送前确认远端是否为空，远端有内容先拉取合并，不要强推）。
+11. ✅ **已推送远端成功（2026-10-20）。**  
+    目标仓库 `https://github.com/shi-tou1234/cmchen-document`，本地 4 个提交已全部推上 `main`（远端 HEAD = 1d96490）。  
+    **之前推不上去的根因**：SteamTools（Watt Toolkit）的 GitHub 加速在 hosts 里把 `github.com` 指到 `127.0.0.1`，本地 443 端口的 `Steam++.Accelerator.exe` 用自签的 "SteamTools Certificate" 做 TLS 劫持，git 不认这张证书。  
+    **解决办法**（不污染系统信任链）：绕开代理与 hosts，直接连真实 IP——
+    ```bash
+    # 去 http_proxy/https_proxy 环境变量；IP 变了用 nslookup github.com 223.5.5.5 重新查
+    env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+      git -c http.curloptResolve=github.com:443:20.205.243.166 push
+    ```
+    该配置已写入本仓库的 `.git/config`（`http.curloptResolve`），日常 `git push/pull` 记得先清掉代理环境变量。  
+    **远端原有占位 Initial commit**（1 行 README），已用 `--allow-unrelated-histories -s ours` 合并进本地历史，完整项目树无损。
 
 12. **新克隆环境需要先生成 pdfjs 浏览器构建。**  
     `src/renderer/pdfjs/` 被 git 忽略，首次运行要：
