@@ -1,16 +1,59 @@
-# PDF Reader v11/v12 开发交接文档
+# PDF Reader v11/v12/v13/v14/v15/v16 开发交接文档
 
-> 更新时间：2026-10-20（收尾完成）  
+> 更新时间：2026-10-20（v16 学术编辑风重做）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。**
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 把视觉换成「学术编辑风」并把文献库条目从卡片网格改成表格式紧凑列表。**
 
 ## 收尾后的一句话现状
 
 - 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 43 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
+- v13 起回归脚本共 22 个（新增 `test-bugfix.js` 21 项断言），v14 起共 24 个（新增 `test-cite.js` 33 项、`test-v14.js` 29 项），全部通过。
+- **文档结构（v15）**：`README.md` 只讲「有什么 / 怎么用 / 怎么测 / 有什么边界」；逐版本演进记录在 `CHANGELOG.md`；交接细节与约定留在本文件。改 README 时不要再往里堆版本流水账。
+- **视觉约定（v16）**：暖纸底 + 墨色字 + 印泥红强调色；衬线标题 / 等宽元信息；发丝线分层，阴影只给浮层；条目是表格行不是卡片。**不要再往回加蓝底、圆角胶囊、软阴影卡片**——那是这轮要推翻的「AI 味」。
+- v13 重新打包（2026-10-20）：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,276,569 B）、`PDF-Reader-Setup-1.0.0.exe`（83,641,859 B，NSIS）。打包冒烟在 win-unpacked 与 portable 上各跑过一遍，都是 PASS(15)；**NSIS 本轮没有在本机静默安装**（避免动用户机器），如需验证安装/卸载请手动跑一次 `/S /currentuser`。
 - 打包产物已产出并冒烟：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,277,787 B）、`PDF-Reader-Setup-1.0.0.exe`（83,635,175 B，NSIS）。
 - 安装 → 已安装版冒烟 → 静默卸载，全部通过（快捷方式/安装目录随之清理）。
 - 收尾过程中修掉 8 个真实缺陷（详见 README v11/v12 章节），其中**「导出副本在真实链路失效」是 v10 起就存在的高危 bug**。
+
+---
+
+## 0. v13：复查修掉的 6 组缺陷（2026-10-20）
+
+这一轮只修 bug、不加功能。全部流程是「先用真实 Electron 探针复现 → 再改 → 再把断言固化进 `scripts/test-bugfix.js`」。
+
+| # | 严重度 | 缺陷 | 位置 | 修法 |
+|---|---|---|---|---|
+| 1 | 高 | 跨文档撤销把 A 的标注写进 B（并自动落盘到 B 的标注文件） | `annotations.js` undoStack / `renderer.js` loadPdf | 新增 `Anno.reset()`，载入文档与关闭文档时清空撤销栈 |
+| 2 | 中 | 页码指示器提前跳页（连带「清除本页」清错页、记住的阅读位置错） | `renderer.js` setupObserver | 拆成两个观察器：`App.io` 预渲染（600px）、`App.vo` 当前页（rootMargin 0） |
+| 3 | 中 | 清空搜索后高亮/结果残留，旧搜索还会回填 | `renderer.js` doSearch | 加搜索代号 `searchSeq`，每次 await 后校验；空查询走 `clearSearchHl()` |
+| 4 | 中 | 文献库覆盖层没有退路；设置弹窗残留且 Esc 失效 | `library-ui.js` hide/Esc、`index.html` 库头 | 库头加「← 阅读」按钮；`hide()` 一并关子弹窗；Esc 逐层关闭 |
+| 5 | 低 | 缩放后下拉框变空（value 是小数、匹配用百分比） | `renderer.js` syncScaleSelect | 改数值匹配；非预设档位补「自定义 xx%」选项 |
+| 6 | 低 | 按钮聚焦时按空格会翻页并吃掉按钮的原生激活 | `renderer.js` 键盘处理 | 焦点在 button/a/[role=button]/contenteditable 时让行 |
+
+顺带修掉：`loadPdf` 加载代号（防旧加载 destroy 新文档）、`restoreAnnos` 读盘回来后校验 `filePath`、拖进库时 drop 捕获补 `stopPropagation()`（原来拖进库会被阅读器再打开一次）、导入/拖入同一路径不再重复建条目（`addPdf(..., { dedupe: true })`）。
+
+**约定提醒**：`lib-add-pdf` 的去重是**显式 opt-in**（`opts.dedupe`），底层 API 默认仍「建一条新的」——`test-backup-restore` 用同一路径造第 3 条条目，正是靠这个默认行为。加新的导入入口时记得传 `dedupe: true`。
+
+---
+
+## 0.1 v14：把文献「用起来」的三件事（2026-10-20）
+
+v14 只加功能、不改数据结构，三个功能都对着「读完之后怎么把文献用出去」：
+
+| 功能 | 位置 | 说明 |
+|---|---|---|
+| 标签选择器 | `src/renderer/library-ui.js` + `index.html`（`#lib-tags`）+ `styles.css` | 侧栏列出所有标签与条数，点一下按标签筛；可多选（命中任一即可）；卡片上的标签也可点（`data-tag-filter`，不会顺手打开 PDF）；有「清除筛选」 |
+| 复制引用 | 新增 `src/cite.js` + 详情面板「引用」区 + `preload.copyText` + 主进程 `copy-text` | GB/T 7714-2015 / APA 7 两种样式，实时预览，一键复制到剪贴板 |
+| 批注导出多格式 | `src/renderer/renderer.js`（`buildNoteText(fmt)`）+ 主进程 `export-note` 的 `fmt` | MD / CSV / TXT 三个按钮；纯文本格式保持 v11 原样不变 |
+
+**约定提醒**
+
+- `src/cite.js` 是 UMD：Node 端 `require('./cite.js')`、浏览器端 `<script src="../cite.js">` 拿到 `window.Cite`。
+- 引用排版的**已知边界**：作者是逗号分隔的纯字符串，没有姓/名/角色结构化信息，APA 不做姓名拆分；没有引文数据库，不支持页码定位符/语言本地化/自定义样式。要完整 CSL 得引 `citeproc-js` + 样式库。
+- 批注导出内容在渲染层拼好再走 `export-note` IPC，主进程只管落盘与后缀；新增格式要同时改 `renderer.js` 的 `buildNoteText` 和 `main.js` 的 `NOTE_FORMATS`。
+
+**验证**：`scripts/test-cite.js`（33 项，纯 Node）+ `scripts/test-v14.js`（29 项，真实 Electron）。回归脚本从 22 个增加到 24 个，全部通过。
 
 ---
 
