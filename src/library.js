@@ -346,6 +346,58 @@ function removeTag(key, tag) {
   it.updated = now(); save(); return it;
 }
 
+// v21：标签重命名（改所有条目上的同名标签）
+function renameTag(from, to) {
+  const a = String(from || '').trim();
+  const b = String(to || '').trim();
+  if (!a || !b || a === b) return { ok: false, error: '标签名不对' };
+  const s = load();
+  let n = 0;
+  for (const it of s.items) {
+    if (!Array.isArray(it.tags) || it.tags.indexOf(a) < 0) continue;
+    it.tags = it.tags.filter((x) => x !== a);
+    if (it.tags.indexOf(b) < 0) it.tags.push(b);
+    it.updated = now();
+    n++;
+  }
+  save();
+  return { ok: true, renamed: n, from: a, to: b };
+}
+
+// v21：把标签从所有条目上移除（不是删条目）
+function removeTagEverywhere(tag) {
+  const t = String(tag || '').trim();
+  if (!t) return { ok: false, error: '标签名不对' };
+  const s = load();
+  let n = 0;
+  for (const it of s.items) {
+    if (!Array.isArray(it.tags) || it.tags.indexOf(t) < 0) continue;
+    it.tags = it.tags.filter((x) => x !== t);
+    it.updated = now();
+    n++;
+  }
+  save();
+  return { ok: true, removed: n, tag: t };
+}
+
+// v21：把标签 A 合并进标签 B（所有条目）
+function mergeTags(from, into) {
+  const a = String(from || '').trim();
+  const b = String(into || '').trim();
+  if (!a || !b || a === b) return { ok: false, error: '标签名不对' };
+  const s = load();
+  let n = 0;
+  for (const it of s.items) {
+    if (!Array.isArray(it.tags) || it.tags.indexOf(a) < 0) continue;
+    it.tags = it.tags.filter((x) => x !== a);
+    if (it.tags.indexOf(b) < 0) it.tags.push(b);
+    it.updated = now();
+    n++;
+  }
+  save();
+  return { ok: true, merged: n, from: a, into: b };
+}
+
 function addCollection(name, parentId) {
   const pid = parentId && findCollection(parentId) ? parentId : null;
   const c = { id: genKey(), name: String(name || '未命名').trim() || '未命名', parentId: pid };
@@ -653,7 +705,7 @@ module.exports = {
   addPdf, addItem, updateItem, removeItem,
   trashItem, restoreItem, deleteItemForever, emptyTrash,
   findItem, findItemByPath, setPageByKey,
-  addTag, removeTag,
+  addTag, removeTag, renameTag, removeTagEverywhere, mergeTags,
   addCollection, removeCollection, moveItem, setCollections, setAttachment,
   addSearch, removeSearch,
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,

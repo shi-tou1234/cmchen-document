@@ -1,14 +1,14 @@
-# PDF Reader v11~v19 开发交接文档
+# PDF Reader v11~v21 开发交接文档
 
-> 更新时间：2026-10-21（v19 界面减负 + 补官方缺失功能：引用样式 5 种 / CSL-JSON 互通 / 批注标签与搜索）  
+> 更新时间：2026-10-21（v21 缩放保持位置 / 标签重命名与全局移除 / 导出全部批注）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 工具带常驻 + 工具快捷键 + 文档快速切换 + 导入读 PDF 元数据，**v19 按「新手优先、界面别繁杂」把工具带分组、首次上手提示、库里进阶分区折叠，并补上 Chicago/IEEE/MLA 三种引用样式、CSL-JSON 互通、批注标签与批注搜索（按要求不做同步）**。
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 工具带常驻 + 工具快捷键 + 文档快速切换 + 导入读 PDF 元数据，v19 界面减负 + 引用样式 5 种 + CSL-JSON 互通 + 批注标签与搜索，v20 专注模式 + 页面右键菜单 + 导出当前页 PNG + 深色反色，**v21 缩放保持位置 + 标签重命名/合并/全局移除 + 导出全部批注为一个 Markdown（按要求不做同步）**。
 
 ## 收尾后的一句话现状
 
 - 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 43 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
-- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，v18 起 26 个，**v19 起 27 个**（新增 `test-v19.js` 23 项，另给 formats/cite 两个纯 Node 测试补了 29 项），全部通过。
+- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，v18 起 26 个，v19 起 27 个，v20 起 28 个，**v21 起 29 个**（新增 `test-v21.js` 13 项），全部通过。
 - **推送方式（v17 实测有效）**：SteamTools 证书那条路现在不通（`sslCAInfo` 指向 SteamTools CA，直连 GitHub 时证书链对不上，报 `unable to get local issuer certificate`）。hosts 里已没有 github 的劫持，直接用系统证书库即可：
   ```powershell
   git -c http.sslBackend=schannel push -u origin main

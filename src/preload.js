@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   copyText: (text) => ipcRenderer.invoke('copy-text', { text }),
   // v20：把当前页导出成 PNG（数据是 dataURL）
   exportPagePng: (info) => ipcRenderer.invoke('export-page-png', info),
+  // v21：把所有文档的批注汇总成一份 Markdown（outPath 可选，给了就不弹对话框）
+  exportAllNotes: (outPath) => ipcRenderer.invoke('export-all-notes', { outPath }),
   // 应用设置（v11）
   getSettings: () => ipcRenderer.invoke('settings-get'),
   setSettings: (patch) => ipcRenderer.invoke('settings-set', patch),
@@ -62,6 +64,10 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     setCollections: (key, collectionIds) => ipcRenderer.invoke('lib-set-collections', { key, collectionIds }),
     addTag: (key, tag) => ipcRenderer.invoke('lib-add-tag', { key, tag }),
     removeTag: (key, tag) => ipcRenderer.invoke('lib-remove-tag', { key, tag }),
+    // v21：标签重命名 / 合并 / 全局移除
+    renameTag: (from, to) => ipcRenderer.invoke('lib-rename-tag', { from, to }),
+    mergeTags: (from, into) => ipcRenderer.invoke('lib-merge-tags', { from, into }),
+    removeTagEverywhere: (tag) => ipcRenderer.invoke('lib-remove-tag-everywhere', { tag }),
     revealItem: (key) => ipcRenderer.invoke('lib-reveal-item', { key }),
     relinkItem: (key) => ipcRenderer.invoke('lib-relink-item', { key }),
     // v11：库级全文检索 / 备份 / 数据目录

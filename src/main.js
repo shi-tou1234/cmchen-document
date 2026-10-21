@@ -582,6 +582,22 @@ ipcMain.handle('lib-move-item', (_e, info) => (info ? library.moveItem(info.key,
 ipcMain.handle('lib-set-collections', (_e, info) => (info ? library.setCollections(info.key, info.collectionIds) : null));
 ipcMain.handle('lib-add-tag', (_e, info) => (info ? library.addTag(info.key, info.tag) : null));
 ipcMain.handle('lib-remove-tag', (_e, info) => (info ? library.removeTag(info.key, info.tag) : null));
+// v21：标签重命名 / 合并 / 从所有条目上移除
+ipcMain.handle('lib-rename-tag', (_e, info) => {
+  const r = library.renameTag(info && info.from, info && info.to);
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return r;
+});
+ipcMain.handle('lib-merge-tags', (_e, info) => {
+  const r = library.mergeTags(info && info.from, info && info.into);
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return r;
+});
+ipcMain.handle('lib-remove-tag-everywhere', (_e, info) => {
+  const r = library.removeTagEverywhere(info && info.tag);
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return r;
+});
 
 // ---------- 设置 / 备份 / 数据目录 ----------
 ipcMain.handle('settings-get', () => Object.assign({}, settings.get(), {
@@ -764,6 +780,75 @@ ipcMain.handle('export-note', async (_e, info) => {
   catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 });
 
+// v21：把**所有**文档的批注汇总成一份 Markdown（写论文时一次导出所有读书笔记）
+async function exportAllNotesToFile(outPath) {
+  try {
+    const dir = annoDir();
+    const files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f));
+    const docs = [];
+    let total = 0;
+    for (const f of files) {
+      let obj = null;
+      try { obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+      const pages = (obj && Array.isArray(obj.pages)) ? obj.pages : [];
+      if (!pages.length) continue;
+      total += pages.reduce((n, pg) => n + ((pg.shapes || []).length), 0);
+      docs.push({ name: path.basename(String(obj.path || f)), path: obj.path || '', pages });
+    }
+    if (!docs.length) {
+      if (win && !outPath) dialog.showMessageBox(win, { type: 'info', title: '导出全部批注', message: '还没有任何批注可导出。' });
+      return { ok: false, error: '还没有任何批注' };
+    }
+    let filePath = outPath;
+    if (!filePath) {
+      const stamp = new Date().toISOString().slice(0, 10);
+      const base = 'PDF-Reader-全部批注-' + stamp + '.md';
+      const r = await dialog.showSaveDialog(win, {
+        title: '导出全部批注',
+        defaultPath: path.join(appState.lastBackupDir || '', base),
+        filters: [{ name: 'Markdown 文件', extensions: ['md'] }],
+      });
+      if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+      filePath = r.filePath;
+    }
+    const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
+    const out = ['# 全部批注汇总', '', '> 导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }) +
+      ' · ' + docs.length + ' 个文档，' + total + ' 条批注', ''];
+    for (const d of docs.sort((a, b) => a.name.localeCompare(b.name))) {
+      out.push('## ' + d.name, '');
+      const byPage = new Map();
+      for (const pg of d.pages) {
+        const shapes = (pg && pg.shapes) || [];
+        if (!shapes.length) continue;
+        byPage.set(pg.page || 1, shapes);
+      }
+      for (const p of [...byPage.keys()].sort((a, b) => a - b)) {
+        out.push('### 第 ' + p + ' 页', '');
+        for (const sh of byPage.get(p)) {
+          const tags = Array.isArray(sh.tags) ? sh.tags.filter(Boolean) : [];
+          if (sh.tool === 'mark') {
+            out.push(String(sh.text || '').split('\n').map((x) => '> ' + x).join('\n'));
+            if (sh.comment) out.push('', '**评论**：' + String(sh.comment).split('\n').join(' '));
+          } else if (sh.tool === 'text' || sh.tool === 'note') {
+            out.push('- **' + (toolName[sh.tool] || sh.tool) + '**：' + String(sh.text || '').split('\n').join(' '));
+          } else {
+            out.push('- **' + (toolName[sh.tool] || sh.tool) + '**');
+          }
+          if (tags.length) out.push('  **标签**：' + tags.map((t) => '#' + t).join(' '));
+          out.push('');
+        }
+      }
+      out.push('');
+    }
+    fs.writeFileSync(filePath, out.join('\n'), 'utf8');
+    return { ok: true, path: filePath, docs: docs.length, notes: total };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+}
+
+ipcMain.handle('export-all-notes', (_e, info) => exportAllNotesToFile(info && info.outPath));
+
 // 复制纯文本到系统剪贴板
 ipcMain.handle('copy-text', (_e, info) => {
   const text = String((info && info.text) || '');
@@ -909,6 +994,7 @@ function buildMenu() {
         { label: '最近打开', submenu: recentSubmenu() },
         { type: 'separator' },
         { label: '导出当前页为图片…', accelerator: 'CmdOrCtrl+Shift+P', click: () => { if (win) win.webContents.send('export-page-png'); } },
+        { label: '导出全部批注为一个 Markdown…', click: () => { exportAllNotesToFile(); } },
         { type: 'separator' },
         { label: '导入 BibTeX / RIS…', click: () => importRefsViaDialog() },
         { label: '导出 BibTeX / RIS…', click: () => exportRefsViaDialog() },

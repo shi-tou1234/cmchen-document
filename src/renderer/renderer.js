@@ -1145,11 +1145,26 @@ const nextPage = () => scrollToPage(App.state.currentPage + 1);
 const prevPage = () => scrollToPage(App.state.currentPage - 1);
 
 // ---------- 缩放控制 ----------
+// 缩放前后页面高度变了，滚动位置会漂；先记住当前页顶边相对视口的位置，改完再补回来
+function relayoutKeepingPosition() {
+  const keep = App.state.currentPage;
+  const el0 = App.pageEl(keep);
+  const vr0 = App.els.viewer.getBoundingClientRect();
+  const anchor = el0 ? (el0.getBoundingClientRect().top - vr0.top) : 0;
+  applyLayout();
+  const el1 = App.pageEl(keep);
+  if (el1) {
+    const vr1 = App.els.viewer.getBoundingClientRect();
+    const now = el1.getBoundingClientRect().top - vr1.top;
+    App.els.viewer.scrollTop += (now - anchor);
+  }
+}
+
 function setNumericScale(next) {
   const clamped = Math.min(6, Math.max(0.2, next));
   App.state.scaleMode = String(clamped);
   syncScaleSelect(clamped);
-  applyLayout();
+  relayoutKeepingPosition();
 }
 function syncScaleSelect(scale) {
   const sel = App.els.scale;

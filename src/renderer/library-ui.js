@@ -159,10 +159,16 @@ window.LibraryUI = (function () {
     }
     html += tags.map(([name, n]) => {
       const on = state.tagFilter.has(name);
-      return '<button class="lib-tag-row' + (on ? ' active' : '') + '" data-tag-filter="' + esc(name) + '"' +
+      return '<div class="lib-tag-wrap">' +
+        '<button class="lib-tag-row' + (on ? ' active' : '') + '" data-tag-filter="' + esc(name) + '"' +
         ' title="' + esc(name) + '（' + n + ' 条）">' +
         '<span class="cname">' + esc(name) + '</span>' +
-        '<span class="lc-count">' + n + '</span></button>';
+        '<span class="lc-count">' + n + '</span></button>' +
+        '<span class="lib-tag-mgr">' +
+          '<span class="tagmgr" data-tag-rename="' + esc(name) + '" title="重命名（改成已有标签名即合并）">✎</span>' +
+          '<span class="tagmgr" data-tag-del="' + esc(name) + '" title="从所有条目上移除这个标签">🗑</span>' +
+        '</span>' +
+      '</div>';
     }).join('');
     el.tagList.innerHTML = html;
   }
@@ -978,6 +984,45 @@ window.LibraryUI = (function () {
   }
 
   // ---------- 绑定 ----------
+  // v21：标签重命名（改成已有标签名 = 合并）
+  async function renameTagFlow(anchor) {
+    const name = anchor.dataset.tagRename;
+    inlineInput(anchor, name, async (v) => {
+      const to = String(v || '').trim();
+      if (!to || to === name) { render(); return; }
+      const r = await L().renameTag(name, to);
+      if (r && r.ok) {
+        if (state.tagFilter.has(name)) { state.tagFilter.delete(name); state.tagFilter.add(to); }
+        await refresh();
+        window.App && window.App.toast && window.App.toast('已重命名 ' + r.renamed + ' 条条目的标签');
+      } else {
+        window.App && window.App.toast && window.App.toast('重命名失败');
+        render();
+      }
+    });
+  }
+
+  // v21：从所有条目上移除某个标签（两步确认）
+  async function removeTagEverywhereFlow(anchor) {
+    const name = anchor.dataset.tagDel;
+    if (anchor.dataset.armed !== '1') {
+      anchor.dataset.armed = '1';
+      anchor.textContent = '确认?';
+      setTimeout(() => {
+        if (anchor.isConnected) { anchor.dataset.armed = '0'; anchor.textContent = '🗑'; }
+      }, 4000);
+      return;
+    }
+    const r = await L().removeTagEverywhere(name);
+    if (r && r.ok) {
+      state.tagFilter.delete(name);
+      await refresh();
+      window.App && window.App.toast && window.App.toast('已从 ' + r.removed + ' 条条目上移除标签');
+    } else {
+      window.App && window.App.toast && window.App.toast('移除失败');
+    }
+  }
+
   function bind() {
     el = {
       root: $('library'), search: $('lib-search'), collections: $('lib-collections'),
@@ -1151,6 +1196,10 @@ window.LibraryUI = (function () {
     if (el.tagList) el.tagList.addEventListener('click', (e) => {
       const clear = e.target.closest('[data-tag-clear]');
       if (clear) { state.tagFilter.clear(); render(); return; }
+      const ren = e.target.closest('[data-tag-rename]');
+      if (ren) { e.stopPropagation(); renameTagFlow(ren); return; }
+      const del = e.target.closest('[data-tag-del]');
+      if (del) { e.stopPropagation(); removeTagEverywhereFlow(del); return; }
       const row = e.target.closest('[data-tag-filter]');
       if (row) toggleTagFilter(row.dataset.tagFilter);
     });

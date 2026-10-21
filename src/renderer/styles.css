@@ -614,6 +614,13 @@ body.tool-eraser .textlayer { pointer-events: none; }
   padding: 3px 10px 5px; cursor: pointer; text-align: left; border-radius: var(--r);
 }
 .lib-tag-clear:hover { background: var(--accent-soft); }
+.lib-tag-wrap { display: flex; align-items: center; gap: 2px; }
+.lib-tag-wrap .lib-tag-row { flex: 1 1 auto; min-width: 0; }
+.lib-tag-mgr { display: inline-flex; gap: 1px; flex: 0 0 auto; opacity: 0; transition: opacity .12s ease; }
+.lib-tag-wrap:hover .lib-tag-mgr { opacity: 1; }
+.tagmgr { cursor: pointer; font-size: 11px; color: var(--ink-3); padding: 2px 3px; border-radius: 3px; }
+.tagmgr:hover { color: var(--accent-text); background: var(--accent-soft); }
+.tagmgr[data-tag-del]:hover { color: var(--danger); background: var(--danger-soft); }
 
 .lib-ft { flex: 0 0 auto; max-height: 200px; overflow: auto; padding: 10px 18px 12px; border-bottom: 1px solid var(--rule); background: var(--surface-3); }
 .lib-ft[hidden] { display: none; }
