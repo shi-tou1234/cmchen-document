@@ -1056,8 +1056,11 @@ app.whenReady().then(() => {
   buildMenu();
   // 冒烟/截图/探针模式一律不起可见窗口，避免测试时屏幕上反复闪窗；
   // PDFREADER_HIDDEN 只隐藏窗口，不影响单实例锁（单实例测试要用）。
-  const headless = process.env.SMOKE_PDF || process.env.PDFREADER_LIBUI
-    || process.env.PDFREADER_PROBE || process.env.PDFREADER_HIDDEN;
+  // PDFREADER_PROBE_VISIBLE=1 时例外：窗口照常显示 —— 隐藏窗口不重绘，
+  // 靠截图核对「布局类」的界面改动会看到旧帧，需要真实窗口才能验。
+  const probeVisible = !!process.env.PDFREADER_PROBE_VISIBLE;
+  const headless = (process.env.SMOKE_PDF || process.env.PDFREADER_LIBUI
+    || process.env.PDFREADER_PROBE || process.env.PDFREADER_HIDDEN) && !probeVisible;
   createWindow({ show: !headless });
 
   // 启动后低优先级补索引：不阻塞首屏，也不在用户正打开文件时抢 CPU
