@@ -1,5 +1,5 @@
 {
-  "name": "pdf-reader",
+  "name": "trove",
   "version": "1.1.0",
   "description": "本地优先的文档阅读器与文献库（PDF / Word / PPT / Excel / Markdown / EPUB）",
   "main": "src/main.js",
@@ -27,8 +27,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.me.pdfreader",
-    "productName": "PDF Reader",
+    "appId": "com.me.trove",
+    "productName": "Trove",
     "npmRebuild": false,
     "directories": {
       "output": "build"
@@ -59,12 +59,12 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "PDF Reader",
-      "artifactName": "PDF-Reader-Setup-${version}.${ext}",
+      "shortcutName": "Trove",
+      "artifactName": "Trove-Setup-${version}.${ext}",
       "deleteAppDataOnUninstall": false
     },
     "portable": {
-      "artifactName": "PDF-Reader-${version}-portable.${ext}"
+      "artifactName": "Trove-${version}-portable.${ext}"
     }
   }
 }

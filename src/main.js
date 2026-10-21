@@ -13,6 +13,36 @@ const Cite = require('./cite.js');
 
 let win = null;
 
+// ---------- 改名后的数据目录迁移（PDF Reader → Trove） ----------
+// Electron 的 userData 目录名取自 package.json 的 `name` 字段（不是 productName），
+// 所以改名前是 %APPDATA%\pdf-reader，改名后是 %APPDATA%\trove。
+// 搬家规则：只拷不删、只补缺不覆盖、Singleton* 锁文件不搬；失败就退回老目录继续用。
+// 必须在 requestSingleInstanceLock() 之前跑，否则单实例锁会落在两个不同目录，等于允许双开。
+//
+// 测试/探针模式一律不搬：它们用 --user-data-dir 开临时目录，若把真实的老数据搬进去，
+// 测试会读到用户自己的最近打开和页码（曾经因此让打包冒烟稳定打开到第 3 页）。
+// 注意别把这里并进下面的 TEST_MODE：test-single-instance 用 PDFREADER_HIDDEN +
+// --user-data-dir 但**需要**单实例锁，混淆了会把锁关掉。
+const ISOLATED_USER_DATA = !!(process.env.SMOKE_PDF || process.env.PDFREADER_PROBE
+  || process.env.PDFREADER_LIBUI || process.env.PDFREADER_TEST || process.env.PDFREADER_HIDDEN
+  || process.env.PDFREADER_DATA_DIR || process.argv.some((a) => /^--user-data-dir=/.test(a)));
+
+function runUserDataMigration() {
+  if (ISOLATED_USER_DATA) return;
+  const appData = app.getPath('appData');
+  const newUserData = app.getPath('userData');
+  const mig = require('./usermigrate.js').migrateUserData({ appData, newUserData });
+  if (mig.migrated) console.log('[migrate] userData', mig.sources.join(' , '), '->', newUserData);
+  if (!mig.ok) {
+    console.warn('[migrate] 迁移失败，继续使用旧目录：', mig.error);
+    for (const name of require('./usermigrate.js').LEGACY_DIR_NAMES) {
+      const oldDir = path.join(appData, name);
+      if (fs.existsSync(oldDir)) { try { app.setPath('userData', oldDir); } catch (_) {} break; }
+    }
+  }
+}
+runUserDataMigration();
+
 // ---------- 单实例锁（v11） ----------
 // 探针/冒烟模式跳过：测试经常并发启动多个隔离实例，不能互相顶掉。
 const TEST_MODE = !!(process.env.SMOKE_PDF || process.env.PDFREADER_PROBE
@@ -202,7 +232,7 @@ function createWindow(opts = {}) {
     y: pos.y,
     minWidth: 640,
     minHeight: 400,
-    title: 'PDF Reader',
+    title: 'Trove',
     backgroundColor: '#ececec',
     icon: path.join(__dirname, '..', 'assets', 'icon-256.png'),
     show: opts.show !== false,
@@ -273,7 +303,7 @@ function createWindow(opts = {}) {
 
 // 渲染进程通知更新窗口标题（打开/拖拽文件后）
 ipcMain.on('set-title', (_e, title) => {
-  if (win) win.setTitle(title ? title + ' - PDF Reader' : 'PDF Reader');
+  if (win) win.setTitle(title ? title + ' - Trove' : 'Trove');
 });
 
 ipcMain.on('smoke-result', (_e, payload) => {
@@ -376,7 +406,7 @@ function applyAnnotationBundle(list) {
 
 function buildBackupPayload() {
   return {
-    app: 'pdf-reader',
+    app: 'trove',
     format: 1,
     createdAt: new Date().toISOString(),
     settings: settings.get(),
@@ -397,10 +427,10 @@ function writeBackupTo(target) {
 }
 
 async function backupViaDialog() {
-  const base = 'PDF-Reader-备份-' + new Date().toISOString().slice(0, 10) + '.json';
+  const base = 'Trove-备份-' + new Date().toISOString().slice(0, 10) + '.json';
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     title: '备份文献库', defaultPath: appState.lastBackupDir ? path.join(appState.lastBackupDir, base) : base,
-    filters: [{ name: 'PDF Reader 备份', extensions: ['json'] }],
+    filters: [{ name: 'Trove 备份', extensions: ['json'] }],
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
   try {
@@ -416,7 +446,8 @@ function restoreFromFile(file) {
     if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
     obj = JSON.parse(raw);
   } catch (err) { return { ok: false, error: '备份文件读取失败：' + (err && err.message ? err.message : err) }; }
-  if (!obj || obj.app !== 'pdf-reader' || !obj.library || !Array.isArray(obj.library.items)) {
+  // 兼容改名前的备份（app 标识是 'pdf-reader'），新备份写 'trove'
+  if (!obj || (obj.app !== 'trove' && obj.app !== 'pdf-reader') || !obj.library || !Array.isArray(obj.library.items)) {
     return { ok: false, error: '不是本程序生成的备份文件' };
   }
   try {
@@ -438,7 +469,7 @@ function restoreFromFile(file) {
 async function restoreViaDialog() {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
     title: '从备份恢复文献库',
-    filters: [{ name: 'PDF Reader 备份', extensions: ['json'] }],
+    filters: [{ name: 'Trove 备份', extensions: ['json'] }],
     properties: ['openFile'],
     defaultPath: appState.lastBackupDir || undefined,
   });
@@ -547,7 +578,7 @@ function exportRefsTo(target) {
 }
 
 async function exportRefsViaDialog() {
-  const base = 'PDF-Reader-文献库-' + new Date().toISOString().slice(0, 10);
+  const base = 'Trove-文献库-' + new Date().toISOString().slice(0, 10);
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     title: '导出 BibTeX / RIS / CSL-JSON',
     defaultPath: path.join(appState.lastBackupDir || '', base + '.bib'),
@@ -967,7 +998,7 @@ async function exportAllNotesToFile(outPath) {
     let filePath = outPath;
     if (!filePath) {
       const stamp = new Date().toISOString().slice(0, 10);
-      const base = 'PDF-Reader-全部批注-' + stamp + '.md';
+      const base = 'Trove-全部批注-' + stamp + '.md';
       const r = await dialog.showSaveDialog(win, {
         title: '导出全部批注',
         defaultPath: path.join(appState.lastBackupDir || '', base),

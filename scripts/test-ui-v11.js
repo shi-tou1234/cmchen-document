@@ -48,7 +48,7 @@ try {
     let bak = null;
     try { bak = JSON.parse(fs.readFileSync(bakPath, 'utf8')); } catch (_) {}
     extra('备份是合法 JSON', !!bak);
-    extra('备份带 app/format 标记', !!bak && bak.app === 'pdf-reader' && bak.format === 1, JSON.stringify(bak && [bak.app, bak.format]));
+    extra('备份带 app/format 标记', !!bak && bak.app === 'trove' && bak.format === 1, JSON.stringify(bak && [bak.app, bak.format]));
     extra('备份含 2 条条目', !!bak && bak.library.items.length === 2, String(bak && bak.library.items.length));
     extra('备份含设置', !!bak && bak.settings && bak.settings.theme === 'dark', JSON.stringify(bak && bak.settings));
     extra('备份含标注集合', !!bak && Array.isArray(bak.annotations));

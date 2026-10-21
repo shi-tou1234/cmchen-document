@@ -122,7 +122,7 @@ async function getText(url, fetchImpl, timeout) {
   const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout || 15000) : null;
   try {
     const res = await f(url, {
-      headers: { 'User-Agent': 'PDFReader/1.0 (local literature library)' },
+      headers: { 'User-Agent': 'Trove/1.0 (local literature library)' },
       signal: ctrl ? ctrl.signal : undefined,
     });
     if (!res || res.ok === false) throw new Error('HTTP ' + ((res && res.status) || 'error'));

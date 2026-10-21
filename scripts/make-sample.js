@@ -28,7 +28,7 @@ for (let i = 0; i < PAGES; i++) {
   set(pageIds[i],
     `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 612 792] ` +
     `/Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[i]} 0 R >>`);
-  const stream = `BT /F1 24 Tf 72 720 Td (Sample page ${i + 1} of ${PAGES} - PDF Reader smoke test) Tj ET\n`;
+  const stream = `BT /F1 24 Tf 72 720 Td (Sample page ${i + 1} of ${PAGES} - Trove smoke test) Tj ET\n`;
   set(contentIds[i],
     `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}endstream`);
 }

@@ -58,5 +58,14 @@ module.exports = `(async () => {
   const afterBad = await pdfBridge.lib.summary();
   push('坏备份不破坏当前库', afterBad.items.length === 2, 'items=' + afterBad.items.length);
 
+  // 改名前的备份（app 标识 'pdf-reader'）必须仍能恢复
+  const legacy = await pdfBridge.lib.restore(dir + '/legacy.json');
+  push('恢复改名前的旧备份', legacy && legacy.ok, JSON.stringify(legacy));
+  const afterLegacy = await pdfBridge.lib.summary();
+  push('旧备份恢复后库有 2 条', afterLegacy.items.length === 2, 'items=' + afterLegacy.items.length);
+  push('旧备份恢复后标题是 Alpha', (afterLegacy.items.find((x) => x.key === 'itA') || {}).title === 'Alpha', JSON.stringify(afterLegacy.items.map((x) => x.title)));
+  const legacyAnno = await pdfBridge.loadAnnos(pdfPath);
+  push('旧备份恢复后标注是 BEFORE', JSON.stringify(legacyAnno).indexOf('BEFORE') >= 0 && JSON.stringify(legacyAnno).indexOf('AFTER') < 0, JSON.stringify(legacyAnno).slice(0, 160));
+
   return { checks, backupPath: bak && bak.path, preBackup: res && res.preBackup, pdfPath };
 })()`;

@@ -78,7 +78,7 @@ try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000); // 同步 sleep 1s
     titleHit = titles();
   }
-  check('命令行打开后窗口标题带文件名', /sample\.pdf\s*-\s*PDF Reader/.test(titleHit),
+  check('命令行打开后窗口标题带文件名', /sample\.pdf\s*-\s*Trove/.test(titleHit),
     (titleHit.trim().split(/\r?\n/).find((t) => /sample\.pdf/i.test(t)) || '（未出现）'));
   p3.kill();
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800);

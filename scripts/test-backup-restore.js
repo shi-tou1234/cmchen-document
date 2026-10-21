@@ -29,6 +29,27 @@ fs.writeFileSync(libFile, JSON.stringify({
 }, null, 2));
 // 给“坏备份”用例准备一个合法 JSON 但不是本程序的备份
 fs.writeFileSync(path.join(dataDir, 'bad.json'), JSON.stringify({ hello: 'world' }));
+// 改名前（Trove 之前叫 PDF Reader）的备份：app 标识是 'pdf-reader'，必须仍能恢复。
+// 内容与本次备份保持一致（Alpha/Beta 两条 + BEFORE 标注），恢复后磁盘状态应与恢复新备份完全相同。
+const annoName = require('crypto').createHash('sha1').update(path.resolve(SAMPLE)).digest('hex').slice(0, 20) + '.json';
+fs.writeFileSync(path.join(dataDir, 'legacy.json'), JSON.stringify({
+  app: 'pdf-reader',
+  format: 1,
+  createdAt: '2026-01-01T00:00:00.000Z',
+  settings: { theme: 'light' },
+  library: {
+    version: 3,
+    collections: [{ id: 'col1', name: '论文库', parentId: null }],
+    searches: [{ id: 's1', name: '深度学习', query: 'transformer' }],
+    items: [
+      { key: 'itA', itemType: 'journalArticle', title: 'Alpha', creators: ['张三'], year: '2020', publication: '测试期刊', doi: '10.1000/a', tags: ['ML'], collectionIds: ['col1'], attachment: { path: SAMPLE, name: 'sample.pdf' }, page: 2, created: 2, updated: 2 },
+      { key: 'itB', itemType: 'book', title: 'Beta', creators: ['李四'], year: '2022', tags: [], collectionIds: [], attachment: { path: SAMPLE, name: 'sample.pdf' }, page: 0, created: 1, updated: 1 },
+    ],
+  },
+  annotations: [
+    { name: annoName, data: { path: SAMPLE, saved: Date.now(), pages: [{ page: 1, shapes: [{ tool: 'mark', color: '#ffeb3b', rects: [{ x: 1, y: 2, w: 30, h: 9 }], text: 'BEFORE', comment: '备份前的评论' }] }] } },
+  ],
+}, null, 2));
 
 let code = 0;
 try {

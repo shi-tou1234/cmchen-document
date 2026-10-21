@@ -14,7 +14,7 @@ const pdfjs = require('pdfjs-dist/build/pdf.js');
 
 const ROOT = path.join(__dirname, '..');
 const SAMPLE = path.join(ROOT, 'assets', 'sample.pdf');
-const EXE = process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, 'build', 'win-unpacked', 'PDF Reader.exe');
+const EXE = process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, 'build', 'win-unpacked', 'Trove.exe');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pdfreader-packaged-'));
 const udd = path.join(tmp, 'ud');
