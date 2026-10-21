@@ -41,6 +41,13 @@ const DocSwitch = (function () {
     });
     root.addEventListener('click', (e) => {
       e.stopPropagation();
+      // v26：清空最近打开记录
+      if (e.target.closest('[data-dsw-clear-recent]')) {
+        if (window.pdfBridge && window.pdfBridge.clearRecent) {
+          window.pdfBridge.clearRecent().then(() => { items.recent = []; render(); });
+        }
+        return;
+      }
       const row = e.target.closest('.dsw-row');
       if (row) { openRow(row.dataset.kind, row.dataset.id); return; }
     });
@@ -73,7 +80,9 @@ const DocSwitch = (function () {
     }
     const recRows = (items.recent || []).filter((r) => match(r.name) || match(r.path));
     if (recRows.length) {
-      html += '<div class="dsw-sec">最近打开</div>';
+      // v26：原来在「文件 → 最近打开」子菜单里，现在面板上直接清空
+      html += '<div class="dsw-sec">最近打开'
+        + '<button class="dsw-clear" data-dsw-clear-recent>清空</button></div>';
       html += recRows.map((r) => rowHtml({ kind: 'recent', id: r.path, name: r.name, sub: r.path, page: r.page || 0 })).join('');
     }
     const libRows = (items.library || []).filter((x) => match(x.title) || match((x.creators || []).join(' ')));

@@ -9,6 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const JSZip = require('jszip');
 const pdfjs = require('pdfjs-dist/build/pdf.js');
 
 const ROOT = path.join(__dirname, '..');
@@ -20,13 +21,38 @@ const udd = path.join(tmp, 'ud');
 const dataDir = path.join(tmp, 'data');
 fs.mkdirSync(udd, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
+const docx = path.join(tmp, 'packaged.docx');
+
+// 打包后的富文档冒烟：最小 docx（mammoth 只需 word/document.xml + 关系）
+async function makeDocx(file) {
+  const zip = new JSZip();
+  const head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  zip.file('[Content_Types].xml', head + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '</Types>');
+  zip.file('_rels/.rels', head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>');
+  zip.file('word/document.xml', head + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:body><w:p><w:r><w:t>打包后的 Word 正文</w:t></w:r></w:p></w:body></w:document>');
+  fs.writeFileSync(file, await zip.generateAsync({ type: 'nodebuffer' }));
+}
+
 const libFile = path.join(dataDir, 'library.json');
 fs.writeFileSync(libFile, JSON.stringify({
   version: 3, collections: [], searches: [],
-  items: [{
-    key: 'pkg1', itemType: 'journalArticle', title: 'Packaged Smoke', creators: [], year: '2024',
-    tags: [], collectionIds: [], attachment: { path: SAMPLE, name: 'sample.pdf' }, page: 0, created: 1, updated: 1,
-  }],
+  items: [
+    {
+      key: 'pkg1', itemType: 'journalArticle', title: 'Packaged Smoke', creators: [], year: '2024',
+      tags: [], collectionIds: [], attachment: { path: SAMPLE, name: 'sample.pdf' }, page: 0, created: 2, updated: 2,
+    },
+    {
+      key: 'pkgdocx', itemType: 'document', title: 'Packaged Word', creators: [], year: '2024',
+      tags: [], collectionIds: [], attachment: { path: docx, name: 'packaged.docx' }, page: 1, created: 1, updated: 1,
+    },
+  ],
 }, null, 2));
 const outJson = path.join(tmp, 'probe-out.json');
 
@@ -37,6 +63,7 @@ function ok(name, cond, detail) {
 }
 
 (async () => {
+  await makeDocx(docx);
   ok('打包产物存在', fs.existsSync(EXE), EXE);
   if (!fs.existsSync(EXE)) { console.log('[packaged] FAIL'); process.exit(2); }
 

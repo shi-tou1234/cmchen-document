@@ -170,12 +170,89 @@ module.exports = `(async () => {
   const sum3 = await pdfBridge.lib.summary();
   push('清空后 trashCount=0 且 itA/itB 仍在', sum3.trashCount === 0 && !!sum3.items.find((x) => x.key === 'itA') && !!sum3.items.find((x) => x.key === 'itB'));
 
+  // ---------- v27：citekey / 表头排序 / 颜色 / 相关条目 / 右键菜单 ----------
+  let step = 'start';
+  try {
+  step = 'detail';
+  $('[data-scope="all"]').click();
+  await waitFor(() => cards() === 2, 3000);
+  $('[data-detail="itA"]').click();
+  await sleep(80);
+  const ck = ($('#ld-citekey') || {}).textContent || '';
+  push('详情显示确定性 citekey', /^[a-z0-9-]+$/.test(ck.trim()), ck);
+  push('citekey 复制按钮可用', !$('#ld-citekey-at').disabled);
+
+  step = 'sort';
+  $('[data-scope="all"]').click();
+  await waitFor(() => cards() === 2, 3000);
+  $('.lib-sort-h[data-sort="title"]').click();
+  await sleep(60);
+  push('表头点击按标题升序', firstTitle().startsWith('Alpha'), firstTitle());
+  $('.lib-sort-h[data-sort="title"]').click();
+  await sleep(60);
+  push('表头再次点击切降序', firstTitle() === 'Beta', firstTitle());
+  setSelect('#lib-sort', 'added');
+  await sleep(60);
+
+  // 标签颜色
+  step = 'tag-color';
+  $('[data-tag-color="ML"]').click();
+  await sleep(40);
+  const pop = $('.lib-color-pop');
+  push('标签颜色浮层打开', !!pop);
+  if (pop) pop.querySelector('[data-color="#5f7d4f"]').click();
+  await sleep(220);
+  const sumTag = await pdfBridge.lib.summary();
+  push('标签颜色写入数据层', !!(sumTag.tagColors && sumTag.tagColors.ML === '#5f7d4f'), JSON.stringify(sumTag.tagColors));
+
+  // 收藏集颜色
+  step = 'coll-color';
+  $('[data-coll-color="col1"]').click();
+  await sleep(40);
+  const pop2 = $('.lib-color-pop');
+  if (pop2) pop2.querySelector('[data-color="#3f7a8a"]').click();
+  await sleep(220);
+  const sumColl2 = await pdfBridge.lib.summary();
+  push('收藏集颜色写入数据层', ((sumColl2.collections.find((c) => c.id === 'col1') || {}).color) === '#3f7a8a');
+
+  // 相关条目
+  step = 'relation';
+  $('[data-detail="itA"]').click();
+  await sleep(80);
+  const relSel = $('#ld-rel-select');
+  relSel.value = 'itB';
+  relSel.dispatchEvent(new Event('change', { bubbles: true }));
+  $('#ld-rel-add').click();
+  await sleep(280);
+  push('相关条目添加成功', $$('#ld-relations .ld-rel').length === 1, 'rows=' + $$('#ld-relations .ld-rel').length);
+  const relDel = $('#ld-relations [data-rel-remove]');
+  if (relDel) relDel.click();
+  await sleep(280);
+  push('相关条目可解除', $$('#ld-relations .ld-rel').length === 0);
+
+  // 右键菜单
+  step = 'context';
+  const menuCard = $('[data-key="itA"]');
+  menuCard.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 200 }));
+  await sleep(60);
+  push('卡片右键菜单打开', !!$('.lib-ctx'), '');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await sleep(40);
+  } catch (e) {
+    push('v27 交互块未抛错', false, step + ': ' + (e && e.message ? e.message : e));
+  }
+
   // 回到全部条目 → 点卡片进阅读（回归：覆盖层 → 阅读器钩子没被 v10 改坏）
   $('[data-scope="all"]').click();
   await waitFor(() => cards() === 2, 3000);
   push('回到全部条目可见 2 条', cards() === 2, 'cards=' + cards());
   const openCard = $('[data-open="itA"]');
   if (openCard) openCard.click();
+  await sleep(150);
+  push('单击卡片只选中不打开', !document.body.classList.contains('has-doc') && openCard.classList.contains('selected'));
+  push('单击后详情面板打开', !document.getElementById('lib-detail').hidden);
+  // Zotero 交互：双击才进阅读
+  if (openCard) openCard.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   await waitFor(() => document.body.classList.contains('has-doc'), 8000);
   await waitFor(() => App.state.numPages === 3, 8000);
   await sleep(200);
@@ -185,7 +262,7 @@ module.exports = `(async () => {
     pageNums: App.state.numPages,
     canvas: !!document.querySelector('#pages .page canvas'),
   };
-  push('点卡片后进入阅读态', post.hasDoc);
+  push('双击卡片后进入阅读态', post.hasDoc);
   push('进阅读后覆盖层收起', post.libraryHidden);
   push('阅读器加载到 3 页', post.pageNums === 3, 'pages=' + post.pageNums);
   push('页面 canvas 已建', post.canvas);

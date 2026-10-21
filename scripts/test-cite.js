@@ -112,5 +112,63 @@ ok('format(ieee) 走 IEEE', Cite.format(journal, 'ieee') === Cite.ieee(journal))
 ok('format(mla) 走 MLA', Cite.format(journal, 'mla') === Cite.mla(journal));
 ok('样式表有 5 种', Cite.STYLES.length === 5, String(Cite.STYLES.length));
 
+// ---------- v27：文献库 v5 的 37 类条目 ----------
+ok('TYPE_CODE 覆盖 37 类', Object.keys(Cite.TYPE_CODE).length === 37, String(Object.keys(Cite.TYPE_CODE).length));
+ok('每个类型都有中文名', Object.keys(Cite.TYPE_CODE).every((k) => !!Cite.TYPE_NAME[k]),
+  Object.keys(Cite.TYPE_CODE).filter((k) => !Cite.TYPE_NAME[k]).join(','));
+ok('typeLabel 认识数据集', Cite.typeLabel({ itemType: 'dataset' }) === '数据集', Cite.typeLabel({ itemType: 'dataset' }));
+ok('typeLabel 未知类型退回文档', Cite.typeLabel({ itemType: 'nope' }) === '文档');
+
+const typeCase = (itemType, code, extra) => {
+  const s2 = Cite.gbt({ itemType, title: '题名', creators: ['甲'], year: '2020', publication: '来源', ...(extra || {}) });
+  return { s: s2, hit: s2.indexOf('[' + code + ']') > 0 };
+};
+
+let tc = typeCase('bookSection', 'M');
+ok('图书章节用 [M]//', tc.hit && tc.s.indexOf('[M]//来源') > 0, tc.s);
+tc = typeCase('newspaperArticle', 'N');
+ok('报纸文章用 [N]', tc.hit && tc.s.indexOf('[N].') > 0, tc.s);
+tc = typeCase('preprint', 'Z');
+ok('预印本用 [Z]', tc.hit && tc.s.indexOf('[Z].') > 0, tc.s);
+tc = typeCase('software', 'CP');
+ok('软件用 [CP]', tc.hit, tc.s);
+tc = typeCase('dataset', 'DS');
+ok('数据集用 [DS]', tc.hit, tc.s);
+tc = typeCase('map', 'CM');
+ok('地图用 [CM]', tc.hit, tc.s);
+tc = typeCase('patent', 'P');
+ok('专利用 [P]', tc.hit, tc.s);
+tc = typeCase('standard', 'S');
+ok('标准用 [S]', tc.hit, tc.s);
+tc = typeCase('film', 'V');
+ok('电影用 [V]', tc.hit, tc.s);
+tc = typeCase('videoRecording', 'V');
+ok('视频用 [V]', tc.hit, tc.s);
+
+// ---------- 引用键 citekey ----------
+const en = { key: 'smith2020', itemType: 'journalArticle', creators: ['John Smith'], year: '2020', title: 'The Great Gatsby' };
+ok('citekey 英文规则为 姓+年+标题词', Cite.citekey(en) === 'smith2020great', Cite.citekey(en));
+ok('citekey 对同一条目稳定', Cite.citekey(en) === Cite.citekey({ ...en }));
+ok('citekey 从「2020-05」中取年份', Cite.citekey({ ...en, year: '2020-05' }) === 'smith2020great');
+ok('citekey 无年份用 nd', Cite.citekey({ key: 'k1', creators: ['Li Si'], title: 'A Study' }) === 'sindstudy',
+  Cite.citekey({ key: 'k1', creators: ['Li Si'], title: 'A Study' }));
+ok('citekey 中文作者退化为 item+key', Cite.citekey({ key: 'ABCD1234', creators: ['张三'], year: '2021', title: '深度学习' }) === 'itemabcd2021',
+  Cite.citekey({ key: 'ABCD1234', creators: ['张三'], year: '2021', title: '深度学习' }));
+ok('citekey 无作者也稳定', Cite.citekey({ key: 'x9', year: '2019', title: 'Report on Things' }) === 'itemx92019report',
+  Cite.citekey({ key: 'x9', year: '2019', title: 'Report on Things' }));
+ok('citekey 最长 40 字符', Cite.citekey({ key: 'k', creators: ['A'.repeat(40)], year: '2020', title: 'B'.repeat(40) }).length <= 40);
+
+ok('atCitation 生成 Pandoc 行内引用', Cite.atCitation('smith2020great') === '[@smith2020great]', Cite.atCitation('smith2020great'));
+ok('atCitation 空键返回空串', Cite.atCitation('') === '');
+
+const dupA = { key: 'b', creators: ['John Smith'], year: '2020', title: 'The Great Gatsby' };
+const dupB = { key: 'a', creators: ['John Smith'], year: '2020', title: 'The Great Gatsby' };
+const keys1 = Cite.citekeys([dupA, dupB]);
+ok('citekeys 先按 key 排序分配', keys1.get('a') === 'smith2020great' && keys1.get('b') === 'smith2020great-2',
+  keys1.get('a') + ' / ' + keys1.get('b'));
+const keys2 = Cite.citekeys([dupB, dupA]);
+ok('citekeys 与输入顺序无关', keys2.get('a') === keys1.get('a') && keys2.get('b') === keys1.get('b'));
+ok('citekeys 跳过没有 key 的条目', Cite.citekeys([{ creators: ['A B'] }]).size === 0);
+
 console.log('[cite] ' + (fail ? 'FAIL (' + fail + ')' : 'PASS'));
 process.exit(fail ? 2 : 0);

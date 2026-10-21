@@ -48,6 +48,7 @@ const Lightbox = (function () {
     src: null,            // 当前这张原图（canvas）
     root: null,
     onClose: null,
+    inverted: false,      // 反色显示（默认跟随「深色反色页面」设置；◐ 按钮可切回原色）
   };
 
   const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
@@ -65,7 +66,10 @@ const Lightbox = (function () {
       zoomOut: root.querySelector('[data-lb-zoom-out]'),
       zoomReset: root.querySelector('[data-lb-zoom-reset]'),
       zoomIn: root.querySelector('[data-lb-zoom-in]'),
-      close: root.querySelector('[data-lb-close]'),
+      invert: root.querySelector('[data-lb-invert]'),
+      // 注意：背景层 .lb-backdrop 也带 data-lb-close 且排在 DOM 前面，
+      // 这里必须限定 button，否则选到背景层、关闭按钮上就没有直连监听了
+      close: root.querySelector('button[data-lb-close]'),
     };
   }
 
@@ -90,6 +94,17 @@ const Lightbox = (function () {
       e.zoomReset.disabled = state.scale === MIN_SCALE;
       e.zoomReset.textContent = Math.round(state.scale * 100) + '%';
     }
+    if (e.invert) {
+      e.invert.setAttribute('aria-pressed', state.inverted ? 'true' : 'false');
+      e.invert.classList.toggle('active', state.inverted);
+    }
+  }
+
+  // 反色开关：给预览加/去 .lb-inverted（CSS 里定义 invert+hue-rotate）
+  function applyInvert() {
+    const e = els();
+    if (e.preview) e.preview.classList.toggle('lb-inverted', state.inverted);
+    syncControls();
   }
 
   // 内容区可用尺寸（扣掉工具条 / 翻图箭头 / 图注留白）
@@ -276,6 +291,7 @@ const Lightbox = (function () {
             '<button type="button" class="lb-btn" data-lb-zoom-out aria-label="缩小">－</button>' +
             '<button type="button" class="lb-btn lb-zoom-label" data-lb-zoom-reset aria-label="复位缩放">100%</button>' +
             '<button type="button" class="lb-btn" data-lb-zoom-in aria-label="放大">＋</button>' +
+            '<button type="button" class="lb-btn" data-lb-invert aria-pressed="false" aria-label="反色显示" title="反色显示：看白底图夜里不刺眼；再点恢复原色">◐</button>' +
             '<button type="button" class="lb-btn lb-close" data-lb-close aria-label="关闭">' +
               '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>' +
             '</button>' +
@@ -311,7 +327,9 @@ const Lightbox = (function () {
 
     root.addEventListener('click', (ev) => {
       const t = ev.target;
-      if (!(t instanceof HTMLElement)) return;
+      // 必须放宽到 Element：点在 ✕ 图标（<svg>/<path>）上时 target 是 SVGElement，
+      // 不是 HTMLElement —— 以前这里写成 HTMLElement，点图标永远关不掉（v27 修）
+      if (!(t instanceof Element)) return;
       if (t.closest('[data-lb-close]')) { close(); return; }
       if (t === root || t.closest('.lb-backdrop')) close();
     });
@@ -418,6 +436,11 @@ const Lightbox = (function () {
     if (e.zoomOut) e.zoomOut.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); changeScale(-ZOOM_STEP); });
     if (e.zoomIn) e.zoomIn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); changeScale(ZOOM_STEP); });
     if (e.zoomReset) e.zoomReset.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); setScale(MIN_SCALE, { keepOffset: false }); });
+    if (e.invert) e.invert.addEventListener('click', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      state.inverted = !state.inverted;
+      applyInvert();
+    });
     if (e.close) e.close.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); close(); });
 
     document.body.appendChild(root);
@@ -443,8 +466,12 @@ const Lightbox = (function () {
     root.hidden = false;
     root.classList.add('is-open');
     root.setAttribute('aria-hidden', 'false');
+    // 反色默认跟随「深色模式反色页面」：页面看着是黑的，灯箱里也应该是黑的（夜里不刺眼）；
+    // 想看文档真实色彩点 ◐ 一键切回。每次打开都重新取默认。
+    state.inverted = document.body.classList.contains('invert-pages');
     lockScroll();
     showIndex(Math.min(Math.max(o.index || 0, 0), items.length - 1));
+    applyInvert();
     return true;
   }
 

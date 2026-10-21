@@ -53,7 +53,7 @@ module.exports = `(async () => {
   push('批注面板列出标注', annoItems.length >= 2, 'n=' + annoItems.length);
   push('批注面板含便签文本', Array.from(annoItems).some((a) => /探针便签/.test(a.textContent)));
   // v14 起批注导出分成 Markdown / CSV / 纯文本三个按钮
-  push('导出批注按钮存在', document.querySelectorAll('[data-note-fmt]').length === 3,
+  push('导出批注按钮存在', ['md', 'csv', 'txt'].every((f) => document.querySelector('[data-note-fmt="' + f + '"]')),
     'n=' + document.querySelectorAll('[data-note-fmt]').length);
 
   // --- 侧栏：缩略图（隐藏窗口 rAF ~1Hz，渲染被量化到约 1s/张 → 轮询等待） ---

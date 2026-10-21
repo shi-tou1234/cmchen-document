@@ -36,9 +36,11 @@
   --r: 3px;                /* 统一的极小圆角 */
   --r-2: 5px;
 
-  --font-serif: Georgia, "Songti SC", "Noto Serif CJK SC", "Times New Roman", serif;
-  --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, "SFMono-Regular", "Courier New", monospace;
+  /* v27：全软件统一一套无衬线字体。保留三个变量名是为了不动几十处引用；
+     它们现在指向同一个栈，衬线/等宽只作为 CSS 语义名存在。 */
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-serif: var(--font-sans);
+  --font-mono: var(--font-sans);
 
   --side-w: 216px;
   --detail-w: 322px;
@@ -606,7 +608,12 @@ body.tool-eraser .textlayer { pointer-events: none; }
 }
 .tab:hover { background: var(--surface-2); color: var(--ink); }
 .tab.active { background: var(--surface); color: var(--accent); border-color: var(--rule); font-weight: 600; }
-.tab .tab-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .tab-title {
+  flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* v26：文档名用衬线体（和文献库标题列、详情标题一致）——原来跟正文一样用无衬线，
+     混着长文件名和数字看着很乱 */
+  font-family: var(--font-serif);
+}
 .tab .tab-x { border: none; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 11px; line-height: 1; padding: 3px 4px; border-radius: 2px; }
 .tab .tab-x:hover { background: var(--danger-soft); color: var(--danger); }
 .tab-new { padding: 4px 8px; align-self: center; }
@@ -769,7 +776,15 @@ body.tool-eraser .textlayer { pointer-events: none; }
 .dsw-sec {
   font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
   color: var(--ink-3); padding: 8px 8px 4px;
+  display: flex; align-items: center; gap: 8px;
 }
+/* v26：清空最近打开记录 */
+.dsw-clear {
+  margin-left: auto; border: none; background: transparent; cursor: pointer;
+  font-family: var(--font-sans); font-size: 11px; letter-spacing: 0; text-transform: none;
+  color: var(--ink-3); padding: 0 2px;
+}
+.dsw-clear:hover { color: var(--accent-text); text-decoration: underline; }
 .dsw-row {
   display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
   border: none; background: transparent; border-radius: var(--r);
@@ -833,12 +848,21 @@ body.tool-image .ntool.active { background: var(--accent); color: #fff; }
   /* 显示尺寸由 JS 按缩放算好（fit × scale）：不能被 flex 压缩，也不能用 max-width 压回去，
      否则放大后又被容器宽度截住，看着像没放大 */
   flex: 0 0 auto;
-  background: transparent; border-radius: 1px;
+  /* 背景跟 PDF 页面一个颜色（纸白）：图里有透明区域时露出的是纸，不是灯箱的深底 */
+  background: #fff; border-radius: 1px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, .5);
   transform-origin: center center;
   transition: transform .16s ease, width .16s ease, height .16s ease;
   will-change: transform; touch-action: none; user-select: none; -webkit-user-drag: none;
 }
+/* 灯箱反色显示（2026-10-21 定稿）：默认跟随「深色模式反色页面」——页面看着是黑的，
+   灯箱里也该是黑的，夜里看白底白板图不刺眼（用户连报三次「发白」的实质诉求）。
+   工具栏 ◐ 按钮一键切回「原色」看文档真实色彩；两态都是用户明面可控的，无隐藏处理。 */
+.lb-preview.lb-inverted {
+  filter: invert(1) hue-rotate(180deg);
+  box-shadow: 0 18px 50px rgba(255, 250, 240, .12);
+}
+.lb-btn.active { background: rgba(30, 27, 22, .9); border-color: rgba(255, 255, 255, .55); color: #fff; }
 .lb-preview.is-panning { transition: none; }
 .lb-preview.is-zooming { transition: none; }   /* 缩放手势进行中关掉过渡，避免一串事件反复重启动画 */
 .lb-preview.is-zoomed { cursor: grab; }
@@ -878,3 +902,191 @@ body.tool-image .ntool.active { background: var(--accent); color: #fff; }
     box-shadow: var(--shadow-pop);
   }
 }
+
+/* =========================================================
+   v27 · 富文档（Word / PPT / Excel / Markdown / EPUB…）
+   ========================================================= */
+#doc-view {
+  width: 900px; margin: 0 auto; display: flex; flex-direction: column;
+  align-items: stretch; gap: 20px; transform-origin: top center;
+}
+body.view-page #doc-view { gap: 0; }
+body.view-page .doc-page { display: none; }
+body.view-page .doc-page.is-current { display: block; }
+
+.doc-page {
+  width: 900px; min-height: 1200px; padding: 64px 72px 54px;
+  background: #fff; color: #23211c; position: relative;
+  box-shadow: var(--shadow-page); border-radius: 1px;
+  font-size: 14px; line-height: 1.75; overflow-wrap: break-word;
+}
+.doc-page-title {
+  font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: #8b8477; padding-bottom: 10px; margin-bottom: 22px; border-bottom: 1px solid #ded8ca;
+}
+.doc-page-body { min-height: 1000px; }
+.doc-page-foot {
+  position: absolute; left: 72px; right: 72px; bottom: 22px;
+  padding-top: 8px; border-top: 1px solid #ede9df;
+  font-size: 10.5px; color: #a49c8e; text-align: right;
+}
+.doc-page-body > :first-child { margin-top: 0; }
+.doc-page-body h1, .doc-page-body h2, .doc-page-body h3,
+.doc-page-body h4, .doc-page-body h5, .doc-page-body h6 {
+  font-family: var(--font-sans); color: #1b1a17; line-height: 1.35;
+  margin: 1.5em 0 .6em; font-weight: 650;
+}
+.doc-page-body h1 { font-size: 26px; margin-top: 0; }
+.doc-page-body h2 { font-size: 21px; }
+.doc-page-body h3 { font-size: 17px; }
+.doc-page-body h4 { font-size: 15px; }
+.doc-page-body p { margin: 0 0 .85em; }
+.doc-page-body ul, .doc-page-body ol { margin: 0 0 .9em; padding-left: 1.6em; }
+.doc-page-body li { margin: .2em 0; }
+.doc-page-body blockquote {
+  margin: 1em 0; padding: .4em 0 .4em 16px; border-left: 3px solid #c6bdab;
+  color: #57524a; background: #faf8f4;
+}
+.doc-page-body code, .doc-page-body kbd, .doc-page-body samp {
+  font-family: var(--font-sans); font-size: .92em;
+  background: #f1eee7; border: 1px solid #e4dfd3; border-radius: 3px; padding: .05em .35em;
+}
+.doc-page-body pre {
+  font-family: var(--font-sans); font-size: 12.5px; line-height: 1.6;
+  background: #f5f2eb; border: 1px solid #e4dfd3; border-radius: 4px;
+  padding: 12px 14px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
+.doc-page-body pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+.doc-page-body a { color: #8c3b2e; text-decoration: underline; text-underline-offset: 2px; }
+.doc-page-body img { max-width: 100%; height: auto; }
+.doc-page-body figure { margin: 1em 0; text-align: center; }
+.doc-page-body figcaption { font-size: 11.5px; color: #8b8477; margin-top: 4px; }
+.doc-page-body hr { border: 0; border-top: 1px solid #ded8ca; margin: 1.6em 0; }
+.doc-page-body table {
+  border-collapse: collapse; width: 100%; margin: .8em 0 1.2em;
+  font-size: 12.5px; line-height: 1.5;
+}
+.doc-page-body th, .doc-page-body td {
+  border: 1px solid #ded8ca; padding: 5px 8px; text-align: left; vertical-align: top;
+}
+.doc-page-body th { background: #f1eee7; font-weight: 600; position: sticky; top: 0; }
+.doc-page-body tr:nth-child(even) td { background: #faf8f4; }
+.doc-page-body .doc-sheet { font-variant-numeric: tabular-nums; }
+.doc-page-body .doc-slide {
+  min-height: 720px; display: flex; flex-direction: column; justify-content: center;
+  gap: 14px; padding: 36px 48px; border: 1px solid #e4dfd3; border-radius: 3px;
+  background: #fcfbf8;
+}
+.doc-page-body .doc-slide h1, .doc-page-body .doc-slide h2 { margin-top: 0; }
+.doc-page-body .doc-image { margin: 0; text-align: center; }
+.doc-page-body .doc-image img { max-height: 1000px; width: auto; }
+.doc-page-body .doc-plain { white-space: pre-wrap; font-size: 13px; line-height: 1.7; }
+.doc-page-body .doc-empty, .doc-page-body .doc-truncated { color: #8b8477; font-size: 12px; }
+.doc-page-body mark.doc-hit { background: #ffe082; color: inherit; padding: 0 1px; border-radius: 2px; }
+.doc-page-body mark.doc-hit.is-current { background: #ffb300; box-shadow: 0 0 0 2px #8c3b2e; }
+
+/* 富文档没有 PDF 标注层：只留选择/看图，画笔画笔类工具禁用 */
+body.rich-doc #notetools .ntool:not([data-tool="select"]):not([data-tool="image"]),
+body.rich-doc #notetools .dd-wrap,
+body.rich-doc #notetools #note-color,
+body.rich-doc #notetools #note-width,
+body.rich-doc #notetools #btn-undo,
+body.rich-doc #notetools #btn-clear-page,
+body.rich-doc #notetools #btn-save { display: none !important; }
+body.rich-doc #doc-view ::selection { background: rgba(255, 213, 79, .55); }
+
+/* PDF 里的「摘录」标记：左侧书签条 + 淡底，和普通高亮区分 */
+.page .text-mark.text-quote rect { fill-opacity: .18; stroke-opacity: .75; stroke-dasharray: 3 2; }
+
+/* ---------- 文献库 v27：表头排序 / 颜色 / 引用键 / 相关条目 ---------- */
+.lib-sort-h {
+  appearance: none; border: 0; background: transparent; color: inherit;
+  font: inherit; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  text-align: left; padding: 6px 2px; cursor: pointer; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px;
+}
+.lib-sort-h:hover { color: var(--ink); }
+.lib-sort-h .sort-ind { font-size: 9px; color: var(--accent); }
+.lib-sort-h.active { color: var(--ink); }
+
+.lib-coll .ccolor, .lib-tag-row .tcolor {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, .16); background: transparent; padding: 0;
+  cursor: pointer;
+}
+.lib-coll .ccolor:hover, .lib-tag-row .tcolor:hover { transform: scale(1.35); }
+.lib-coll.drop-target { background: var(--accent-soft); outline: 1px dashed var(--accent); outline-offset: -1px; }
+
+/* 颜色选择浮层 */
+.lib-color-pop {
+  position: fixed; z-index: 135; padding: 8px; display: grid;
+  grid-template-columns: repeat(6, 18px); gap: 6px;
+  background: var(--surface); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); box-shadow: var(--shadow-pop);
+}
+.lib-color-pop button {
+  width: 18px; height: 18px; border-radius: 50%; cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, .14); padding: 0;
+}
+.lib-color-pop button.none { background: var(--surface); position: relative; }
+.lib-color-pop button.none::after {
+  content: ''; position: absolute; left: 2px; right: 2px; top: 8px;
+  border-top: 1px solid var(--danger); transform: rotate(-45deg);
+}
+.lib-color-pop button:hover { transform: scale(1.18); }
+
+.lib-card .lctag .tcolor, .lib-card .lccoll .ccolor {
+  width: 7px; height: 7px; margin-right: 4px; display: inline-block; vertical-align: 1px;
+}
+
+/* 引用键 */
+.ld-citekey-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.ld-citekey {
+  flex: 1 1 auto; min-width: 0; font-family: var(--font-sans); font-size: 12px;
+  color: var(--ink); background: var(--surface-3); border: 1px solid var(--rule);
+  border-radius: var(--r); padding: 3px 7px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ld-citekey-row .ld-lbl { flex: 0 0 auto; }
+
+/* 相关条目 */
+.ld-relations { display: flex; flex-direction: column; gap: 4px; margin-bottom: 7px; }
+.ld-rel {
+  display: flex; align-items: center; gap: 6px; font-size: 12px;
+  border: 1px solid var(--rule); border-radius: var(--r); padding: 4px 6px; background: var(--surface);
+}
+.ld-rel .rname {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--accent); cursor: pointer;
+}
+.ld-rel .rname:hover { text-decoration: underline; }
+.ld-rel .rmeta { flex: 0 0 auto; font-size: 10.5px; color: var(--ink-3); }
+.ld-rel .rdel {
+  border: 0; background: transparent; color: var(--ink-3); cursor: pointer;
+  font-size: 12px; padding: 0 2px;
+}
+.ld-rel .rdel:hover { color: var(--danger); }
+
+/* 全局搜索结果类型徽标 */
+.lib-ft-row { display: flex; align-items: center; gap: 8px; }
+.lib-ft-type {
+  flex: 0 0 auto; font-size: 9.5px; line-height: 16px; padding: 0 5px;
+  border-radius: 2px; background: var(--surface-2); color: var(--ink-2);
+}
+.lib-ft-type.note { background: #e8f0e6; color: #3f6b3a; }
+.lib-ft-type.annotation { background: #f6ead9; color: #8a5a1d; }
+
+/* 文献库右键菜单 */
+.lib-ctx button:disabled { opacity: .4; cursor: default; }
+
+/* 窄窗口列隐藏（按钮版表头） */
+@container (max-width: 820px) {
+  .lib-columns > :nth-child(4), .lib-card .lccolls { display: none; }
+}
+@container (max-width: 620px) {
+  .lib-columns > :nth-child(2), .lib-card .lcmeta { display: none; }
+}
+@container (max-width: 430px) {
+  .lib-columns > :nth-child(5), .lib-card .lctags { display: none; }
+}
+body.theme-dark.invert-pages .doc-page { filter: invert(1) hue-rotate(180deg); }

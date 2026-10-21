@@ -1,39 +1,81 @@
 'use strict';
 /*
- * 本地文献库 v3（继续对齐 Zotero 的数据模型，零原生依赖）。
+ * 本地文献库 v5（继续对齐 Zotero 的数据模型，零原生依赖）。
  * 存储：userData/library.json（测试可用 env PDFREADER_LIBRARY 覆盖路径，互不污染）。
- * 数据形状（v3）：
- *   { version, collections:[{id,name,parentId}], searches:[{id,name,query}], items:[{
+ * 数据形状（v5）：
+ *   { version, tagColors:{[tag]:#rrggbb},
+ *     collections:[{id,name,parentId,color}], searches:[{id,name,query}], items:[{
  *       key, itemType, title, creators:[str], year, publication, volume, issue,
  *       pages, doi, url, abstract, note, language, tags:[str], collectionIds:[str],
+ *       fields:{publisher,place,isbn,...}, relations:[key], notes:[{id,title,text}],
  *       attachment:{path,name}, page, created, updated, deletedAt
  *   }] }
  *
- * 相对 v2 的变化：
- *   - 新增 searches（智能收藏集 = 保存的搜索条件）。
- *   - 新增批量更新、查重合并、BibTeX/RIS 导入所需的辅助接口，数据形状保持兼容。
+ * 相对 v4 的变化：
+ *   - 条目类型从 12 类扩到 30+ 类；新增按类型的通用 fields 对象。
+ *   - 收藏集支持颜色，标签支持全局颜色映射 tagColors。
+ *   - 新增相关条目 relations（双向），供“相关条目”面板使用。
  *
- * 兼容策略：读到 v1/v2 数据时先自动备份原始文件，再迁移到 v3；旧文件无需手工处理。
- * 原则：附件只“引用”磁盘路径，永不删改用户的 PDF；写盘原子 + 读盘损坏自愈。
+ * 兼容策略：读到低版本数据时先自动备份原始文件，再迁移到 v5；旧文件无需手工处理。
+ * 原则：附件只“引用”磁盘路径，永不删改用户的文件；写盘原子 + 读盘损坏自愈。
  */
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const VERSION = 4;
+const VERSION = 5;
 const BACKUP_KEEP = 10;
 
-// 只保留自用文献最常用的几类；label 交给 UI 直接显示，避免两处各写一份映射
+// v5：补齐 Zotero 常用的条目类型（30+），让导入 BibTeX/RIS/CSL-JSON 时不至于全被压成「文档」。
+// label 交给 UI 直接显示，避免两处各写一份映射。
 const ITEM_TYPES = [
   { id: 'journalArticle', label: '期刊文章' },
+  { id: 'magazineArticle', label: '杂志文章' },
+  { id: 'newspaperArticle', label: '报纸文章' },
   { id: 'conferencePaper', label: '会议论文' },
   { id: 'book', label: '图书' },
+  { id: 'bookSection', label: '图书章节' },
   { id: 'thesis', label: '学位论文' },
   { id: 'report', label: '报告' },
+  { id: 'preprint', label: '预印本' },
+  { id: 'manuscript', label: '手稿' },
   { id: 'webpage', label: '网页' },
+  { id: 'blogPost', label: '博客文章' },
+  { id: 'forumPost', label: '论坛帖子' },
+  { id: 'encyclopediaArticle', label: '百科条目' },
+  { id: 'dictionaryEntry', label: '词典条目' },
+  { id: 'letter', label: '信件' },
+  { id: 'email', label: '电子邮件' },
+  { id: 'interview', label: '访谈' },
+  { id: 'presentation', label: '演示文稿' },
+  { id: 'artwork', label: '艺术作品' },
+  { id: 'film', label: '电影' },
+  { id: 'tvBroadcast', label: '电视节目' },
+  { id: 'podcast', label: '播客' },
+  { id: 'videoRecording', label: '视频' },
+  { id: 'audioRecording', label: '音频' },
+  { id: 'software', label: '软件' },
+  { id: 'dataset', label: '数据集' },
+  { id: 'map', label: '地图' },
+  { id: 'patent', label: '专利' },
+  { id: 'standard', label: '标准' },
+  { id: 'legislation', label: '法律' },
+  { id: 'case', label: '判例' },
+  { id: 'statute', label: '法规' },
+  { id: 'hearing', label: '听证会' },
   { id: 'document', label: '文档' },
+  { id: 'note', label: '笔记' },
+  { id: 'attachment', label: '附件' },
 ];
 const ITEM_TYPE_IDS = new Set(ITEM_TYPES.map((t) => t.id));
+
+// v5：按类型字段先收进一个通用 fields 对象（不追求 CSL 全字段，先覆盖写论文常用的）。
+const FIELD_KEYS = [
+  'publisher', 'place', 'edition', 'isbn', 'issn', 'conference',
+  'university', 'department', 'institution', 'series', 'seriesNumber',
+  'shortTitle', 'archive', 'archiveLocation', 'callNumber', 'rights',
+];
+const FIELD_KEY_SET = new Set(FIELD_KEYS);
 
 let FILE = null; // 由 init() 设定；测试里可覆盖
 
@@ -56,7 +98,40 @@ function init(userDataDir) {
 
 function filePath() { return FILE || init(null); }
 
-function emptyStore() { return { version: VERSION, collections: [], searches: [], items: [] }; }
+function emptyStore() {
+  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {} };
+}
+
+// 标签颜色是全局映射（标签本身仍是字符串，不把每条标签都对象化，兼容旧数据）。
+function normalizeTagColors(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of Object.keys(src)) {
+    const name = str(k);
+    const color = normalizeColor(src[k]);
+    if (name && color) out[name] = color;
+  }
+  return out;
+}
+
+function normalizeColor(v) {
+  const s = String(v == null ? '' : v).trim();
+  return /^#[0-9a-f]{6}$/i.test(s) ? s.toLowerCase() : '';
+}
+
+function normalizeFields(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of FIELD_KEYS) {
+    if (k in src) out[k] = str(src[k]);
+  }
+  return out;
+}
+
+// 相关条目只存 key（8 位类 Zotero key；测试数据可能更短，这里不做强格式校验）
+function normalizeRelations(raw) {
+  return strList(raw).filter((k) => /^[A-Za-z0-9_-]{1,64}$/.test(k));
+}
 
 // 版本迁移前把原始文件复制到 <库目录>/backups/，只保留最近 BACKUP_KEEP 份。
 // 迁移写盘失败也不影响本次读取：缓存里已经是迁移后的结构。
@@ -116,6 +191,7 @@ function normalizeCollections(raw) {
       id: String(c.id),
       name: String(c.name == null ? '未命名' : c.name).trim() || '未命名',
       parentId: c.parentId ? String(c.parentId) : null,
+      color: normalizeColor(c.color),
     });
   }
   // 父级不存在 → 回落成顶层；父链成环 → 断开，避免侧栏无限缩进/死循环
@@ -152,6 +228,7 @@ function normalize(o) {
   if (o && typeof o === 'object') {
     s.collections = normalizeCollections(o.collections);
     s.searches = normalizeSearches(o.searches);
+    s.tagColors = normalizeTagColors(o.tagColors);
     if (Array.isArray(o.items)) s.items = o.items.filter((it) => it && it.key).map(migrateItem);
   }
   return s;
@@ -187,6 +264,8 @@ function migrateItem(it) {
   x.doi = normDoi(src.doi);
   x.creators = strList(src.creators);
   x.tags = strList(src.tags);
+  x.fields = normalizeFields(src.fields);
+  x.relations = normalizeRelations(src.relations).filter((k) => k !== x.key);
 
   if (Array.isArray(src.collectionIds)) x.collectionIds = strList(src.collectionIds);
   else if (src.collectionId) x.collectionIds = [String(src.collectionId)];
@@ -280,7 +359,7 @@ function findCollection(id) { return load().collections.find((c) => c.id === id)
 
 // 从文件名猜标题：去扩展名、去下划线/连字符、去开头数字前缀
 function guessTitleFromPath(p) {
-  const base = path.basename(p).replace(/\.pdf$/i, '');
+  const base = path.basename(p).replace(/\.[A-Za-z0-9]{1,8}$/, '');
   return base.replace(/^[\s\-_0-9]+/, '').replace(/[_]+/g, ' ').trim() || base;
 }
 
@@ -323,8 +402,10 @@ function updateItem(key, patch) {
   for (const k of textFields) if (k in patch) it[k] = str(patch[k]);
   if ('doi' in patch) it.doi = normDoi(patch.doi);
   if ('itemType' in patch) it.itemType = ITEM_TYPE_IDS.has(patch.itemType) ? patch.itemType : 'document';
+  if ('fields' in patch) it.fields = normalizeFields(Object.assign({}, it.fields, patch.fields));
   if ('creators' in patch) it.creators = strList(patch.creators);
   if ('tags' in patch) it.tags = strList(patch.tags);
+  if ('relations' in patch) it.relations = normalizeRelations(patch.relations).filter((k) => k !== it.key);
   if ('collectionIds' in patch) it.collectionIds = validCollectionIds(patch.collectionIds);
   if ('page' in patch && Number.isFinite(+patch.page)) it.page = Math.max(0, Math.floor(+patch.page));
   it.updated = now();
@@ -437,6 +518,9 @@ function renameTag(from, to) {
     it.updated = now();
     n++;
   }
+  // 标签颜色跟着名字走；目标已有颜色时不覆盖
+  if (s.tagColors && s.tagColors[a] && !s.tagColors[b]) s.tagColors[b] = s.tagColors[a];
+  if (s.tagColors) delete s.tagColors[a];
   save();
   return { ok: true, renamed: n, from: a, to: b };
 }
@@ -453,6 +537,7 @@ function removeTagEverywhere(tag) {
     it.updated = now();
     n++;
   }
+  if (s.tagColors) delete s.tagColors[t];
   save();
   return { ok: true, removed: n, tag: t };
 }
@@ -471,14 +556,78 @@ function mergeTags(from, into) {
     it.updated = now();
     n++;
   }
+  if (s.tagColors && s.tagColors[a] && !s.tagColors[b]) s.tagColors[b] = s.tagColors[a];
+  if (s.tagColors) delete s.tagColors[a];
   save();
   return { ok: true, merged: n, from: a, into: b };
 }
 
+// 标签颜色：空字符串表示清除；标签本身仍以字符串存放在条目上
+function setTagColor(tag, color) {
+  const t = str(tag);
+  if (!t) return { ok: false, error: '标签名不对' };
+  const s = load();
+  if (!s.tagColors) s.tagColors = {};
+  const c = normalizeColor(color);
+  if (c) s.tagColors[t] = c;
+  else delete s.tagColors[t];
+  save();
+  return { ok: true, tag: t, color: c };
+}
+
+// ---------- 相关条目（双向） ----------
+// Zotero 的相关条目是双向关系：A 关联 B 时，B 也会出现在 A 的相关列表里。
+function addRelation(key, otherKey) {
+  const it = findItem(key);
+  const other = findItem(otherKey);
+  if (!it || !other || it.key === other.key) return null;
+  if (!it.relations.includes(other.key)) it.relations.push(other.key);
+  if (!other.relations.includes(it.key)) other.relations.push(it.key);
+  it.updated = now();
+  other.updated = now();
+  save();
+  return it;
+}
+function removeRelation(key, otherKey) {
+  const it = findItem(key);
+  const other = findItem(otherKey);
+  let changed = false;
+  if (it) {
+    const before = it.relations.length;
+    it.relations = it.relations.filter((k) => k !== otherKey);
+    if (it.relations.length !== before) { it.updated = now(); changed = true; }
+  }
+  if (other) {
+    const before = other.relations.length;
+    other.relations = other.relations.filter((k) => k !== key);
+    if (other.relations.length !== before) { other.updated = now(); changed = true; }
+  }
+  if (changed) save();
+  return it || null;
+}
+
 function addCollection(name, parentId) {
   const pid = parentId && findCollection(parentId) ? parentId : null;
-  const c = { id: genKey(), name: String(name || '未命名').trim() || '未命名', parentId: pid };
+  const c = { id: genKey(), name: String(name || '未命名').trim() || '未命名', parentId: pid, color: '' };
   load().collections.push(c); save(); return c;
+}
+
+// v5：收藏集重命名 / 颜色（只改索引，不碰条目与文件）
+function renameCollection(id, name) {
+  const c = findCollection(id);
+  if (!c) return null;
+  const n = String(name == null ? '' : name).trim();
+  if (!n) return c;
+  c.name = n;
+  save();
+  return c;
+}
+function setCollectionColor(id, color) {
+  const c = findCollection(id);
+  if (!c) return null;
+  c.color = normalizeColor(color);
+  save();
+  return c;
 }
 // 删收藏集：不删条目、不删文件。被删集合从条目的 collectionIds 里移除；
 // 若条目因此一个集合都不剩，且被删集合有父级，则回落到父级（v9 的既有行为）。
@@ -538,6 +687,8 @@ function publicItem(it, collIds) {
     key: it.key, itemType: it.itemType, title: it.title, creators: it.creators.slice(),
     year: it.year, publication: it.publication, volume: it.volume, issue: it.issue,
     pages: it.pages, doi: it.doi, url: it.url, abstract: it.abstract,
+    fields: Object.assign({}, it.fields || {}),
+    relations: (it.relations || []).slice(),
     note: notes.map((n) => n.text).filter(Boolean).join('\n\n'),   // 老字段保留：导出/兼容用
     notes,
     language: it.language, tags: it.tags.slice(),
@@ -557,6 +708,7 @@ function summary() {
     itemTypes: ITEM_TYPES.map((t) => ({ id: t.id, label: t.label })),
     collections: s.collections.slice(),
     searches: s.searches.slice(),
+    tagColors: Object.assign({}, s.tagColors || {}),
     items: s.items.map((it) => publicItem(it, collIds)),
     trashCount: s.items.filter((x) => x.deletedAt).length,
   };
@@ -583,6 +735,11 @@ function mergeStore(obj) {
   }
   const searchIds = new Set(cur.searches.map((x) => x.id));
   for (const x of inc.searches) if (!searchIds.has(x.id)) { cur.searches.push(x); searchIds.add(x.id); }
+  // 标签颜色：当前库已有的优先，避免恢复旧备份把新配色覆盖
+  if (!cur.tagColors) cur.tagColors = {};
+  for (const [tag, color] of Object.entries(inc.tagColors || {})) {
+    if (!cur.tagColors[tag] && color) cur.tagColors[tag] = color;
+  }
   const itemKeys = new Set(cur.items.map((x) => x.key));
   let added = 0;
   for (const it of inc.items) {
@@ -634,6 +791,7 @@ function bulkUpdate(keys, patch) {
     for (const k of textFields) if (k in p) it[k] = str(p[k]);
     if ('doi' in p) it.doi = normDoi(p.doi);
     if ('itemType' in p) it.itemType = ITEM_TYPE_IDS.has(p.itemType) ? p.itemType : it.itemType;
+    if ('fields' in p) it.fields = normalizeFields(Object.assign({}, it.fields, p.fields));
     if ('creators' in p) it.creators = strList(p.creators);
     if ('tags' in p) it.tags = strList(p.tags);
     if (Array.isArray(p.addTags)) for (const t of strList(p.addTags)) if (!it.tags.includes(t)) it.tags.push(t);
@@ -738,13 +896,35 @@ function mergeItems(keepKey, otherKeys) {
   const textFields = ['title', 'year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'note', 'language'];
   for (const other of others) {
     for (const k of textFields) if (!keep[k] && other[k]) keep[k] = other[k];
+    if ('fields' in other) {
+      keep.fields = keep.fields || {};
+      for (const k of FIELD_KEYS) if (!keep.fields[k] && other.fields[k]) keep.fields[k] = other.fields[k];
+    }
     for (const c of other.creators) if (!keep.creators.includes(c)) keep.creators.push(c);
     for (const t of other.tags) if (!keep.tags.includes(t)) keep.tags.push(t);
     for (const id of other.collectionIds) if (!keep.collectionIds.includes(id)) keep.collectionIds.push(id);
+    for (const n of other.notes || []) {
+      if (!keep.notes.some((x) => x.id === n.id)) keep.notes.push(n);
+    }
+    for (const rk of other.relations || []) {
+      if (drop.has(rk) || rk === keepKey) continue;
+      if (!keep.relations.includes(rk)) keep.relations.push(rk);
+    }
     if (keep.itemType === 'document' && other.itemType !== 'document') keep.itemType = other.itemType;
     if (!keep.attachment && other.attachment) keep.attachment = other.attachment;
     else if (keep.attachment && !fs.existsSync(keep.attachment.path) && other.attachment && fs.existsSync(other.attachment.path)) keep.attachment = other.attachment;
     if (!keep.page && other.page) keep.page = other.page;
+  }
+  // 其它条目指向被合并条目的关系，统一改指到保留条目，避免出现悬空 key
+  if (drop.size) {
+    for (const it of load().items) {
+      if (drop.has(it.key) || it.key === keepKey) continue;
+      if (!it.relations.some((k) => drop.has(k))) continue;
+      it.relations = it.relations.filter((k) => !drop.has(k));
+      if (!it.relations.includes(keepKey)) it.relations.push(keepKey);
+      if (!keep.relations.includes(it.key)) keep.relations.push(it.key);
+      it.updated = now();
+    }
   }
   if (drop.size) {
     const s = load();
@@ -787,9 +967,10 @@ module.exports = {
   addPdf, addItem, updateItem, removeItem,
   trashItem, restoreItem, deleteItemForever, emptyTrash,
   findItem, findItemByPath, setPageByKey,
-  addTag, removeTag, renameTag, removeTagEverywhere, mergeTags,
+  addTag, removeTag, renameTag, removeTagEverywhere, mergeTags, setTagColor,
+  addRelation, removeRelation,
   addNote, updateNote, removeNote,
-  addCollection, removeCollection, moveItem, setCollections, setAttachment,
+  addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment,
   addSearch, removeSearch,
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,
   exportStore, replaceStore, mergeStore, backupNow,

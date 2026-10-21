@@ -1,8 +1,8 @@
 # PDF Reader
 
-> 本地优先的轻量 **PDF 阅读器 + 文献库**。Electron + PDF.js + pdf-lib，纯 HTML/CSS/JS，零原生依赖。
+> 本地优先的轻量 **文档阅读器 + 文献库**。PDF 走 PDF.js，Word / PPT / Excel / Markdown / EPUB 等由主进程转成安全 HTML；Electron + 纯 HTML/CSS/JS，零原生依赖。
 
-它做的事：把一堆 PDF 收进一个本地文献库（标签 / 收藏集 / 全文检索 / 元数据），用顺手的阅读器逐篇读、逐页标注，再把批注和引用导出成能用的东西。
+它做的事：把一堆文档收进一个本地文献库（标签 / 收藏集 / 全文检索 / 元数据），用顺手的阅读器逐篇读、逐页标注，再把批注和引用导出成能用的东西。
 
 **不是 Zotero 的替代品。** 这里只做 Zotero 的「A 块地基」——条目 / 标签 / 收藏集 / 阅读标注；没有同步、群组库、CSL 引用、浏览器抓取器（详见 [已知边界](#已知边界)）。数据全在本地，不联网也能用。
 
@@ -12,13 +12,30 @@
 
 | 模块 | 能力 |
 |---|---|
-| **文献库** | 条目与元数据 · **多条阅读笔记** · 标签（含**重命名/合并/全局移除**）· 多级收藏集 · 智能收藏集（保存搜索条件）· 标签选择器 · 回收站与还原 · 查重合并 · 批量编辑 · BibTeX/RIS/**CSL-JSON** 导入导出 · DOI/arXiv 元数据抓取 · 复制引用（GB/T 7714-2015 / APA 7 / Chicago 17 / IEEE / MLA 9） |
-| **阅读器** | 连续滚动 / **单页翻页** 双模式 · 懒渲染（400–1200 页实测流畅）· 适应宽度/页面/百分比缩放（**缩放不跳页**）· 多标签页 · 记住每份文件的页码 · 目录（带页码）/ 缩略图 / 批注侧栏 · 文档内全文搜索（**F3 上下跳命中**）· **看图模式：点页面里的图片放大看原图** · **专注阅读模式（F11）** · **页面右键菜单 / 导出当前页 PNG** · 最近打开 · 单实例 |
-| **标注** | 画笔 · 荧光笔 · 直线 · 矩形 · 箭头 · 文字 · 便签 · 橡皮擦 · 撤销 / 清除本页 · 选中文字高亮 + 评论 · **批注标签与批注搜索** · 自动保存 · 导出带标注的 PDF 副本 · 导出批注为 **Markdown / CSV / TXT** · **导出全部文档的批注为一份 Markdown** |
-| **检索** | 库级全文索引（后台自动建，AND 多关键词，片段 + 页码）· 命中结果直接跳页 |
-| **数据** | 全部本地 JSON：库 `library.json`、标注按路径哈希存、全文索引可重建不进备份 · 一键备份 / 恢复（恢复前自动快照）· 数据目录可迁移 / 合并 / 替换 · 浅色 / 深色主题 |
+| **文献库** | 条目与元数据 · **多条阅读笔记** · 标签（含**重命名/合并/全局移除**、颜色）· 多级收藏集（可重命名、可设颜色）· 智能收藏集（保存搜索条件）· 标签选择器 · 回收站与还原 · 查重合并 · 批量编辑 · BibTeX/RIS/**CSL-JSON** 导入导出 · DOI/arXiv 元数据抓取 · 复制引用（GB/T 7714-2015 / APA 7 / Chicago 17 / IEEE / MLA 9）· **确定性 citekey 与 `[@key]`** · **相关条目** · **Zotero 风格交互**（单击选中、双击打开、右键菜单、Ctrl/Shift 多选、↑↓+Enter、拖入收藏集、表头排序） |
+| **阅读器** | **全格式富文档**（Word / PPT / Excel / Markdown / EPUB / RTF / ODT / 图片 / 代码…）· 连续滚动 / **单页翻页** 双模式 · 懒渲染（400–1200 页实测流畅）· 适应宽度/页面/百分比缩放（**缩放不跳页**）· 多标签页 · 记住每份文件的页码 · 目录（带页码）/ 缩略图 / 批注侧栏 · 文档内全文搜索（**F3 上下跳命中**）· **看图模式：点页面里的图片放大看原图** · **专注阅读模式（F11）** · **页面右键菜单 / 导出当前页 PNG** · 最近打开 · 单实例 |
+| **标注** | 画笔 · 荧光笔 · 直线 · 矩形 · 箭头 · 文字 · 便签 · 橡皮擦 · 撤销 / 清除本页 · 选中文字高亮 + 评论 · **摘录（quote）** · **复制文字自动附出处** · **批注标签与批注搜索** · 自动保存 · 导出带标注的 PDF 副本 · 导出批注为 **Markdown / CSV / TXT** · **导出全部文档的批注为一份 Markdown** |
+| **检索** | 库级全文索引（后台自动建，AND 多关键词，片段 + 页码）· **全文 + 批注/摘录 + 阅读笔记合并搜索** · 命中结果直接跳页 |
+| **数据** | 全部本地 JSON：库 `library.json`、标注按路径哈希存、全文索引可重建不进备份 · 一键备份 / 恢复（恢复前自动快照）· 数据目录可迁移 / 合并 / 替换 · 浅色 / 深色主题 · **全软件统一字体栈** |
 
-**永久约定：任何删除入口都不碰磁盘上的 PDF。** 删条目、删收藏集、清空回收站都只动索引。
+**永久约定：任何删除入口都不碰磁盘上的文档。** 删条目、删收藏集、清空回收站都只动索引。
+
+---
+
+## 支持格式
+
+| 类别 | 扩展名 | 阅读方式 |
+|---|---|---|
+| PDF | `.pdf` | PDF.js 渲染，保留文本层、搜索、标注、导出 |
+| Word | `.docx` `.doc` `.rtf` `.odt` | `.docx` 保留标题/列表/表格/图片；`.doc` 转纯文本；RTF/ODT 转 HTML |
+| 演示 | `.pptx` `.odp` | 每页一张幻灯片，含文字与内联图片；旧 `.ppt` 请先另存为 `.pptx` |
+| 表格 | `.xlsx` `.xls` `.ods` `.csv` | 每个工作表一页，首行作表头；单表最多 2000 行 × 80 列 |
+| Markdown / 网页 | `.md` `.markdown` `.html` `.htm` | 按一级标题分章；本地图片内联，远程图片与脚本会被剥离 |
+| 电子书 | `.epub` | 每章一页，章节图片内联 |
+| 图片 | `.png` `.jpg` `.jpeg` `.gif` `.webp` `.bmp` `.svg` `.avif` | 单页查看 |
+| 纯文本 / 代码 | `.txt` `.log` `.json` `.xml` `.yaml` `.ini` `.toml` `.js` `.ts` `.py` `.java` `.c` `.cpp` `.go` `.rs` `.sql` `.tex` `.srt` `.vtt` 等 | 按纯文本显示，自动识别 UTF-8 / UTF-16 / GB18030 |
+
+> 富文档模式同样支持页码、缩放与页内搜索；但 PDF 的画笔/标注层与「导出带标注副本」只对 PDF 开放。
 
 ---
 
@@ -34,7 +51,7 @@ npm start
 > 国内网络下载 Electron 卡住：`$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"; node node_modules/electron/install.js`  
 > 终端里若有 `ELECTRON_RUN_AS_NODE=1`（某些 IDE 注入），跑 Electron 前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
 
-现成的产物（免安装）：`build\PDF-Reader-1.0.0-portable.exe`，或 `build\PDF-Reader-Setup-1.0.0.exe`（NSIS 安装包）。
+现成的产物（免安装）：`build\PDF-Reader-1.1.0-portable.exe`，或 `build\PDF-Reader-Setup-1.1.0.exe`（NSIS 安装包）。
 
 ---
 
@@ -42,13 +59,16 @@ npm start
 
 | 按键 | 作用 | 按键 | 作用 |
 |---|---|---|---|
-| `Ctrl+O` | 打开 PDF | `Ctrl+F` | 文档内全文搜索 |
+| `Ctrl+O` | 打开文档 | `Ctrl+F` | 文档内全文搜索 |
 | `Ctrl+滚轮` | 缩放 | `Ctrl+0` | 适应宽度 |
 | `←` `→` `PgUp` `PgDn` `空格` | 翻页 | `Home` `End` | 首页 / 末页 |
 | `Ctrl+Z` | 撤销标注 | `Ctrl+S` | 导出带标注的 PDF 副本 |
 | `V` `P` `H` `L` `R` `A` `T` `N` `E` | 切换工具（看图/画笔/荧光/直线/矩形/箭头/文字/便签/橡皮） | `Esc` | 回选择 / 取消输入 / 关闭弹窗 |
 | `F11` | 专注阅读模式（只留页面） | `Ctrl+Shift+P` | 导出当前页为 PNG |
 | `F3` / `Shift+F3` | 搜索命中下一处 / 上一处 | `Esc` | 退出专注模式 / 取消输入 |
+| `Ctrl+Shift+I` | 开发者工具 | `Ctrl+Shift+I` | 设置面板里也有同一个按钮 |
+
+> 顶部**没有菜单栏**（v26 起去掉了「文件 / 视图 / 系统」）：打开用工具栏「打开」或 `Ctrl+O`，最近打开在工具栏的文件名面板里，导出当前页 / 专注模式在**页面右键菜单**里，备份恢复与默认阅读器在文献库的「设置」里。
 
 文字批注：`Enter` 完成、`Shift+Enter` 换行、`Esc` 取消。
 
@@ -62,7 +82,7 @@ npm start
 
 | 内容 | 位置 |
 |---|---|
-| 文献库 | `<数据目录>\library.json`（v4） |
+| 文献库 | `<数据目录>\library.json`（v5） |
 | 标注 | `<userData>\annotations\<sha1(路径)>.json` |
 | 全文索引 | `<数据目录>\fulltext\<hash>.json`（可重建，不进备份） |
 | 设置 | `<userData>\settings.json` |
@@ -74,24 +94,26 @@ npm start
 
 ## 回归测试
 
-24 个脚本，全部失败即非零退出。跑之前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
+37 个 `test-*.js` 脚本，全部失败即非零退出。跑之前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
 
 | 脚本 | 覆盖 |
 |---|---|
-| `node scripts/test-library.js` | 数据层 v3：CRUD / 回收站 / 迁移 / 查重合并 / 批量 / 导入去重 / 持久化（82） |
+| `node scripts/test-library.js` | 数据层 v5：37 类条目 / fields / relations / 颜色 / CRUD / 回收站 / 迁移 / 查重合并 / 批量 / 导入去重 / 持久化（82） |
 | `node scripts/test-fulltext.js` | 全文索引 / 搜索 / 新鲜度 / 容错（36） |
-| `node scripts/test-formats.js` | BibTeX / RIS 解析与导出（59） |
+| `node scripts/test-formats.js` | BibTeX / RIS / CSL-JSON 解析与导出（77） |
 | `node scripts/test-settings.js` | 设置白名单 / BOM / 损坏自愈（22） |
 | `node scripts/test-metadata.js` | DOI / arXiv 抓取（fake fetch，47） |
-| `node scripts/test-cite.js` | 引用格式化：GB/T 7714 + APA（33） |
+| `node scripts/test-cite.js` | 引用格式化：5 种样式 + 37 类标识 + citekey / `[@key]`（69） |
+| `node scripts/test-docconvert.js` | 全格式转换：docx / pptx / xlsx / odt / epub / md / html / csv / txt + sanitize + 图片内联（54） |
+| `node scripts/test-richdoc.js` | 真实 Electron 打开 docx / xlsx / epub：转换 / 渲染 / 缩放 / 搜索 / 页码 / 标签 / 选区摘录（32） |
 | `node scripts/test-export.js` | pdf-lib 导出管线（纯 Node） |
 | `node scripts/test-session.js` | 真实 app 三次：记页码 → 恢复页码 → 命令行打开（9） |
-| `node scripts/test-single-instance.js` | 真实双开 + PDF 转交（7） |
-| `node scripts/test-selection.js` | 选区高亮 / 评论 / 侧栏 / 笔记（14） |
+| `node scripts/test-single-instance.js` | 真实双开 + 文档转交（7） |
+| `node scripts/test-selection.js` | 选区高亮 / 评论 / 摘录 / 侧栏 / 笔记（16） |
 | `node scripts/test-tabs.js` | 多标签开 / 切 / 关，标注不丢（14） |
 | `node scripts/test-ui-v11.js` | 全文检索 / 智能收藏集 / 批量 / 设置 / 备份 |
 | `node scripts/test-ui-v12.js` | 查重 / 合并 / 详情 / 导入导出 IPC |
-| `node scripts/test-library-ui.js` | 库界面端到端（45） |
+| `node scripts/test-library-ui.js` | 库界面端到端：Zotero 交互 / citekey / 颜色 / 相关条目 / 排序 / 多选（57） |
 | `node scripts/test-export-highlight.js` | 真实选区 → 导出 → 重开，验证高亮烧进 PDF（12） |
 | `node scripts/test-backup-restore.js` | 备份 / 恢复 / pre-restore 快照（32） |
 | `node scripts/test-datadir.js` | 数据目录 move / merge / replace（19） |
@@ -99,14 +121,17 @@ npm start
 | `node scripts/test-bugfix.js` | 跨文档撤销隔离 / 页码指示 / 搜索清空 / 库退路 / 缩放 / 键盘（21） |
 | `node scripts/test-v14.js` | 标签选择器 / 复制引用 / 批注多格式导出（29） |
 | `node scripts/test-imageview.js` | 看图模式：定位内嵌位图 → 灯箱放大 / 缩放 / 翻页 / 关闭 / 触控板连发不闪（18） |
-| `node scripts/test-v18.js` | 工具带常驻 / 工具快捷键 / 导入读 PDF 元数据 / 文档快速切换（21） |
+| `node scripts/test-v18.js` | 工具带常驻 / 工具快捷键 / 导入读元数据 / 文档快速切换（21） |
 | `node scripts/test-v19.js` | 首次提示 / 工具分组 / 引用样式 5 种 / 批注搜索与标签 / 库里分区折叠（23） |
 | `node scripts/test-v20.js` | 专注模式 / 页面右键菜单 / 批注 Markdown 带引用 / 深色反色（20） |
 | `node scripts/test-v21.js` | 缩放保持位置 / 标签重命名与全局移除 / 导出全部批注（13） |
 | `node scripts/test-v22.js` | 单页/滚动双模式 / 搜索命中上下跳 / 大纲页码（17） |
 | `node scripts/test-v23.js` | 独立阅读笔记：v3→v4 迁移 / 增删改 / 导出兼容（20） |
 | `node scripts/test-v25.js` | 看图模式大图放大：位图不超原图 / 不炸合成纹理 / 放大后更清晰（15） |
-| `node scripts/test-packaged.js` | 打包产物冒烟（15） |
+| `node scripts/test-v26.js` | 顶部菜单已移除 / 字体统一为无衬线栈 / 设置新增两项 / 右键菜单有专注模式（7） |
+| `node scripts/test-v27.js` | 灯箱与页面观感 / 预览底色是纸白 / 便签能重开并修改（12） |
+| `node scripts/test-v28.js` | 多层图合成 / 反色跟随 / 灯箱关闭 / 阅读模式不误弹（28） |
+| `node scripts/test-packaged.js` | 打包产物冒烟：PDF / 索引 / 导出 / docx 富文档（17） |
 | `electron.exe scripts/test-pen.js` | 画笔：串页 / 悬挂 / 误点 / 抽稀平滑 / 多行 / 竞态 |
 | `electron.exe scripts/test-real-input.js` | 真实鼠标（走命中测试）——合成事件抓不到的那类问题 |
 | `electron.exe scripts/test-lazy-render.js` | 只滚 scrollTop，验证懒渲染观察器工作 |
@@ -127,7 +152,10 @@ $env:SMOKE_PDF = "$PWD\assets\sample.pdf"
 ## 已知边界
 
 - **没有同步 / 群组库 / 浏览器抓取器 / 完整 CSL**：多设备、协作、网页抓取、自动插入引用都做不到（CSL-JSON 只能换数据，不能渲染样式）。
-- **引用不是完整 CSL**：只内置 GB/T 7714-2015 与 APA 7 两种；作者是逗号分隔的字符串，没有姓/名/角色结构，APA 不做姓名拆分，也没有引文数据库。
+- **引用不是完整 CSL**：内置 5 种常用样式；作者是逗号分隔的字符串，没有姓/名/角色结构，APA 不做姓名拆分，也没有引文数据库。citekey 对英文条目按「姓 + 年 + 标题词」生成，中文作者没有拼音库时退化为 `item` + 条目 key 前缀。
+- **非 PDF 是「阅读版」而不是原样排版**：Word/PPT/Excel 只保留文字、标题、列表、表格和图片；复杂分栏、文本框定位、动画、SmartArt、图表不会还原。旧 `.ppt` 不支持，`.doc` 只取纯文本。
+- **富文档不支持 PDF 标注层**：画笔、荧光笔、便签、导出带标注副本只对 PDF 开放；富文档仍可选中文字复制 / 摘录，摘录会写进该条目的阅读笔记。
+- **安全优先会牺牲一部分内容**：转换结果统一 sanitize，脚本、事件属性、远程图片会被剥离；需要联网的图片请先下载到本地。
 - **导出 PDF 副本里的文字标注只支持 Latin-1**：中文/日文文字标注会被跳过（图形标注不受影响）——内置字体是 Helvetica，要支持 CJK 得嵌字体。
 - **标注按路径哈希存储**：移动或重命名 PDF 后旧标注不会跟随，需要重新定位附件。
 - **文献库是 JSON**：几千条够用，再大建议上 SQLite。
@@ -147,7 +175,7 @@ npx electron-builder --win dir
 # 用已嵌图标的目录重新生成两个包（这一步之后绝不能再碰 rcedit）
 npx electron-builder --win portable --prepackaged "build\win-unpacked"
 npx electron-builder --win nsis     --prepackaged "build\win-unpacked"
-node scripts\test-packaged.js "build\PDF-Reader-1.0.0-portable.exe"
+node scripts\test-packaged.js "build\PDF-Reader-1.1.0-portable.exe"
 ```
 
 > ⚠️ **切勿对 portable exe 直接跑 rcedit**：它是 NSIS 自解压格式，rcedit 重写 PE 资源会把尾部 app 数据整体丢弃（实测 74MB 被截成 63KB，**退出码仍是 0**），只留下一个双击打不开的残缺文件。  
@@ -160,19 +188,20 @@ node scripts\test-packaged.js "build\PDF-Reader-1.0.0-portable.exe"
 ```
 pdf-reader/
 ├─ src/
-│  ├─ main.js            # 窗口 / IPC / 菜单 / 备份恢复 / 单实例 / 数据目录
-│  ├─ library.js         # 本地库数据层 v3
-│  ├─ fulltext.js        # 主进程全文索引
+│  ├─ main.js            # 窗口 / IPC / 备份恢复 / 单实例 / 数据目录 / 全格式打开
+│  ├─ docconvert.js      # 全格式 → 安全 HTML（docx/pptx/xlsx/epub/md/…）
+│  ├─ library.js         # 本地库数据层 v5
+│  ├─ fulltext.js        # 主进程全文索引（PDF 走 PDF.js，其它走 docconvert）
 │  ├─ settings.js        # 设置读写
-│  ├─ formats.js         # BibTeX / RIS
+│  ├─ formats.js         # BibTeX / RIS / CSL-JSON
 │  ├─ metadata.js        # DOI / arXiv 抓取
 │  ├─ pdfmeta.js         # 读 PDF 自带元数据（Title/Author），导入时自动填表
-│  ├─ cite.js            # 引用格式化（GB/T 7714 + APA）
+│  ├─ cite.js            # 引用格式化（5 种样式）+ citekey
 │  ├─ preload.js         # contextBridge
 │  └─ renderer/          # index.html · styles.css · renderer.js · library-ui.js
 │                        # annotations.js · selection.js · lightbox.js · pdfimages.js
 │                        # docswitch.js
-├─ scripts/              # 26 个回归脚本 + 探针 + 打包/图标/样本工具
+├─ scripts/              # 37 个回归脚本 + 探针 + 打包/图标/样本工具
 └─ assets/               # sample.pdf · icon.ico …
 ```
 

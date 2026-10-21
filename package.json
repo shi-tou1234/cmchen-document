@@ -1,7 +1,7 @@
 {
   "name": "pdf-reader",
-  "version": "1.0.0",
-  "description": "轻量 PDF 阅读器（阅读 + 缩放 + 翻页导航）",
+  "version": "1.1.0",
+  "description": "本地优先的文档阅读器与文献库（PDF / Word / PPT / Excel / Markdown / EPUB）",
   "main": "src/main.js",
   "author": "me",
   "license": "MIT",
@@ -11,8 +11,16 @@
     "dist": "electron-builder"
   },
   "dependencies": {
+    "@iarna/rtf-to-html": "^1.1.0",
+    "iconv-lite": "^0.6.3",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
+    "marked": "^4.3.0",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "3.11.174"
+    "pdfjs-dist": "3.11.174",
+    "sanitize-html": "^2.13.1",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "electron": "^31.0.0",

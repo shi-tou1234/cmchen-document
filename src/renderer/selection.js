@@ -74,8 +74,9 @@ window.SelectionUI = (function () {
   }
 
   function onMouseUp() {
-    if (!App.state.pdfDoc) return;
-    if (Anno.state.tool !== 'select') { hideBar(); return; }
+    const rich = App.state.mode === 'rich';
+    if (!rich && !App.state.pdfDoc) return;
+    if (!rich && Anno.state.tool !== 'select') { hideBar(); return; }
     setTimeout(() => {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.rangeCount) { hideBar(); return; }
@@ -84,13 +85,25 @@ window.SelectionUI = (function () {
       const range = sel.getRangeAt(0);
       const viewer = $('viewer');
       if (!viewer || !viewer.contains(range.commonAncestorContainer)) { hideBar(); return; }
-      const groups = rectsForRange(range);
-      if (!groups.size) { hideBar(); return; }
-      pending = {
-        text: text.slice(0, 6000),
-        groups: [...groups.entries()],
-        color: ($('sel-color') && $('sel-color').value) || '#ffd54f',
-      };
+      if (rich) {
+        const pageEl = range.startContainer.parentElement
+          && range.startContainer.parentElement.closest('.doc-page');
+        pending = {
+          text: text.slice(0, 6000),
+          rich: true,
+          page: pageEl ? +pageEl.dataset.page : App.state.currentPage,
+          color: ($('sel-color') && $('sel-color').value) || '#ffd54f',
+        };
+      } else {
+        const groups = rectsForRange(range);
+        if (!groups.size) { hideBar(); return; }
+        pending = {
+          text: text.slice(0, 6000),
+          groups: [...groups.entries()],
+          page: +groups.keys().next().value,
+          color: ($('sel-color') && $('sel-color').value) || '#ffd54f',
+        };
+      }
       const bar = $('sel-bar');
       bar.style.display = 'flex';
       barPos(range.getBoundingClientRect());
@@ -98,7 +111,7 @@ window.SelectionUI = (function () {
     }, 0);
   }
 
-  function commitMarks(comment) {
+  function commitMarks(comment, kind) {
     if (!pending) return;
     const p = pending;
     for (const [page, rects] of p.groups) {
@@ -106,11 +119,12 @@ window.SelectionUI = (function () {
       Anno.addShape(page, {
         tool: 'mark', color: p.color, width: 0, rects,
         text: p.text, comment: String(comment || '').trim(),
+        ...(kind ? { kind } : {}),
       });
     }
     try { window.getSelection().removeAllRanges(); } catch (_) {}
     hideBar();
-    App.toast(comment ? '已高亮并保存评论' : '已高亮选中文字');
+    App.toast(comment ? '已高亮并保存评论' : (kind === 'quote' ? '已摘录' : '已高亮选中文字'));
   }
 
   function openComment(initial, cb, opts) {
@@ -161,9 +175,24 @@ window.SelectionUI = (function () {
     bar.addEventListener('click', (e) => {
       const b = e.target.closest('[data-sel]');
       if (!b || !pending) return;
-      if (b.dataset.sel === 'highlight') commitMarks('');
-      else if (b.dataset.sel === 'comment') {
-        const text = pending.text;
+      const action = b.dataset.sel;
+      const text = pending.text;
+      const page = pending.page || App.state.currentPage;
+      if (action === 'copy') {
+        App.copyWithSource(text, page);
+        try { window.getSelection().removeAllRanges(); } catch (_) {}
+        hideBar();
+      } else if (action === 'quote') {
+        if (pending.rich) {
+          App.quoteSelection(text, page);
+          try { window.getSelection().removeAllRanges(); } catch (_) {}
+          hideBar();
+        } else {
+          commitMarks('', 'quote');
+          App.copyWithSource(text, page);
+        }
+      } else if (action === 'highlight') commitMarks('');
+      else if (action === 'comment') {
         $('sel-bar').hidden = true;
         openComment('', (v) => commitMarks(v), { title: '高亮 + 评论', quote: text });
       }

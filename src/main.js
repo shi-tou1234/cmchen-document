@@ -8,6 +8,8 @@ const fulltext = require('./fulltext.js');
 const formats = require('./formats.js');
 const metadata = require('./metadata.js');
 const pdfmeta = require('./pdfmeta.js');
+const docconvert = require('./docconvert.js');
+const Cite = require('./cite.js');
 
 let win = null;
 
@@ -30,7 +32,7 @@ if (!TEST_MODE) {
           win.focus();
         }
       }
-      const p = pdfArgFrom(argv);
+      const p = docArgFrom(argv);
       if (p) openFromPath(p);
     });
   }
@@ -109,23 +111,58 @@ function readPdfPayload(filePath, extra) {
   }
 }
 
-// 从命令行参数里取 PDF 路径（双击文件 / 右键「打开方式」都会走到这里）
-function pdfArgFrom(argvList) {
+// 从命令行参数里取文档路径（双击文件 / 右键「打开方式」都会走到这里）
+// 支持的不只是 PDF：docx / pptx / xlsx / md / epub 等都能直接双击打开。
+function docArgFrom(argvList) {
   for (const a of argvList || []) {
-    if (typeof a === 'string' && /\.pdf$/i.test(a)) {
-      const abs = path.resolve(a);
-      if (fs.existsSync(abs)) return abs;
-    }
+    if (typeof a !== 'string') continue;
+    const abs = path.resolve(a);
+    if (docconvert.isSupported(abs) && fs.existsSync(abs)) return abs;
   }
   return null;
 }
 
+// 兼容旧调用名（v11-v26 的测试/探针里出现过）
+const pdfArgFrom = docArgFrom;
+
+// 统一打开入口：PDF 读字节交给 PDF.js，其它格式在主进程转成安全 HTML。
+// 返回的 payload 直接经 IPC 结构化克隆到渲染层；转换失败时 ok=false。
+async function readDocPayload(filePath, extra) {
+  const ext = docconvert.extOf(filePath);
+  if (ext === 'pdf') return readPdfPayload(filePath, extra);
+  try {
+    const doc = await docconvert.readDocument(filePath, {
+      startPage: (extra && extra.startPage) || pageForPath(filePath) || 1,
+    });
+    if (!doc.ok) return Object.assign({ filePath }, doc);
+    return Object.assign({}, doc, extra || {}, {
+      startPage: Math.max(1, Math.floor(+((extra && extra.startPage) || doc.startPage || pageForPath(filePath) || 1))),
+      // 主进程已经记住的页码优先于文档内部默认值
+      fileName: path.basename(filePath),
+    });
+  } catch (err) {
+    return { ok: false, filePath, error: String(err && err.message ? err.message : err) };
+  }
+}
+
+// 打开条目时顺带把「引用键 / 默认格式引用」交给渲染层，详情面板和阅读器都能直接复制。
+function citationInfo(it) {
+  if (!it) return {};
+  try {
+    return { item: it, citekey: Cite.citekey(it), citation: Cite.format(it, 'gbt7714') };
+  } catch (_) {
+    return { item: it, citekey: '', citation: '' };
+  }
+}
+
 // 窗口可能还没加载完（冷启动带文件参数时一定会），所以未就绪时排队，等 did-finish-load 再投
 let pendingOpen = null;
-function openFromPath(filePath) {
-  if (!filePath) return;
-  const payload = readPdfPayload(filePath);
-  if (!payload.ok) { dialog.showErrorBox('打开失败', payload.error || filePath); return; }
+async function openFromPath(filePath) {
+  if (!filePath) return null;
+  const payload = await readDocPayload(filePath);
+  if (!payload.ok) { dialog.showErrorBox('打开失败', payload.error || filePath); return payload; }
+  const libItem = library.findItemByPath(filePath);
+  if (libItem) Object.assign(payload, citationInfo(libItem), { itemKey: libItem.key });
   rememberRecent(filePath, payload.startPage || 1);
   if (win && win.__loaded) {
     win.webContents.send('pdf-opened', payload);
@@ -133,6 +170,7 @@ function openFromPath(filePath) {
     // 未就绪：交给 createWindow 里注册的 did-finish-load 统一投递，避免两处重复发
     pendingOpen = payload;
   }
+  return payload;
 }
 
 // 记住的窗口位置可能已经不在任何显示器上（副屏拔掉了、分辨率改了），
@@ -243,21 +281,32 @@ ipcMain.on('smoke-result', (_e, payload) => {
   app.exit(payload && payload.ok ? 0 : 2);
 });
 
-// 弹出文件对话框，读取 PDF 字节，以 Uint8Array 结构克隆回渲染进程
+// 弹出文件对话框，读取文档；PDF 回字节，其它格式回转换好的页面。
 async function openPdfViaDialog() {
   if (!win) return { ok: false };
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-    title: '打开 PDF',
-    filters: [{ name: 'PDF 文件', extensions: ['pdf'] }],
+    title: '打开文档',
+    filters: [
+      { name: '所有支持的文档', extensions: [...docconvert.SUPPORTED_EXTS] },
+      { name: 'PDF 文件', extensions: ['pdf'] },
+      { name: 'Word 文档', extensions: ['docx', 'doc'] },
+      { name: '演示文稿', extensions: ['pptx', 'odp'] },
+      { name: '表格', extensions: ['xlsx', 'xls', 'ods', 'csv'] },
+      { name: '文本 / Markdown', extensions: ['md', 'markdown', 'txt', 'html', 'htm', 'rtf'] },
+      { name: '电子书', extensions: ['epub'] },
+      { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif'] },
+      { name: '所有文件', extensions: ['*'] },
+    ],
     properties: ['openFile'],
     defaultPath: appState.lastDir || undefined,
   });
   if (canceled || filePaths.length === 0) return { ok: false };
 
   const filePath = filePaths[0];
-  const payload = readPdfPayload(filePath);
+  const payload = await readDocPayload(filePath);
   if (payload.ok) {
     rememberRecent(filePath, payload.startPage || 1);
+    appState.lastDir = path.dirname(filePath); saveWindowState(appState);
     if (!win.__loaded) pendingOpen = payload; // 罕见：对话框期间窗口被重载
   } else {
     dialog.showErrorBox('打开失败', payload.error || filePath);
@@ -520,15 +569,17 @@ ipcMain.handle('recent-list', () => recentList().map((r) => ({
   path: r.path, name: r.name || path.basename(r.path), page: r.page || 0,
 })));
 // v18：直接打开某个路径（从快速切换面板点「最近打开」时用）
-ipcMain.handle('open-path', (_e, info) => {
+ipcMain.handle('open-path', async (_e, info) => {
   const p = info && info.path;
   if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
-  openFromPath(p);
-  return { ok: true };
+  if (!docconvert.isSupported(p)) return { ok: false, error: '不支持这个文件格式' };
+  const r = await openFromPath(p);
+  return r && r.ok ? { ok: true } : { ok: false, error: (r && r.error) || '打开失败' };
 });
 ipcMain.handle('lib-add-pdf', async (_e, info) => {
   const p = info && info.path;
   if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
+  if (!docconvert.isSupported(p)) return { ok: false, error: '不支持这个文件格式' };
   const o = (info && info.opts) || {};
   // 去重是「导入 / 拖入」这类用户操作的语义，由调用方显式要求（opts.dedupe）：
   // 同一路径不重复建条目；已在回收站里的那条顺手还原回来。
@@ -545,9 +596,10 @@ ipcMain.handle('lib-add-pdf', async (_e, info) => {
       return { ok: true, item: exist, deduped: true };
     }
   }
-  // v18：读 PDF 自带元数据填标题/作者（填不上再回退到文件名猜）
+  // v18：读文档自带元数据填标题/作者（PDF 走 PDF 信息字典，Office/EPUB 读 core.xml）
   let meta = {};
-  try { meta = await pdfmeta.readMeta(p); } catch (_) { meta = {}; }
+  const ext = docconvert.extOf(p);
+  try { meta = ext === 'pdf' ? await pdfmeta.readMeta(p) : await docconvert.readZipCoreMeta(p); } catch (_) { meta = {}; }
   const title = o.title || pdfmeta.usableTitle(meta.title);
   const creators = Array.isArray(o.creators) && o.creators.length
     ? o.creators
@@ -559,14 +611,18 @@ ipcMain.handle('lib-add-pdf', async (_e, info) => {
   fulltext.indexOne(item).catch((err) => console.warn('[fulltext] index add failed:', err && err.message));
   return { ok: true, item, meta: { title: meta.title || '', author: meta.author || '' } };
 });
-ipcMain.handle('lib-open-item', (_e, info) => {
+ipcMain.handle('lib-open-item', async (_e, info) => {
   const it = info && library.findItem(info.key);
   if (!it || !it.attachment) return { ok: false, error: '条目无附件' };
   if (!fs.existsSync(it.attachment.path)) return { ok: false, error: '文件已移动或删除', missingPath: it.attachment.path };
+  if (!docconvert.isSupported(it.attachment.path)) return { ok: false, error: '不支持这个文件格式' };
   const extra = { itemKey: it.key };
   if (info.page && Number.isFinite(+info.page)) extra.startPage = Math.max(1, Math.floor(+info.page));
-  const payload = readPdfPayload(it.attachment.path, extra);
-  if (payload.ok) rememberRecent(it.attachment.path, payload.startPage || 1);
+  const payload = await readDocPayload(it.attachment.path, extra);
+  if (payload.ok) {
+    Object.assign(payload, citationInfo(it));
+    rememberRecent(it.attachment.path, payload.startPage || 1);
+  }
   return payload;
 });
 ipcMain.handle('lib-update-item', (_e, info) => (info ? library.updateItem(info.key, info.patch || {}) : null));
@@ -578,6 +634,33 @@ ipcMain.handle('lib-delete-item', (_e, info) => (info ? library.deleteItemForeve
 ipcMain.handle('lib-empty-trash', () => ({ removed: library.emptyTrash(), filesKept: true }));
 ipcMain.handle('lib-add-collection', (_e, info) => library.addCollection(info && info.name, info && info.parentId));
 ipcMain.handle('lib-remove-collection', (_e, info) => (info ? library.removeCollection(info.id) : false));
+// v27：收藏集重命名 / 颜色、标签颜色
+ipcMain.handle('lib-rename-collection', (_e, info) => {
+  const c = info ? library.renameCollection(info.id, info.name) : null;
+  if (c && win) win.webContents.send('lib-changed');
+  return { ok: !!c, collection: c };
+});
+ipcMain.handle('lib-set-collection-color', (_e, info) => {
+  const c = info ? library.setCollectionColor(info.id, info.color) : null;
+  if (c && win) win.webContents.send('lib-changed');
+  return { ok: !!c, collection: c };
+});
+ipcMain.handle('lib-set-tag-color', (_e, info) => {
+  const r = info ? library.setTagColor(info.tag, info.color) : { ok: false };
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return r;
+});
+// v27：相关条目（双向）
+ipcMain.handle('lib-add-relation', (_e, info) => {
+  const it = info ? library.addRelation(info.key, info.otherKey) : null;
+  if (it) win.webContents.send('lib-changed');
+  return { ok: !!it, item: it };
+});
+ipcMain.handle('lib-remove-relation', (_e, info) => {
+  const it = info ? library.removeRelation(info.key, info.otherKey) : null;
+  if (it) win.webContents.send('lib-changed');
+  return { ok: !!it, item: it };
+});
 ipcMain.handle('lib-move-item', (_e, info) => (info ? library.moveItem(info.key, info.collectionId) : null));
 ipcMain.handle('lib-set-collections', (_e, info) => (info ? library.setCollections(info.key, info.collectionIds) : null));
 ipcMain.handle('lib-add-tag', (_e, info) => (info ? library.addTag(info.key, info.tag) : null));
@@ -638,6 +721,61 @@ ipcMain.handle('lib-open-data-dir', async () => {
 });
 
 // ---------- 库级全文检索 (v11) ----------
+// v27：一次搜索同时合并「全文索引 + 批注 / 摘录 + 阅读笔记」，
+// 结果用 type 区分，UI 显示不同徽标；点击仍跳到对应页。
+function makeSnippet(text, q, width) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  const n = width || 96;
+  if (!s) return '';
+  const i = s.toLowerCase().indexOf(String(q || '').toLowerCase());
+  if (i < 0) return s.slice(0, n) + (s.length > n ? '…' : '');
+  const from = Math.max(0, i - Math.floor(n / 3));
+  const to = Math.min(s.length, from + n);
+  return (from > 0 ? '…' : '') + s.slice(from, to) + (to < s.length ? '…' : '');
+}
+
+function annotationResults(q) {
+  const ql = String(q || '').toLowerCase();
+  const out = [];
+  for (const entry of readAnnotationBundle()) {
+    const data = entry && entry.data;
+    const p = data && data.path;
+    if (!p) continue;
+    const it = library.findItemByPath(p);
+    if (!it || it.deletedAt) continue;
+    for (const pg of (data.pages || [])) {
+      for (const sh of (pg && pg.shapes) || []) {
+        const text = [sh.text, sh.comment].filter(Boolean).join(' ').trim();
+        if (!text || !text.toLowerCase().includes(ql)) continue;
+        out.push({
+          key: it.key, title: it.title || '(无标题)', page: pg.page || 1,
+          type: 'annotation', label: sh.comment ? '批注' : '摘录',
+          snippet: makeSnippet(sh.comment || sh.text, q), path: p,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function noteResults(q) {
+  const ql = String(q || '').toLowerCase();
+  const out = [];
+  for (const it of library.summary().items) {
+    if (it.deletedAt) continue;
+    for (const n of it.notes || []) {
+      const hay = [n.title, n.text].filter(Boolean).join(' ');
+      if (!hay || !hay.toLowerCase().includes(ql)) continue;
+      out.push({
+        key: it.key, title: it.title || '(无标题)', page: it.page || 1,
+        type: 'note', label: '笔记', noteId: n.id,
+        snippet: makeSnippet(hay, q), path: (it.attachment && it.attachment.path) || '',
+      });
+    }
+  }
+  return out;
+}
+
 function fulltextResults(query) {
   const hit = fulltext.search(query);
   const out = [];
@@ -645,14 +783,33 @@ function fulltextResults(query) {
   for (const r of hit.results) {
     const it = library.findItemByPath(r.path);
     if (!it || it.deletedAt) continue;
-    const id = it.key + ':' + r.page;
+    const id = 'ft:' + it.key + ':' + r.page;
     if (seen.has(id)) continue;
     seen.add(id);
     out.push({
       key: it.key, title: it.title || '(无标题)', page: r.page,
+      type: 'fulltext', label: '全文',
       snippet: r.snippet, count: r.count, path: r.path,
     });
     if (out.length >= 120) break;
+  }
+  if (out.length < 120 && String(query || '').trim()) {
+    for (const r of annotationResults(query)) {
+      const id = 'an:' + r.key + ':' + r.page + ':' + r.snippet;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(r);
+      if (out.length >= 120) break;
+    }
+  }
+  if (out.length < 120 && String(query || '').trim()) {
+    for (const r of noteResults(query)) {
+      const id = 'nt:' + r.key + ':' + r.noteId;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(r);
+      if (out.length >= 120) break;
+    }
   }
   return { ok: true, query: hit.query, results: out, stats: hit.stats };
 }
@@ -731,8 +888,11 @@ ipcMain.handle('lib-relink-item', async (_e, info) => {
   const it = info && library.findItem(info.key);
   if (!it) return { ok: false, error: '条目不存在' };
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-    title: '重新定位 PDF 附件',
-    filters: [{ name: 'PDF 文件', extensions: ['pdf'] }],
+    title: '重新定位附件',
+    filters: [
+      { name: '所有支持的文档', extensions: [...docconvert.SUPPORTED_EXTS] },
+      { name: '所有文件', extensions: ['*'] },
+    ],
     properties: ['openFile'],
     defaultPath: it.attachment && fs.existsSync(path.dirname(it.attachment.path))
       ? it.attachment.path : (appState.lastDir || undefined),
@@ -854,6 +1014,35 @@ async function exportAllNotesToFile(outPath) {
 
 ipcMain.handle('export-all-notes', (_e, info) => exportAllNotesToFile(info && info.outPath));
 
+// v26：菜单栏去掉后，这几件事改从界面里发起
+// 1) 清空「最近打开」记录（文档快速切换面板上的「清空」）
+ipcMain.handle('clear-recent', () => clearRecent());
+// 2) 设为默认 PDF 阅读器（设置面板里）
+ipcMain.handle('set-default-pdf-reader', async () => {
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'info',
+    title: '设为默认 PDF 阅读器',
+    message: 'Windows 不允许程序静默改写默认应用，需要你在设置里点一下。',
+    detail: '本程序路径：\n' + process.execPath + '\n\n下一步：在「默认应用」里搜索并选择本程序作为 .pdf 的打开方式。',
+    buttons: ['打开 Windows 设置', '复制程序路径', '取消'],
+    noLink: true,
+  });
+  if (response === 0) { shell.openExternal('ms-settings:defaultapps'); return { ok: true, action: 'settings' }; }
+  if (response === 1) { clipboard.writeText(process.execPath); return { ok: true, action: 'copied' }; }
+  return { ok: false, canceled: true };
+});
+// 3) 开发者工具（设置面板里 / Ctrl+Shift+I）
+ipcMain.handle('open-devtools', () => {
+  if (!win) return { ok: false };
+  win.webContents.openDevTools({ mode: 'detach' });
+  return { ok: true };
+});
+// 4) 给回归脚本用：菜单栏确实没了
+ipcMain.handle('app-info', () => ({
+  hasMenu: !!Menu.getApplicationMenu(),
+  version: app.getVersion(),
+}));
+
 // 复制纯文本到系统剪贴板
 ipcMain.handle('copy-text', (_e, info) => {
   const text = String((info && info.text) || '');
@@ -967,88 +1156,24 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
   }
 });
 
-function recentSubmenu() {
-  const list = recentList();
-  if (!list.length) return [{ label: '（暂无记录）', enabled: false }];
-  const items = list.map((r) => ({
-    label: r.page ? `${r.name}（上次第 ${r.page} 页）` : r.name,
-    toolTip: r.path,
-    click: () => openFromPath(r.path),
-  }));
-  items.push({ type: 'separator' });
-  items.push({
-    label: '清空最近打开记录',
-    click: () => { appState.recent = []; saveWindowState(appState); rebuildMenu(); },
-  });
-  return items;
+// 清空「最近打开」记录（v26：原来在菜单里，现在放在文档快速切换面板上）
+function clearRecent() {
+  appState.recent = [];
+  saveWindowState(appState);
+  return { ok: true };
 }
 
+// v26：不再用原生菜单栏（文件 / 视图 / 系统 三项）——界面更干净，
+// 这些功能分别落在：工具栏「打开」、文档快速切换面板、页面右键菜单、
+// 批注面板的导出条、文献库与设置面板里。
 function buildMenu() {
-  const template = [
-    {
-      label: '文件',
-      submenu: [
-        {
-          label: '打开 PDF…',
-          accelerator: 'CmdOrCtrl+O',
-          click: async () => {
-            const res = await openPdfViaDialog();
-            if (res.ok && win) win.webContents.send('pdf-opened', res);
-          },
-        },
-        { label: '最近打开', submenu: recentSubmenu() },
-        { type: 'separator' },
-        { label: '导出当前页为图片…', accelerator: 'CmdOrCtrl+Shift+P', click: () => { if (win) win.webContents.send('export-page-png'); } },
-        { label: '导出全部批注为一个 Markdown…', click: () => { exportAllNotesToFile(); } },
-        { type: 'separator' },
-        { label: '导入 BibTeX / RIS…', click: () => importRefsViaDialog() },
-        { label: '导出 BibTeX / RIS…', click: () => exportRefsViaDialog() },
-        { type: 'separator' },
-        { label: '备份文献库…', click: () => backupViaDialog() },
-        { label: '从备份恢复…', click: () => restoreViaDialog() },
-        { label: '设置…', click: () => { if (win) win.webContents.send('open-settings'); } },
-        { type: 'separator' },
-        { role: 'quit', label: '退出' },
-      ],
-    },
-    {
-      label: '视图',
-      submenu: [
-        { label: '专注阅读模式', accelerator: 'F11', click: () => { if (win) win.webContents.send('toggle-focus-mode'); } },
-        { type: 'separator' },
-        { role: 'reload', label: '重新加载' },
-        { role: 'toggleDevTools', label: '开发者工具' },
-      ],
-    },
-    {
-      label: '系统',
-      submenu: [
-        {
-          label: '设为默认 PDF 阅读器…',
-          click: async () => {
-            const { response } = await dialog.showMessageBox(win, {
-              type: 'info',
-              title: '设为默认 PDF 阅读器',
-              message: 'Windows 不允许程序静默改写默认应用，需要你在设置里点一下。',
-              detail: '本程序路径：\n' + process.execPath + '\n\n下一步：在「默认应用」里搜索并选择本程序作为 .pdf 的打开方式。',
-              buttons: ['打开 Windows 设置', '复制程序路径', '取消'],
-              noLink: true,
-            });
-            if (response === 0) shell.openExternal('ms-settings:defaultapps');
-            else if (response === 1) clipboard.writeText(process.execPath);
-          },
-        },
-      ],
-    },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  Menu.setApplicationMenu(null);
 }
 
-// 记住页码/新增最近文件后，菜单里的「上次第 N 页」要跟着变，但别在滚动时频繁重建
-let menuRefreshTimer = null;
+// v26：没有原生菜单栏了，「最近打开」由文档快速切换面板负责，
+// 这里只留一个空实现（老调用点不必逐个改）。
 function rebuildMenu() {
-  clearTimeout(menuRefreshTimer);
-  menuRefreshTimer = setTimeout(buildMenu, 300);
+  // noop
 }
 
 app.whenReady().then(() => {

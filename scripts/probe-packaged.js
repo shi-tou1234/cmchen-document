@@ -30,5 +30,21 @@ module.exports = `(async () => {
   const exp = await pdfBridge.exportPdf(payload);
   push('打包后能导出带标注副本', exp && exp.ok && exp.skipped === 0, JSON.stringify(exp));
 
+  // 富文档：验证 asar 里的 mammoth / jszip 能加载，转换与渲染链路可用
+  const rich = await pdfBridge.lib.openItem('pkgdocx', 1);
+  push('打包后主进程能转换 docx', !!(rich && rich.ok && rich.kind === 'rich' && rich.pages && rich.pages.length === 1),
+    JSON.stringify(rich && { ok: rich.ok, kind: rich.kind, pages: rich.pages && rich.pages.length, error: rich.error }));
+  if (rich && rich.ok) {
+    App.openDocument(rich, { newTab: true });
+    const richShown = await waitFor(() => {
+      if (App.state.mode !== 'rich' || App.state.numPages !== 1) return false;
+      const b = document.querySelector('#doc-view .doc-page-body');
+      return !!(b && b.textContent.indexOf('打包后的 Word 正文') >= 0);
+    }, 12000);
+    push('打包后富文档能渲染', richShown, 'mode=' + App.state.mode + ' pages=' + App.state.numPages + ' err=' + (App.lastLoadError || ''));
+  } else {
+    push('打包后富文档能渲染', false, 'docx 转换失败');
+  }
+
   return { checks, outPath: exp && exp.path, asar: location.href.indexOf('app.asar') >= 0 };
 })()`;

@@ -79,7 +79,11 @@ module.exports = `(async () => {
   // ---------- 3. 批注导出：Markdown / CSV / TXT ----------
   // 批注面板要先有文档、侧栏可见、切到「批注」页才会渲染导出按钮
   const openCard = $('#lib-grid .lib-card[data-open]');
-  if (openCard) openCard.click();
+  if (openCard) {
+    // v27 起对齐 Zotero：单击只选中，双击才打开
+    openCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    openCard.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+  }
   const opened = await waitFor(() => App.state.pdfDoc && App.state.numPages === 3, 15000);
   push('能打开条目进入阅读（探针前提）', opened, 'pdfDoc=' + !!App.state.pdfDoc + ' tabs=' + App.tabs.length);
   const sb = $('#sidebar');
@@ -89,8 +93,11 @@ module.exports = `(async () => {
   await sleep(400);
 
   const btns = $$('[data-note-fmt]');
-  push('批注面板有 MD/CSV/TXT 三个导出按钮', btns.length === 3, 'buttons=' + btns.length);
-  push('导出按钮带格式标记', btns.map((b) => b.dataset.noteFmt).sort().join(',') === 'csv,md,txt', btns.map((b) => b.dataset.noteFmt).join(','));
+  // v26 起多了一个「全部文档」（汇总所有文档的批注），所以这里只断言三种格式都在
+  const fmts = btns.map((b) => b.dataset.noteFmt);
+  push('批注面板有 MD/CSV/TXT 三个导出按钮',
+    ['md', 'csv', 'txt'].every((f) => fmts.indexOf(f) >= 0), 'buttons=' + btns.length);
+  push('导出按钮带格式标记', btns.every((b) => !!b.dataset.noteFmt), fmts.join(','));
 
   App.state.annos.set(1, [
     { tool: 'mark', color: '#ffd54f', rects: [{ x: 1, y: 2, w: 30, h: 9 }], text: '引用文字', comment: '我的评论' },

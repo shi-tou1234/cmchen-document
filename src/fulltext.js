@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const docconvert = require('./docconvert.js');
 
 const VERSION = 1;
 const MAX_CHARS_PER_PAGE = 200000;
@@ -84,6 +85,11 @@ function isFresh(pdfPath) {
 }
 
 async function extractPages(pdfPath) {
+  // v27：非 PDF 交给 docconvert 抽文本；索引结构保持一致（pages:[{page,text}]）
+  if (docconvert.extOf(pdfPath) !== 'pdf') {
+    const ext = await docconvert.extractText(pdfPath);
+    return { pages: ext.pages, chars: ext.chars, numPages: ext.numPages };
+  }
   const pdfjs = require('pdfjs-dist/build/pdf.js');
   const data = new Uint8Array(fs.readFileSync(pdfPath));
   const doc = await pdfjs.getDocument({

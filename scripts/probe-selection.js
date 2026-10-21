@@ -44,16 +44,26 @@ module.exports = `(async () => {
   const cm = (App.state.annos.get(1) || []).find((s) => s.tool === 'mark' && s.comment);
   push('高亮+评论保存到模型', !!cm && cm.comment === '这是一条测试评论', cm && cm.comment);
 
-  // 侧栏「批注」面板：两条记录 + 评论文案 + 编辑按钮
+  // 第三段：选中 → 摘录（quote）；复用 tool:'mark'，用 kind 区分
+  selectSpan(spans[1] || spans[0]);
+  await waitFor(() => !$('#sel-bar').hidden, 3000);
+  $('#sel-bar [data-sel="quote"]').click();
+  await waitFor(() => (App.state.annos.get(1) || []).some((s) => s.kind === 'quote'), 3000);
+  const qt = (App.state.annos.get(1) || []).find((s) => s.kind === 'quote');
+  push('摘录写入 kind=quote 且复用 mark', !!qt && qt.tool === 'mark' && qt.kind === 'quote',
+    JSON.stringify(qt && { tool: qt.tool, kind: qt.kind, text: qt.text }));
+
+  // 侧栏「批注」面板：三条记录 + 评论文案 + 编辑按钮
   $('#btn-sidebar').click();
   await sleep(100);
   const annosTab = $('.sb-tab[data-tab="annos"]');
   if (annosTab) annosTab.click();
-  await waitFor(() => $$('#anno-list .anno-item').length >= 2, 3000);
+  await waitFor(() => $$('#anno-list .anno-item').length >= 3, 3000);
   const rows = $$('#anno-list .anno-item');
-  push('侧栏批注列表列出两条', rows.length === 2, 'rows=' + rows.length);
+  push('侧栏批注列表列出三条', rows.length === 3, 'rows=' + rows.length);
   push('侧栏显示高亮评论', rows.some((r) => (r.textContent || '').indexOf('评论：这是一条测试评论') >= 0), rows.map((r) => r.textContent).join(' | '));
-  push('侧栏每条高亮都有编辑评论按钮', rows.filter((r) => r.querySelector('[data-anno-comment]')).length === 2, 'edit=' + rows.filter((r) => r.querySelector('[data-anno-comment]')).length);
+  push('侧栏把摘录标为「摘录：」', rows.some((r) => (r.textContent || '').indexOf('摘录：') >= 0), rows.map((r) => r.textContent).join(' | '));
+  push('侧栏每条高亮都有编辑评论按钮', rows.filter((r) => r.querySelector('[data-anno-comment]')).length === 3, 'edit=' + rows.filter((r) => r.querySelector('[data-anno-comment]')).length);
 
   // 持久化
   await App.flushAnnos();

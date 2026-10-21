@@ -55,19 +55,20 @@ const Anno = window.Anno = (() => {
       case 'highlight':
         base.appendChild(inkNode(sh, 0.4)); break;
       case 'mark': {
-        // 文字选区高亮：矩形来自真实文本层选区，存单位坐标，缩放后不漂
+        // 文字选区高亮：矩形来自真实文本层选区，存单位坐标，缩放后不漂。
+        // kind:'quote' 是「摘录」，用更淡的底 + 虚线和普通高亮区分。
         const g = document.createElementNS(NS, 'g');
-        g.setAttribute('class', 'text-mark');
+        g.setAttribute('class', 'text-mark' + (sh.kind === 'quote' ? ' text-quote' : ''));
         for (const r of (sh.rects || [])) {
           g.appendChild(el('rect', {
             x: r.x, y: r.y, width: Math.max(1, r.w), height: Math.max(1, r.h),
-            fill: sh.color || '#ffd54f', 'fill-opacity': '0.42',
-            stroke: sh.color || '#ffd54f', 'stroke-opacity': '0.55', 'stroke-width': '1',
+            fill: sh.color || '#ffd54f', 'fill-opacity': sh.kind === 'quote' ? '0.18' : '0.42',
+            stroke: sh.color || '#ffd54f', 'stroke-opacity': sh.kind === 'quote' ? '0.75' : '0.55', 'stroke-width': '1',
             rx: '1.5',
           }));
         }
         const ti = el('title', {});
-        ti.textContent = String(sh.text || '') + (sh.comment ? '\n评论：' + sh.comment : '');
+        ti.textContent = (sh.kind === 'quote' ? '摘录：' : '') + String(sh.text || '') + (sh.comment ? '\n评论：' + sh.comment : '');
         g.appendChild(ti);
         base.appendChild(g);
         break;
@@ -192,7 +193,12 @@ const Anno = window.Anno = (() => {
     const tool = state.tool;
     if (tool === 'select') return;
     const p = toUnit(svg, e.clientX, e.clientY);
-    if (tool === 'text' || tool === 'note') { startText(e, n, svg, p, tool); return; }
+    if (tool === 'text' || tool === 'note') {
+      // 点到已有的便签/文字 → 打开编辑器改它；没点中才新建
+      // （原来不管点哪儿都开一个空编辑器，保存过的便签再也点不开）
+      startText(e, n, svg, p, tool, findEditable(n, p, tool));
+      return;
+    }
     try { svg.setPointerCapture(e.pointerId); pointerId = e.pointerId; }
     catch (_) { /* 合成事件或失效的 pointerId：不影响，move/up 已在 window 上兜住 */ }
     ctx = { n, svg };
@@ -296,8 +302,7 @@ const Anno = window.Anno = (() => {
   }
 
   // ---- 橡皮：命中测试删除 ----
-  function eraseAt(n, p) {
-    const arr = shapesOf(n);
+  function eraseAt(n, p) {    const arr = shapesOf(n);
     for (let i = arr.length - 1; i >= 0; i--) {
       if (hit(arr[i], p)) {
         const [rm] = arr.splice(i, 1);
@@ -355,7 +360,18 @@ const Anno = window.Anno = (() => {
   // 结果输入框一闪即消失、上一段字也丢了 —— 表现为「写字不行了」。所以先收尾再开新的。
   let textFinish = null;
 
-  function startText(e, n, svg, unit, toolKind) {
+  // 找点到的已有便签/文字（用来「点开改它」）
+  function findEditable(n, p, kind) {
+    const arr = shapesOf(n);
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const sh = arr[i];
+      if (!sh || sh.tool !== kind) continue;
+      if (hit(sh, p)) return { shape: sh, index: i };
+    }
+    return null;
+  }
+
+  function startText(e, n, svg, unit, toolKind, editTarget) {
     const kind = toolKind || 'text'; // 'text' 直接排字；'note' 落一个便签标记
     if (textFinish) textFinish(true);          // 先把未提交的文字结账掉
     const ed = document.getElementById('text-editor');
@@ -370,13 +386,32 @@ const Anno = window.Anno = (() => {
     ed.style.left = left + 'px';
     ed.style.top = top + 'px';
     ed.dataset.ux = unit.x; ed.dataset.uy = unit.y;
-    setTimeout(() => ed.focus(), 0);
+    // 改已有的便签/文字：把原文带进编辑器，回车就是「改」而不是「再加一条」
+    if (editTarget && editTarget.shape) {
+      ed.value = String(editTarget.shape.text || '');
+      ed.style.height = 'auto';
+      ed.style.height = Math.min(320, ed.scrollHeight) + 'px';
+    }
+    setTimeout(() => { ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length); }, 0);
 
     const finish = (commitIt) => {
       const v = ed.value.replace(/\r/g, '').replace(/[ \t]+$/gm, '').trim();
       textFinish = null; ed.onblur = null; ed.oninput = null; ed.onkeydown = null;
       ed.hidden = true;
-      if (commitIt && v) {
+      if (!commitIt) return;
+      if (editTarget && editTarget.shape) {
+        // 改写已有便签：内容没变就别重画，省一次保存
+        const sh = editTarget.shape;
+        if (v && v !== sh.text) {
+          const before = sh.text;
+          sh.text = v;
+          undoStack.push({ type: 'edit', n, shape: sh, before });
+          renderPage(n);
+          notify();
+        }
+        return;
+      }
+      if (v) {
         const sh = { tool: kind, color: state.color, width: 0, size: state.textHeight,
           at: { x: +ed.dataset.ux, y: +ed.dataset.uy }, text: v };
         shapesOf(n).push(sh);
@@ -410,6 +445,9 @@ const Anno = window.Anno = (() => {
       const i = arr.indexOf(op.shape); if (i >= 0) arr.splice(i, 1);
     } else if (op.type === 'del') {
       arr.push(op.shape);
+    } else if (op.type === 'edit') {
+      // 改写便签/文字：撤销回原来的内容
+      op.shape.text = op.before;
     } else if (op.type === 'clear') {
       App.state.annos.set(op.n, op.shapes.slice());
     }
@@ -454,7 +492,7 @@ const Anno = window.Anno = (() => {
     if (t === 'image' && !hintShown) {
       // 同一条提示只弹一次，不然每次按 V 都闪一下
       hintShown = true;
-      App.toast && App.toast('看图模式：点页面任意位置放大查看');
+      App.toast && App.toast('看图模式：点页面里的图片查看原图（放大任意区域用右键菜单）');
     }
   }
 

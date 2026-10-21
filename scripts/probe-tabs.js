@@ -9,7 +9,9 @@ module.exports = `(async () => {
   const open = async (key) => {
     const c = $('[data-open="' + key + '"]');
     if (!c) return false;
-    c.click();
+    // v27 起对齐 Zotero：单击只选中，双击才打开
+    c.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
     return await waitFor(() => document.body.classList.contains('has-doc') && App.state.numPages === 3, 10000);
   };
   push('标签页初始为空', App.tabs.length === 0 && $('#tabbar').hidden);

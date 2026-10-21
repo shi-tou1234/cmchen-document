@@ -1,14 +1,15 @@
-# PDF Reader v11~v25 开发交接文档
+# PDF Reader v11~v27 开发交接文档
 
-> 更新时间：2026-10-21（v25 看图模式放大变白修复）  
+> 更新时间：2026-10-21（1.1.0 发布：全格式阅读 + Zotero 式文献库交互 + 字体统一）
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = dc599ae；推送用 `git -c http.sslBackend=schannel push origin main`）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 工具带常驻 + 工具快捷键 + 文档快速切换 + 导入读 PDF 元数据，v19 界面减负 + 引用样式 5 种 + CSL-JSON 互通 + 批注标签与搜索，v20 专注模式 + 页面右键菜单 + 导出当前页 PNG + 深色反色，v21 缩放保持位置 + 标签管理 + 汇总导出批注，v22 单页/滚动双模式 + 搜索命中上下跳 + 大纲带页码，v23 独立阅读笔记（数据层 v4），v24 触控板缩放闪烁修复 + 搜索去抖 + 库滚动位置保留，**v25 看图模式放大变白修复（缩放改成按显示分辨率重绘）**（按要求不做同步）。
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 323fe85；推送用 `git -c http.sslBackend=schannel push origin main`）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 工具带常驻 + 工具快捷键 + 文档快速切换 + 导入读 PDF 元数据，v19 界面减负 + 引用样式 5 种 + CSL-JSON 互通 + 批注标签与搜索，v20 专注模式 + 页面右键菜单 + 导出当前页 PNG + 深色反色，v21 缩放保持位置 + 标签管理 + 汇总导出批注，v22 单页/滚动双模式 + 搜索命中上下跳 + 大纲带页码，v23 独立阅读笔记（数据层 v4），v24 触控板缩放闪烁修复 + 搜索去抖 + 库滚动位置保留，v25 看图模式放大变白修复，v26 去掉顶部菜单栏 + 标签页标题换衬线体，v27 看图模式「点开变黑」修复 + 便签可重开编辑；**2026-10-21 下午 4 再扩：全格式阅读（Word/PPT/Excel/Markdown/EPUB 等）+ 数据层 v5 + Zotero 式交互 + citekey/摘录/合并搜索 + 全软件字体统一**（按要求不做同步）。
 
 ## 收尾后的一句话现状
 
-- 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 45 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
-- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，v18 起 26 个，v19 起 27 个，v20 起 28 个，v21 起 29 个，v22 起 30 个，v23 起 31 个，**v25 起 32 个**（新增 `test-v25.js` 15 项：看图放大不炸纹理），全部通过。
+- 临时探针已删除，正式回归共 37 个 `test-*.js`，全部通过：library 82 / lib-ui 57 / fulltext 36 / formats 77 / settings 22 / metadata 47 / cite 69 / docconvert 54 / richdoc 32 / selection 16 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 17 / v28 28。
+- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，v18 起 26 个，v19 起 27 个，v20 起 28 个，v21 起 29 个，v22 起 30 个，v23 起 31 个，v25 起 32 个，v26 起 33 个，v27 起 34 个，**2026-10-21 下午 4 起 37 个**（新增 `test-docconvert.js` 54 项、`test-richdoc.js` 32 项，`test-cite.js` 扩到 69 项）。
+- 数据层当前为 **v5**（`tagColors` / 收藏集颜色 / `fields` / `relations` / 37 类条目），旧库自动迁移；应用版本号为 **1.1.0**（2026-10-21 用户确认发布）。
 
 ## 三条踩过的坑（别再踩）
 
@@ -24,6 +25,12 @@
 4. **别在 `pointermove` 里读布局属性**（`offsetWidth` 等）：每次都强制重排，大图会拖不跟手。尺寸在初始化时量好缓存起来。
 5. **别用 CSS `transform: scale()` 去放一张大位图**（v25 的教训）：合成层要的纹理 = 位图 × 缩放倍数，超过显卡 / 软件渲染器的纹理上限就会**整块不画**，元素只剩 CSS 背景色 —— 看起来就是「放大后变白」。要放大就**按显示分辨率重绘位图**（上限 = 原图像素），CSS 只留平移。
    - 本机 GPU 是 **SwiftShader 软件渲染**，`MAX_TEXTURE_SIZE = 8192`；有独显的机器上限更大，但大图一样会撞。
+6. **去掉原生菜单栏前，先把每个菜单项的去处写下来**（v26 的教训）：菜单是「藏功能」的地方，用户不一定找得到，但功能不能跟着消失。v26 把「文件 / 视图 / 系统」全部拆到界面里：工具栏、页面右键菜单、文档切换面板、批注面板导出条、设置面板各领一部分；原来靠菜单提供的快捷键（`Ctrl+O` / `Ctrl+Shift+P`）要在渲染层自己处理。
+7. **凡是「页面上做过、别处也要一致」的处理，灯箱都得跟上**（v27 的教训）：v20 给页面加了「深色模式把页面反色」，灯箱里的原图没跟上 → 页面是亮的、灯箱是原样，用户点开图片就觉得「颜色变了」。凡是给页面加滤镜/主题/缩放这类「视觉处理」，都要检查灯箱、缩略图、导出这些地方是否需要同样处理。
+   - **但这条有边界（2026-10-21 二次修正）**：灯箱**默认跟随**页面反色（用户连报三次「发白」——白底白板图夜里太刺眼，实质要的是和页面一致的观感），但工具栏 ◐ 按钮一键切回「原色」看文档真实色彩，两态都明面可控。取证工具 `scripts/dump-embedded-images.js` 能把 PDF 存储的原始位图导出来看（本案真相：文档就是白底，黑是页面反色出来的）。
+   - **多层位图要合成显示**：白板类导出常把一张图拆成「底色层 + 笔迹层」叠放（矩形几乎重合），灯箱按层列出会让「图 1 = 白纸、图 2 = 透明笔迹」。命中层与其他层重叠时按页面渲染合成整块（`renderImageRegion(…, targetW)` 以各层原始像素宽为准），不重叠才走原图直出。
+8. **异步弹层要带代号 + 完成前校验模式**（2026-10-21 的教训）：灯箱打开要等抽图解码（最长 1.5s），期间用户切回阅读模式或双击第二连点，旧请求照样执行 → 「阅读模式莫名其妙弹灯箱」。`openImageLightbox` 现在带 `lbOpenSeq` 代号，每个 `await` 后校验「代号最新 + 仍在看图模式」。凡是「点击 → 异步 → 弹层」的路径都要这么处理。
+9. **两个模式要有清晰的分工，不能靠兜底行为填补**（2026-10-21）：看图模式原来「点空白也局部放大」，跟阅读器缩放重叠，用户觉得两个模式功能重复。现在：阅读模式（select）绝不弹灯箱；看图模式只认内嵌位图；「放大任意区域」只在右键菜单（`openRegionLightbox`，任何模式可用）。
 - **推送方式（v17 实测有效）**：SteamTools 证书那条路现在不通（`sslCAInfo` 指向 SteamTools CA，直连 GitHub 时证书链对不上，报 `unable to get local issuer certificate`）。hosts 里已没有 github 的劫持，直接用系统证书库即可：
   ```powershell
   git -c http.sslBackend=schannel push -u origin main
@@ -43,10 +50,56 @@
 - **文档结构（v15）**：`README.md` 只讲「有什么 / 怎么用 / 怎么测 / 有什么边界」；逐版本演进记录在 `CHANGELOG.md`；交接细节与约定留在本文件。改 README 时不要再往里堆版本流水账。
 - **视觉约定（v16）**：暖纸底 + 墨色字 + 印泥红强调色；衬线标题 / 等宽元信息；发丝线分层，阴影只给浮层；条目是表格行不是卡片。**不要再往回加蓝底、圆角胶囊、软阴影卡片**——那是这轮要推翻的「AI 味」。
 - **跨项目复用（v17）**：图片灯箱的交互（缩放/拖拽/捏合/翻页/计数/滚动锁定）来自博客站点 `D:\项目\博客站点\src\components\misc\Markdown.astro` 的 markdown-image-lightbox，移植到 `src/renderer/lightbox.js`；博客那边只读不改。
-- v25 重新打包（2026-10-21）：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,303,187 B）、`PDF-Reader-Setup-1.0.0.exe`（83,683,592 B，NSIS）。打包冒烟在 win-unpacked 与 portable 上各跑过一遍，都是 PASS(15)。
+- v27 重新打包（2026-10-21）：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,307,115 B）、`PDF-Reader-Setup-1.0.0.exe`（83,685,889 B，NSIS）。打包冒烟在 win-unpacked 与 portable 上各跑过一遍，都是 PASS(15)。
 - 打包产物已产出并冒烟：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,277,787 B）、`PDF-Reader-Setup-1.0.0.exe`（83,635,175 B，NSIS）。
 - 安装 → 已安装版冒烟 → 静默卸载，全部通过（快捷方式/安装目录随之清理）。
 - 收尾过程中修掉 8 个真实缺陷（详见 README v11/v12 章节），其中**「导出副本在真实链路失效」是 v10 起就存在的高危 bug**。
+
+---
+
+## 0. 1.1.0（2026-10-21）：全格式阅读 + 数据层 v5 + Zotero 式交互
+
+这一轮按桌面评估文档补 P0，并把「只读 PDF」扩成「常见文档都能读」。应用版本号 `1.1.0`，数据层从 v4 升到 v5。
+
+### 新增/改动文件
+
+| 文件 | 职责 |
+|---|---|
+| `src/docconvert.js` | 全格式 → 安全 HTML；`readDocument` / `extractText` / `readZipCoreMeta`；格式白名单与扩展名标签 |
+| `src/main.js` | 统一打开入口 `readDocPayload`；全格式对话框 / 拖入 / 最近打开 / 附件重定位；搜索合并；citation payload；收藏集/标签颜色、相关条目 IPC |
+| `src/fulltext.js` | 非 PDF 走 `docconvert.extractText`，索引结构不变 |
+| `src/renderer/renderer.js` | 富文档渲染 `loadRichDoc` / `richPageHtml`、富文档搜索、缩放、页码、复制出处、摘录 |
+| `src/renderer/library-ui.js` | 单击选中 / 双击打开、右键菜单、多选、↑↓+Enter、拖入收藏集、表头排序、颜色、citekey、相关条目、合并搜索结果 |
+| `src/renderer/styles.css` | 统一字体变量；`.doc-page` / `.doc-sheet` / `.doc-slide` / `.doc-image`；深色反色；库新增控件 |
+| `src/library.js` | 数据层 v5：37 类、`fields`、`relations`、`tagColors`、收藏集颜色 |
+| `src/cite.js` | 37 类标识与中文名、5 种样式、citekey / citekeys / atCitation |
+| `scripts/test-docconvert.js` | 54 项纯 Node 格式转换回归 |
+| `scripts/test-richdoc.js` + `probe-richdoc.js` | 32 项真实 Electron 富文档端到端回归 |
+
+### 必须守住的契约
+
+1. **PDF 不经过 docconvert**：`readDocument('x.pdf')` 只返回 `{kind:'pdf'}`，字节仍由主进程读、渲染层走 PDF.js。
+2. **`#pages` 与 `#doc-view` 互斥**：富文档隐藏 `#pages` 并清空，页面 id 仍是 `page-N`，所以页码、`scrollToPage`、侧栏目录都能复用。
+3. **富文档缩放用 `#doc-view` 的 CSS `zoom`**，基准宽 900px、高 1200px；不要按 PDF 的 canvas 尺寸去算。
+4. **富文档不挂 `Anno.attachPage`**：`body.rich-doc` 下隐藏画笔类工具；富文档的摘录走 `selection.js` 的 `rich:true` 分支。
+5. **转换结果必须 sanitize**：只允许 `data:` 图片；远程图片、脚本、事件属性、`javascript:` 链接都会被剥离。新增格式时不要绕过 `clean()`。
+6. **列表单击只选中**：`library-ui.js` 单击走 `markSelection()`，不能调用 `renderGrid()`，否则节点被替换，`dblclick` 永远不触发。
+7. **字体只有一套**：`--font-serif` / `--font-mono` 都指向 `--font-sans`。不要再为「学术感」单独引入 Georgia / Times。
+8. **删除只删索引**：清空回收站、删条目、删收藏集都不碰磁盘文件；富文档同样适用。
+
+### 验证与打包
+
+- 纯 Node：`test-library` 82 / `test-v23` 20 / `test-cite` 69 / `test-docconvert` 54 / `test-formats` 77 / `test-fulltext` 36 / `test-metadata` 47 / `test-settings` 22 全过。
+- Electron：`test-library-ui` 57 / `test-richdoc` 32 / `test-v28` 28 / `test-v27` 12 / `test-v26` 7 / `test-v22` 17 / `test-v21` 13 / `test-v20` 20 / `test-v19` 23 / `test-v18` 21 / `test-v14` 29 / `test-tabs` 14 / `test-reader-plus` 17 / `test-session` 9 全过；`test-pen` / `test-lazy-render` 用 Electron 二进制跑也全过。
+- `npx electron-builder --dir` 后 `test-packaged.js` **17 项**通过；asar 内确认包含 `mammoth` / `xlsx` / `jszip` / `sanitize-html` / `marked` / `iconv-lite` / `word-extractor` / `@iarna/rtf-to-html`。electron-builder 会自动带生产依赖，`build.files` 无需逐项列。
+- 本轮重新生成了 `build/win-unpacked/`、`PDF-Reader-1.1.0-portable.exe`（75,702,427 B）与 `PDF-Reader-Setup-1.1.0.exe`（86,116,596 B，NSIS）；portable 产物上 `test-packaged.js` 17 项通过，含 asar 内 docx 转换与富文档渲染。打包前对 `win-unpacked\PDF Reader.exe` 跑过 rcedit 嵌图标。
+
+### 已知取舍
+
+- `.ppt` 二进制不支持，提示另存为 `.pptx`；`.doc` 只取纯文本。
+- Word/PPT 的复杂版式、动画、SmartArt、图表不还原；Excel 单表 2000 行 × 80 列；单文档最多 400 页 / 12MB HTML。
+- 富文档没有 PDF 标注层，也不能导出带标注副本；但可以复制文字、摘录、页内搜索。
+- citekey 对中文作者退化为 `item` + key 前缀；要拼音得引拼音库，目前不做。
 
 ---
 
@@ -601,14 +654,14 @@ npm start
 
 # 数据层 / 库 UI
 node scripts\test-library.js        # [library] PASS (82)
-node scripts\test-library-ui.js     # [lib-ui] PASS (43)
+node scripts\test-library-ui.js     # [lib-ui] PASS (57)
 
 # v11/v12 正式回归（完整清单见 README「v11/v12 回归测试」）
 node scripts\test-fulltext.js       # [fulltext] PASS (36)
-node scripts\test-formats.js        # [formats] PASS (59)
+node scripts\test-formats.js        # [formats] PASS (77)
 node scripts\test-settings.js       # [settings] PASS (22)
 node scripts\test-metadata.js       # [metadata] PASS (47)
-node scripts\test-selection.js      # [selection] PASS (14)
+node scripts\test-selection.js      # [selection] PASS (16)
 node scripts\test-tabs.js           # [tabs] PASS (14)
 node scripts\test-ui-v11.js         # [ui-v11] PASS
 node scripts\test-ui-v12.js         # [ui-v12] PASS
@@ -618,7 +671,7 @@ node scripts\test-single-instance.js  # [single-instance] PASS (7)
 node scripts\test-export-highlight.js # [export-highlight] PASS (12)
 
 # 打包产物冒烟
-node scripts\test-packaged.js       # [packaged] PASS (15)
+node scripts\test-packaged.js       # [packaged] PASS (17)
 ```
 
 > 所有测试自建临时目录并在结束时清理；不要在没有隔离环境变量的情况下让测试指向真实 `userData`。

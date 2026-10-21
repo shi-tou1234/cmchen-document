@@ -89,7 +89,8 @@ const PdfImages = (function () {
       const b = bboxOf(m);
       if (!(b.w > 1 && b.h > 1)) continue;          // 忽略退化矩形
       if (b.w * b.h < 64) continue;                 // 忽略极小的装饰点
-      out.push({ x: b.x, y: b.y, w: b.w, h: b.h, objId: it.objId, inline: it.inline });
+      out.push({ x: b.x, y: b.y, w: b.w, h: b.h, objId: it.objId, inline: it.inline,
+        natW: it.natW || 0, natH: it.natH || 0 });   // 原始像素尺寸（合成重渲染时保清晰度用）
     }
     out.sort((a, b) => (a.y - b.y) || (a.x - b.x));
     return out;

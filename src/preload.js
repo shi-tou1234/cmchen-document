@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('pdfBridge', {
   // 主应用窗口标记（main.js 的 additionalArguments）；独立测试窗口为 false
   isApp: process.argv.includes('--pdfreader-app'),
-  // 主动请求主进程弹出打开对话框，返回 { ok, fileName, filePath, startPage, data }
+  // 主动请求主进程弹出打开对话框，返回 { ok, kind, fileName, filePath, startPage, data|pages }
   openPdfDialog: () => ipcRenderer.invoke('open-pdf-dialog'),
   // 订阅来自菜单「打开 PDF」/最近文件/命令行 的打开事件
   onPdfOpened: (cb) => {
@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   exportPagePng: (info) => ipcRenderer.invoke('export-page-png', info),
   // v21：把所有文档的批注汇总成一份 Markdown（outPath 可选，给了就不弹对话框）
   exportAllNotes: (outPath) => ipcRenderer.invoke('export-all-notes', { outPath }),
+  // v26：去掉原生菜单栏（文件/视图/系统）后，这几件事改从界面发起
+  clearRecent: () => ipcRenderer.invoke('clear-recent'),
+  setDefaultPdfReader: () => ipcRenderer.invoke('set-default-pdf-reader'),
+  openDevTools: () => ipcRenderer.invoke('open-devtools'),
+  appInfo: () => ipcRenderer.invoke('app-info'),
   // 应用设置（v11）
   getSettings: () => ipcRenderer.invoke('settings-get'),
   setSettings: (patch) => ipcRenderer.invoke('settings-set', patch),
@@ -60,6 +65,11 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     emptyTrash: () => ipcRenderer.invoke('lib-empty-trash'),
     addCollection: (name, parentId) => ipcRenderer.invoke('lib-add-collection', { name, parentId }),
     removeCollection: (id) => ipcRenderer.invoke('lib-remove-collection', { id }),
+    renameCollection: (id, name) => ipcRenderer.invoke('lib-rename-collection', { id, name }),
+    setCollectionColor: (id, color) => ipcRenderer.invoke('lib-set-collection-color', { id, color }),
+    setTagColor: (tag, color) => ipcRenderer.invoke('lib-set-tag-color', { tag, color }),
+    addRelation: (key, otherKey) => ipcRenderer.invoke('lib-add-relation', { key, otherKey }),
+    removeRelation: (key, otherKey) => ipcRenderer.invoke('lib-remove-relation', { key, otherKey }),
     moveItem: (key, collectionId) => ipcRenderer.invoke('lib-move-item', { key, collectionId }),
     setCollections: (key, collectionIds) => ipcRenderer.invoke('lib-set-collections', { key, collectionIds }),
     addTag: (key, tag) => ipcRenderer.invoke('lib-add-tag', { key, tag }),
