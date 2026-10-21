@@ -246,6 +246,12 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.startPage = start;
     scrollToPage(start, true);
     setStatus(`${s.fileName} · 共 ${pdfDoc.numPages} 页`);
+    // 打开了文档，说明用户已经上手了，把那条提示收掉
+    const hint = $('hint-bar');
+    if (hint && !hint.hidden) {
+      hint.hidden = true;
+      try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ hintSeen: true }); } catch (_) {}
+    }
     if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide(); // 进入阅读，收起库覆盖层
@@ -1559,11 +1565,29 @@ function bind() {
   });
 
   // Ctrl+滚轮缩放；普通滚轮保持原生连续滚动（不劫持）
+  // 触控板捏合会连发几十个 ctrl+wheel 事件；每个事件都走一次 applyLayout（重排 + 重渲染所有页）
+  // 会明显卡顿甚至看着闪。所以先把 delta 攒起来，最多每 16ms 应用一次，并用真实 delta 大小。
+  // （不用 requestAnimationFrame：窗口隐藏时 rAF 不触发。）
+  let zoomAcc = 0;
+  let zoomLast = 0;
+  let zoomTimer = null;
+  const applyZoomAcc = () => {
+    zoomLast = Date.now();
+    const acc = zoomAcc;
+    zoomAcc = 0;
+    if (!acc) return;
+    setNumericScale(App.state.scale * Math.exp(-acc * 0.0016));
+  };
   E.viewer.addEventListener('wheel', (e) => {
     if (!e.ctrlKey || !App.state.pdfDoc) return;
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    setNumericScale(App.state.scale * factor);
+    const unit = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? 400 : 1);
+    const d = e.deltaY * unit;
+    if (!d) return;
+    zoomAcc += d;
+    const now = Date.now();
+    if (now - zoomLast >= 16) applyZoomAcc();
+    else if (!zoomTimer) zoomTimer = setTimeout(() => { zoomTimer = null; applyZoomAcc(); }, 16);
   }, { passive: false });
 
   // 看图模式：点页面里的图片 → 灯箱放大看原图

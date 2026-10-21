@@ -262,6 +262,9 @@ window.LibraryUI = (function () {
     const trashed = !!it.deletedAt;
     const selected = it.key === state.selectedKey;
     const picked = state.selectedKeys.has(it.key);
+    // 当前正在读的那篇，标一下（回库时一眼知道自己在哪）
+    const cur = !!(window.App && App.state.filePath && it.attachment
+      && it.attachment.path && it.attachment.path === App.state.filePath);
     const check = trashed ? '' : '<label class="lc-check" title="选择条目"><input type="checkbox" data-select-key="' + esc(it.key) + '"' + (picked ? ' checked' : '') + ' /></label>';
     const meta = [];
     if (it.creators && it.creators.length) meta.push(esc(it.creators.join(', ')));
@@ -284,7 +287,7 @@ window.LibraryUI = (function () {
     const note = trashed
       ? '<div class="lcpath">在回收站中 · 磁盘 PDF 未被删除</div>'
       : (!it.hasFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
-    return '<div class="lib-card' + (selected ? ' selected' : '') + (picked ? ' picked' : '') + (it.hasFile ? '' : ' missing') + '" data-key="' + esc(it.key) + '"' + openAttr + '>' +
+    return '<div class="lib-card' + (selected ? ' selected' : '') + (picked ? ' picked' : '') + (cur ? ' current' : '') + (it.hasFile ? '' : ' missing') + '" data-key="' + esc(it.key) + '"' + openAttr + '>' +
       check +
       '<div class="lctitle"' + titleAttr + '>' + esc(it.title || '(无标题)') + '</div>' +
       '<div class="lcmeta">' + (meta.join(' · ') || esc((it.attachment && it.attachment.name) || '')) + '</div>' +
@@ -1093,11 +1096,17 @@ window.LibraryUI = (function () {
       },
     };
 
+    // 搜索框：每次按键都重画整张列表，条目一多就会卡。去抖一下（90ms），
+    // 全文检索那边本来就�� 320ms 去抖。
+    let searchTimer = null;
     el.search.addEventListener('input', () => {
       state.query = el.search.value;
       if (state.scope.type === 'search') state.scope = { type: 'all' };
-      renderGrid();
-      renderSidebar();
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        renderGrid();
+        renderSidebar();
+      }, 90);
       scheduleFulltext();
     });
     el.import.addEventListener('click', importPdf);
@@ -1422,10 +1431,18 @@ window.LibraryUI = (function () {
     el.ld.status.textContent = '标签待保存';
   }
 
-  function show() { el.root.hidden = false; refresh(); }
+  function show() {
+    el.root.hidden = false;
+    refresh().then(() => {
+      // 回到文献库时停在上次的位置（长列表里重新找很烦）
+      if (state.listScroll) el.grid.scrollTop = state.listScroll;
+    });
+  }
   // 收起库时必须把子弹窗一起收掉：设置/查重/批量是独立的 fixed 节点（z-index 95），
   // 只藏根节点的话，它们会留在阅读器上面，遮住整页。
+  // 收起库时记住列表滚动位置
   function hide() {
+    if (el.grid) state.listScroll = el.grid.scrollTop;
     if (el.root) el.root.hidden = true;
     closeSettings();
     if (el.dupModal) el.dupModal.hidden = true;

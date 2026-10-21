@@ -377,6 +377,13 @@ body.has-doc #empty-hint { display: none; }
 }
 .lib-card.selected .lctitle { color: var(--accent-2); }
 .lib-card.picked { background: var(--accent-soft); }
+/* 当前正在读的那篇，回库时一眼知道自己在哪 */
+.lib-card.current { background: var(--surface-3); }
+.lib-card.current .lctitle::after {
+  content: '阅读中'; margin-left: 8px; font-family: var(--font-mono); font-size: 9.5px;
+  letter-spacing: .08em; color: var(--accent-text); border: 1px solid var(--accent-soft-2);
+  border-radius: 2px; padding: 0 4px; vertical-align: middle; font-weight: 400;
+}
 .lib-card.missing .lctitle { color: var(--ink-3); }
 
 .lib-card .lctitle {
@@ -829,6 +836,7 @@ body.tool-image .ntool.active { background: var(--accent); color: #fff; }
   will-change: transform; touch-action: none; user-select: none; -webkit-user-drag: none;
 }
 .lb-preview.is-panning { transition: none; }
+.lb-preview.is-zooming { transition: none; }   /* 缩放手势进行中关掉过渡，避免一串事件反复重启动画 */
 .lb-preview.is-zoomed { cursor: grab; }
 .lb-nav {
   position: absolute; top: 50%; transform: translateY(-50%);

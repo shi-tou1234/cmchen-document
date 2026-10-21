@@ -46,16 +46,16 @@ module.exports = `(async () => {
 
   // 搜索：摘要 / 笔记 / DOI 都应命中（v2 新增字段）
   setInput('#lib-search', 'transformer');
-  await sleep(80);
+  await sleep(220);   // 搜索框做了 90ms 去抖（打字时不再每键重画整张表）
   push('搜索摘要命中', cards() === 1 && firstTitle() === 'Alpha', 'cards=' + cards());
   setInput('#lib-search', 'diffusion');
-  await sleep(80);
+  await sleep(220);
   push('搜索笔记命中', cards() === 1 && firstTitle() === 'Beta', 'cards=' + cards());
   setInput('#lib-search', '10.1/x');
-  await sleep(80);
+  await sleep(220);
   push('搜索 DOI 命中', cards() === 1 && firstTitle() === 'Alpha', 'cards=' + cards());
   setInput('#lib-search', '');
-  await sleep(80);
+  await sleep(220);
   push('清空搜索后恢复两条', cards() === 2);
 
   // 排序

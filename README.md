@@ -91,15 +91,15 @@ npm start
 | `node scripts/test-tabs.js` | 多标签开 / 切 / 关，标注不丢（14） |
 | `node scripts/test-ui-v11.js` | 全文检索 / 智能收藏集 / 批量 / 设置 / 备份 |
 | `node scripts/test-ui-v12.js` | 查重 / 合并 / 详情 / 导入导出 IPC |
-| `node scripts/test-library-ui.js` | 库界面端到端（43） |
+| `node scripts/test-library-ui.js` | 库界面端到端（45） |
 | `node scripts/test-export-highlight.js` | 真实选区 → 导出 → 重开，验证高亮烧进 PDF（12） |
 | `node scripts/test-backup-restore.js` | 备份 / 恢复 / pre-restore 快照（32） |
 | `node scripts/test-datadir.js` | 数据目录 move / merge / replace（19） |
 | `node scripts/test-reader-plus.js` | 阅读器端到端：文本层 / 搜索 / 缩略图 / 标注恢复（17） |
 | `node scripts/test-bugfix.js` | 跨文档撤销隔离 / 页码指示 / 搜索清空 / 库退路 / 缩放 / 键盘（21） |
 | `node scripts/test-v14.js` | 标签选择器 / 复制引用 / 批注多格式导出（29） |
-| `node scripts/test-imageview.js` | 看图模式：定位内嵌位图 → 灯箱放大 / 缩放 / 翻页 / 关闭（16） |
-| `node scripts/test-v18.js` | 工具带常驻 / 工具快捷键 / 导入读 PDF 元数据 / 文档快速切换（20） |
+| `node scripts/test-imageview.js` | 看图模式：定位内嵌位图 → 灯箱放大 / 缩放 / 翻页 / 关闭 / 触控板连发不闪（18） |
+| `node scripts/test-v18.js` | 工具带常驻 / 工具快捷键 / 导入读 PDF 元数据 / 文档快速切换（21） |
 | `node scripts/test-v19.js` | 首次提示 / 工具分组 / 引用样式 5 种 / 批注搜索与标签 / 库里分区折叠（23） |
 | `node scripts/test-v20.js` | 专注模式 / 页面右键菜单 / 批注 Markdown 带引用 / 深色反色（20） |
 | `node scripts/test-v21.js` | 缩放保持位置 / 标签重命名与全局移除 / 导出全部批注（13） |

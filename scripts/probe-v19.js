@@ -12,10 +12,13 @@ module.exports = `(async () => {
   await sleep(400);
 
   // ---------- 1. 首次上手提示 ----------
+  // 提示条在「第一次用」时可见；一旦打开了文档就自动收起（说明用户已经上手了）
   const hint = $('#hint-bar');
   push('有首次上手提示条', !!hint);
   if (hint) {
-    push('提示条默认可见（第一次用）', !hint.hidden);
+    const openedDoc = !!(window.App && App.state.pdfDoc);
+    push('打开文档后提示自动收起', openedDoc ? hint.hidden : !hint.hidden,
+      'hidden=' + hint.hidden + ' openedDoc=' + openedDoc);
     const hx = $('#hint-x');
     if (hx) hx.click();
     await sleep(200);

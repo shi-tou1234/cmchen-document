@@ -11,6 +11,7 @@ const Anno = window.Anno = (() => {
     textHeight: 18,
   };
   const undoStack = []; // {type:'add'|'del'|'clear', n, shape|shapes}
+  let hintShown = false; // 看图模式的提示只弹一次
   let drawing = null;   // 正在绘制的临时 shape
 
   // ---- 颜色转 rgb 供 CSS（导出在主进程用 pdf-lib 直接吃 hex） ----
@@ -450,7 +451,9 @@ const Anno = window.Anno = (() => {
     document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image');
     document.body.classList.add('tool-' + t);
     for (const b of document.querySelectorAll('.ntool')) b.classList.toggle('active', b.dataset.tool === t);
-    if (t === 'image') {
+    if (t === 'image' && !hintShown) {
+      // 同一条提示只弹一次，不然每次按 V 都闪一下
+      hintShown = true;
       App.toast && App.toast('看图模式：点页面任意位置放大查看');
     }
   }

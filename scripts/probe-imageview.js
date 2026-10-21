@@ -67,6 +67,19 @@ module.exports = `(async () => {
     if (zoomReset) zoomReset.click();
   }
 
+  // 触控板：一次手势连发很多小 delta，不能一下把缩放冲到上限（那会看着闪）
+  if (preview) {
+    const s0 = Lightbox.state.scale;
+    const pr2 = preview.getBoundingClientRect();
+    for (let i = 0; i < 24; i++) {
+      preview.dispatchEvent(new WheelEvent('wheel', { deltaY: -3, clientX: pr2.left + pr2.width / 2, clientY: pr2.top + pr2.height / 2, bubbles: true, cancelable: true }));
+    }
+    await sleep(300);
+    const s1 = Lightbox.state.scale;
+    push('触控板连发小 delta 缩放平缓（不直接冲到上限）', s1 > s0 && s1 <= 2.5, 'before=' + s0 + ' after=' + s1.toFixed(2));
+    push('缩放后没有超出上限', s1 <= Lightbox.MAX_SCALE + 0.001, 'scale=' + s1);
+  }
+
   // 键盘：Esc 关闭
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   await sleep(200);

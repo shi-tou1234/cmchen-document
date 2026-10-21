@@ -32,6 +32,7 @@ const Lightbox = (function () {
     pinchDist: 0,
     pinchScale: 1,
     pointers: new Map(),
+    natW: 0, natH: 0,     // 预览的原始像素尺寸（平移边界用，避免强制重排）
     root: null,
     onClose: null,
   };
@@ -79,11 +80,14 @@ const Lightbox = (function () {
   }
 
   // 平移边界：图片居中，超出部分才允许拖
+  // 用缓存的原始尺寸（fitPreview 时量好），别在 pointermove 里读 offsetWidth 触发强制重排
   function clampTranslate() {
     const e = els();
     if (!e.preview) return;
-    const maxX = Math.max(0, (e.preview.offsetWidth * state.scale - e.preview.offsetWidth) / 2);
-    const maxY = Math.max(0, (e.preview.offsetHeight * state.scale - e.preview.offsetHeight) / 2);
+    const w = state.natW || e.preview.offsetWidth;
+    const h = state.natH || e.preview.offsetHeight;
+    const maxX = Math.max(0, (w * state.scale - w) / 2);
+    const maxY = Math.max(0, (h * state.scale - h) / 2);
     state.tx = clamp(state.tx, -maxX, maxX);
     state.ty = clamp(state.ty, -maxY, maxY);
   }
@@ -168,6 +172,8 @@ const Lightbox = (function () {
     const availW = Math.max(40, box.width - 140);   // 给左右翻图箭头留位置
     const availH = Math.max(40, box.height - 120);  // 给上下工具条与图注留位置
     const fit = Math.min(availW / natW, availH / natH, 1);
+    state.natW = natW;
+    state.natH = natH;
     e.preview.style.width = Math.max(1, Math.round(natW * fit)) + 'px';
     e.preview.style.height = Math.max(1, Math.round(natH * fit)) + 'px';
   }
@@ -264,10 +270,36 @@ const Lightbox = (function () {
       const next = state.scale >= MAX_SCALE ? MIN_SCALE : state.scale + ZOOM_STEP;
       zoomToPoint(next, ev.clientX, ev.clientY);
     });
+    // 缩放：滚轮 / 触控板手势。
+    // 触控板一次手势会连发几十个 wheel 事件（delta 小而密），如果每个事件都直接改
+    // scale，画面会一格一格跳、看着像闪烁。所以：先把 delta 攒起来，最多每 16ms 应用
+    // 一次，并且用真实 delta 大小（指数映射）而不是固定步长；缩放过程中关掉 CSS 过渡。
+    // （不用 requestAnimationFrame：窗口隐藏时 rAF 不触发，攒下的 delta 会一直不生效。）
+    let wheelAcc = 0;
+    let wheelLast = 0;
+    let wheelTimer = null;
+    let wheelPoint = { x: 0, y: 0 };
+    const applyWheel = () => {
+      wheelLast = Date.now();
+      const acc = wheelAcc;
+      wheelAcc = 0;
+      if (!acc) return;
+      zoomToPoint(state.scale * Math.exp(-acc * 0.0016), wheelPoint.x, wheelPoint.y);
+    };
     preview.addEventListener('wheel', (ev) => {
       ev.preventDefault();
-      const delta = ev.deltaY < 0 ? WHEEL_STEP : -WHEEL_STEP;
-      zoomToPoint(state.scale + delta, ev.clientX, ev.clientY);
+      const unit = ev.deltaMode === 1 ? 16 : (ev.deltaMode === 2 ? 400 : 1);
+      let d = ev.deltaY * unit;
+      if (ev.ctrlKey) d *= 0.6;                 // 触控板双指捏合：浏览器发的是 ctrl+wheel，再放缓些
+      if (!d) return;
+      wheelAcc += d;
+      wheelPoint = { x: ev.clientX, y: ev.clientY };
+      const now = Date.now();
+      if (now - wheelLast >= 16) applyWheel();
+      else if (!wheelTimer) wheelTimer = setTimeout(() => { wheelTimer = null; applyWheel(); }, 16);
+      preview.classList.add('is-zooming');
+      clearTimeout(wheelEndTimer);
+      wheelEndTimer = setTimeout(() => preview.classList.remove('is-zooming'), 180);
     }, { passive: false });
     preview.addEventListener('pointerdown', (ev) => {
       if (ev.pointerType === 'mouse' && ev.button !== 0) return;
