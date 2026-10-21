@@ -109,21 +109,33 @@ module.exports = `(async () => {
   push('详情收藏集勾选与数据一致', dPre.coll1 && !dPre.coll2);
   push('详情显示标签 chip', dPre.tagChip);
 
-  // 编辑 + 标签草稿 + 多收藏集，一起保存
+  // 编辑 + 标签草稿 + 多收藏集 + 阅读笔记，一起保存
   $('#ld-title').value = 'Alpha 改';
   $('#ld-abstract').value = '改过的摘要';
-  $('#ld-note').value = '未保存的笔记';
+  // v23：笔记改成多条，先新建一条写点内容（失焦自动保存）
+  $('#ld-note-add').click();
+  await sleep(300);
+  const nb = document.querySelector('#ld-notes .ld-note-text');
+  if (nb) {
+    nb.value = '未保存的笔记';
+    nb.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(250);
+  }
+  push('能新建一条阅读笔记', !!(nb && nb.value), nb ? nb.value : 'null');
   $('#ld-tag-input').value = '新标签';
   $('#ld-tag-add').click();
-  await sleep(40);
-  push('加标签不冲掉未保存的笔记草稿', $('#ld-note').value === '未保存的笔记', $('#ld-note').value);
+  await sleep(60);
+  const nb2 = document.querySelector('#ld-notes .ld-note-text');
+  push('加标签不冲掉未保存的笔记草稿', !!nb2 && nb2.value === '未保存的笔记', nb2 ? nb2.value : 'null');
   const col2 = $('#ld-colls input[value="col2"]'); col2.checked = true;
   $('#ld-save').click();
   await waitFor(() => firstTitle() === 'Alpha 改' || $$('#lib-grid .lib-card .lctitle').some((x) => x.textContent.trim() === 'Alpha 改'), 4000);
   const sum1 = await pdfBridge.lib.summary();
   const a1 = sum1.items.find((x) => x.key === 'itA');
   push('保存后卡片标题更新', $$('#lib-grid .lib-card .lctitle').some((x) => x.textContent.trim() === 'Alpha 改'));
-  push('保存写入摘要/笔记', a1.abstract === '改过的摘要' && a1.note === '未保存的笔记');
+  push('保存写入摘要/笔记', a1.abstract === '改过的摘要' && a1.note === '未保存的笔记', a1.note);
+  push('条目挂了独立笔记', Array.isArray(a1.notes) && a1.notes.length === 1 && a1.notes[0].text === '未保存的笔记',
+    JSON.stringify(a1.notes));
   push('保存写入新标签', a1.tags.indexOf('新标签') >= 0, JSON.stringify(a1.tags));
   push('保存写入多收藏集', a1.collectionIds.length === 2 && a1.collectionIds.indexOf('col1') >= 0 && a1.collectionIds.indexOf('col2') >= 0,
     JSON.stringify(a1.collectionIds));

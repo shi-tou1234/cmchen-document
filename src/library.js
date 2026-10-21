@@ -20,7 +20,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const VERSION = 3;
+const VERSION = 4;
 const BACKUP_KEEP = 10;
 
 // 只保留自用文献最常用的几类；label 交给 UI 直接显示，避免两处各写一份映射
@@ -200,7 +200,44 @@ function migrateItem(it) {
   x.created = Number.isFinite(+src.created) ? +src.created : 0;
   x.updated = Number.isFinite(+src.updated) ? +src.updated : 0;
   x.deletedAt = Number.isFinite(+src.deletedAt) && +src.deletedAt > 0 ? +src.deletedAt : 0;
+  // v23：阅读笔记改成多条（notes[]）。v3 的单个 note 字段自动搬成第一条笔记。
+  x.notes = normalizeNotes(src.notes, x.note, x.created, x.updated);
   return x;
+}
+
+// 笔记条目：{ id, title, text, created, updated }
+// 注意：这里不能用 genKey()——它会 load()，而本函数正是在 load()→normalize→migrateItem
+// 里被调用的，会无限递归把栈打爆。笔记 id 用本地随机生成，不与库里的 key 冲突。
+function genNoteId() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(8);
+  let s = '';
+  for (let i = 0; i < 8; i++) s += alphabet[bytes[i] % alphabet.length];
+  return 'n' + s;
+}
+
+function normalizeNotes(raw, legacyText, created, updated) {
+  const src = Array.isArray(raw) ? raw : [];
+  const out = [];
+  const seen = new Set();
+  for (const n of src) {
+    if (!n || typeof n !== 'object') continue;
+    const id = String(n.id || '').trim() || genNoteId();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: str(n.title),
+      text: str(n.text),
+      created: Number.isFinite(+n.created) ? +n.created : (created || 0),
+      updated: Number.isFinite(+n.updated) ? +n.updated : (updated || 0),
+    });
+  }
+  if (!out.length && legacyText) {
+    // 老库里的单条 note → 变成第一条笔记，不丢内容
+    out.push({ id: genNoteId(), title: '', text: legacyText, created: created || 0, updated: updated || 0 });
+  }
+  return out;
 }
 
 // 原子写：先写 tmp 再替换；Windows 上 rename 目标已存在时可能失败，退回直写
@@ -281,7 +318,8 @@ function updateItem(key, patch) {
   const it = findItem(key);
   if (!it) return null;
   // 只允许改这些字段；attachment/回收站状态走专门接口，防止误覆盖
-  const textFields = ['title', 'year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'note', 'language'];
+  // （v23 起 note 不再直接写：阅读笔记走 notes[]，旧 note 字段只作迁移来源）
+  const textFields = ['title', 'year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'language'];
   for (const k of textFields) if (k in patch) it[k] = str(patch[k]);
   if ('doi' in patch) it.doi = normDoi(patch.doi);
   if ('itemType' in patch) it.itemType = ITEM_TYPE_IDS.has(patch.itemType) ? patch.itemType : 'document';
@@ -344,6 +382,45 @@ function removeTag(key, tag) {
   const it = findItem(key); if (!it) return null;
   it.tags = it.tags.filter((x) => x !== tag);
   it.updated = now(); save(); return it;
+}
+
+// ---------- 阅读笔记（v23：一条文献可以挂多条笔记） ----------
+function addNote(key, note) {
+  const it = findItem(key); if (!it) return null;
+  const n = {
+    id: genNoteId(),
+    title: str(note && note.title),
+    text: str(note && note.text),
+    created: now(),
+    updated: now(),
+  };
+  if (!Array.isArray(it.notes)) it.notes = [];
+  it.notes.push(n);
+  it.updated = now();
+  save();
+  return n;
+}
+
+function updateNote(key, id, patch) {
+  const it = findItem(key); if (!it || !Array.isArray(it.notes)) return null;
+  const n = it.notes.find((x) => x.id === id);
+  if (!n) return null;
+  if (patch && 'title' in patch) n.title = str(patch.title);
+  if (patch && 'text' in patch) n.text = str(patch.text);
+  n.updated = now();
+  it.updated = now();
+  save();
+  return n;
+}
+
+function removeNote(key, id) {
+  const it = findItem(key); if (!it || !Array.isArray(it.notes)) return false;
+  const i = it.notes.findIndex((x) => x.id === id);
+  if (i < 0) return false;
+  it.notes.splice(i, 1);
+  it.updated = now();
+  save();
+  return true;
 }
 
 // v21：标签重命名（改所有条目上的同名标签）
@@ -454,10 +531,15 @@ function setPageByKey(key, page) {
 }
 
 function publicItem(it, collIds) {
+  const notes = (Array.isArray(it.notes) ? it.notes : []).map((n) => ({
+    id: n.id, title: n.title, text: n.text, created: n.created || 0, updated: n.updated || 0,
+  }));
   return {
     key: it.key, itemType: it.itemType, title: it.title, creators: it.creators.slice(),
     year: it.year, publication: it.publication, volume: it.volume, issue: it.issue,
-    pages: it.pages, doi: it.doi, url: it.url, abstract: it.abstract, note: it.note,
+    pages: it.pages, doi: it.doi, url: it.url, abstract: it.abstract,
+    note: notes.map((n) => n.text).filter(Boolean).join('\n\n'),   // 老字段保留：导出/兼容用
+    notes,
     language: it.language, tags: it.tags.slice(),
     collectionIds: it.collectionIds.filter((id) => collIds.has(id)),
     page: it.page || 0, created: it.created || 0, updated: it.updated || 0,
@@ -706,6 +788,7 @@ module.exports = {
   trashItem, restoreItem, deleteItemForever, emptyTrash,
   findItem, findItemByPath, setPageByKey,
   addTag, removeTag, renameTag, removeTagEverywhere, mergeTags,
+  addNote, updateNote, removeNote,
   addCollection, removeCollection, moveItem, setCollections, setAttachment,
   addSearch, removeSearch,
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,

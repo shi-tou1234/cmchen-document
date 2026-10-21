@@ -68,6 +68,10 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     renameTag: (from, to) => ipcRenderer.invoke('lib-rename-tag', { from, to }),
     mergeTags: (from, into) => ipcRenderer.invoke('lib-merge-tags', { from, into }),
     removeTagEverywhere: (tag) => ipcRenderer.invoke('lib-remove-tag-everywhere', { tag }),
+    // v23：阅读笔记（一条文献挂多条笔记）
+    addNote: (key, note) => ipcRenderer.invoke('lib-add-note', { key, note }),
+    updateNote: (key, id, patch) => ipcRenderer.invoke('lib-update-note', { key, id, patch }),
+    removeNote: (key, id) => ipcRenderer.invoke('lib-remove-note', { key, id }),
     revealItem: (key) => ipcRenderer.invoke('lib-reveal-item', { key }),
     relinkItem: (key) => ipcRenderer.invoke('lib-relink-item', { key }),
     // v11：库级全文检索 / 备份 / 数据目录

@@ -599,6 +599,11 @@ ipcMain.handle('lib-remove-tag-everywhere', (_e, info) => {
   return r;
 });
 
+// v23：阅读笔记（一条文献挂多条笔记）
+ipcMain.handle('lib-add-note', (_e, info) => (info ? library.addNote(info.key, info.note || {}) : null));
+ipcMain.handle('lib-update-note', (_e, info) => (info ? library.updateNote(info.key, info.id, info.patch || {}) : null));
+ipcMain.handle('lib-remove-note', (_e, info) => (info ? library.removeNote(info.key, info.id) : false));
+
 // ---------- 设置 / 备份 / 数据目录 ----------
 ipcMain.handle('settings-get', () => Object.assign({}, settings.get(), {
   dataDir: currentDataDir(), dataDirIsDefault: !appSettings.dataDir,

@@ -389,6 +389,32 @@ window.LibraryUI = (function () {
       '<option value="' + esc(t.id) + '">' + esc(t.label) + '</option>').join('');
   }
 
+  // v23：阅读笔记列表（每条独立保存，不影响表单里没保存的其他字段）
+  function renderNotes(it) {
+    if (!el.ld.notes) return;
+    const notes = (it && it.notes) || [];
+    if (!notes.length) {
+      el.ld.notes.innerHTML = '<div class="ld-hint">还没有笔记。读完一段写一条，之后能单独翻出来看。</div>';
+      return;
+    }
+    el.ld.notes.innerHTML = notes.map((n) => (
+      '<div class="ld-note" data-note-id="' + esc(n.id) + '">' +
+        '<input class="ld-note-title" data-note-field="title" value="' + esc(n.title) + '" placeholder="标题（可以留空）" />' +
+        '<textarea class="ld-note-text" data-note-field="text" rows="3" placeholder="这条笔记的内容…">' + esc(n.text) + '</textarea>' +
+        '<div class="ld-note-foot"><span class="ld-hint">失焦自动保存</span>' +
+        '<button class="ld-mini ld-note-del" title="删除这条笔记">删除</button></div>' +
+      '</div>'
+    )).join('');
+  }
+
+  // 刷新条目数据但不重绘详情表单（免得把用户没保存的其它字段冲掉）
+  async function reloadItemsQuiet() {
+    try {
+      const s = await L().summary();
+      if (s && Array.isArray(s.items)) state.items = s.items;
+    } catch (_) {}
+  }
+
   function renderDetail() {
     const it = selectedItem();
     if (!it) { el.detail.hidden = true; return; }
@@ -407,7 +433,7 @@ window.LibraryUI = (function () {
     el.ld.doi.value = it.doi || '';
     el.ld.url.value = it.url || '';
     el.ld.abstract.value = it.abstract || '';
-    el.ld.note.value = it.note || '';
+    renderNotes(it);
     state.detailTags = (it.tags || []).slice();
     renderDetailTags(trashed);
     renderDetailColls(it, trashed);
@@ -415,8 +441,10 @@ window.LibraryUI = (function () {
     renderCite(it, trashed);
 
     const fields = [el.ld.type, el.ld.title, el.ld.creators, el.ld.year, el.ld.publication,
-      el.ld.volume, el.ld.issue, el.ld.pages, el.ld.doi, el.ld.url, el.ld.abstract, el.ld.note];
+      el.ld.volume, el.ld.issue, el.ld.pages, el.ld.doi, el.ld.url, el.ld.abstract];
     for (const f of fields) f.disabled = trashed;
+    if (el.ld.notes) el.ld.notes.querySelectorAll('input, textarea, button').forEach((n) => { n.disabled = trashed; });
+    if (el.ld.noteAdd) el.ld.noteAdd.disabled = trashed;
     el.ld.tagInput.disabled = trashed;
     el.ld.tagAdd.disabled = trashed;
     el.ld.save.hidden = trashed;
@@ -518,8 +546,8 @@ window.LibraryUI = (function () {
       creators: val('creators').split(/[,，;；]/).map((x) => x.trim()).filter(Boolean),
       year: val('year'), publication: val('publication'),
       volume: val('volume'), issue: val('issue'), pages: val('pages'),
-      doi: val('doi'), url: val('url'), abstract: val('abstract'), note: val('note'),
-      tags, collectionIds,
+      doi: val('doi'), url: val('url'), abstract: val('abstract'),
+      tags, collectionIds,   // v23：阅读笔记走 notes[]，不再由表单整块保存
     };
   }
 
@@ -1053,7 +1081,8 @@ window.LibraryUI = (function () {
         body: $('ld-body'),
         type: $('ld-type'), title: $('ld-title'), creators: $('ld-creators'), year: $('ld-year'),
         publication: $('ld-publication'), volume: $('ld-volume'), issue: $('ld-issue'), pages: $('ld-pages'),
-        doi: $('ld-doi'), url: $('ld-url'), abstract: $('ld-abstract'), note: $('ld-note'),
+        doi: $('ld-doi'), url: $('ld-url'), abstract: $('ld-abstract'),
+        notes: $('ld-notes'), noteAdd: $('ld-note-add'),
         tags: $('ld-tags'), tagInput: $('ld-tag-input'), tagAdd: $('ld-tag-add'),
         colls: $('ld-colls'), attach: $('ld-attach'), dates: $('ld-dates'), status: $('ld-status'),
         fetch: $('ld-fetch'), fetchStatus: $('ld-fetch-status'),
@@ -1072,6 +1101,48 @@ window.LibraryUI = (function () {
       scheduleFulltext();
     });
     el.import.addEventListener('click', importPdf);
+    // v23：阅读笔记（新建 / 失焦保存 / 删除）
+    if (el.ld.notes) {
+      el.ld.notes.addEventListener('change', async (e) => {
+        const box = e.target.closest('[data-note-id]');
+        if (!box) return;
+        const field = e.target.dataset.noteField;
+        if (field !== 'title' && field !== 'text') return;
+        const patch = {};
+        patch[field] = e.target.value;
+        const key = state.selectedKey;
+        if (!key) return;
+        await L().updateNote(key, box.dataset.noteId, patch);
+        await reloadItemsQuiet();
+        const it = state.items.find((x) => x.key === key);
+        if (it) renderNotes(it);
+      });
+      el.ld.notes.addEventListener('click', async (e) => {
+        const del = e.target.closest('.ld-note-del');
+        if (!del) return;
+        const box = del.closest('[data-note-id]');
+        const key = state.selectedKey;
+        if (!box || !key) return;
+        await L().removeNote(key, box.dataset.noteId);
+        await reloadItemsQuiet();
+        const it = state.items.find((x) => x.key === key);
+        renderNotes(it || { notes: [] });
+      });
+    }
+    if (el.ld.noteAdd) {
+      el.ld.noteAdd.addEventListener('click', async () => {
+        const key = state.selectedKey;
+        if (!key) return;
+        const n = await L().addNote(key, { title: '', text: '' });
+        await reloadItemsQuiet();
+        const it = state.items.find((x) => x.key === key);
+        if (it) renderNotes(it);
+        if (n && el.ld.notes) {
+          const box = el.ld.notes.querySelector('[data-note-id="' + n.id + '"] .ld-note-text');
+          if (box) box.focus();
+        }
+      });
+    }
     // v19：折叠分区（智能收藏集 / 标签）
     for (const btn of document.querySelectorAll('.lib-sec-toggle')) {
       btn.addEventListener('click', () => {

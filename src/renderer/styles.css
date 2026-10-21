@@ -151,6 +151,26 @@ body.view-page #viewer { padding: 16px 20px; }
 /* 当前搜索命中（v22） */
 .page .hl-layer .hl.is-current { background: rgba(255, 213, 0, .75); box-shadow: 0 0 0 2px var(--accent); }
 
+/* ---------- 阅读笔记（v23） ---------- */
+.ld-notes { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.ld-note {
+  border: 1px solid var(--rule); border-radius: var(--r); padding: 8px 9px;
+  background: var(--surface); display: flex; flex-direction: column; gap: 6px;
+}
+.ld-note-title {
+  font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--text);
+  background: transparent; border: none; border-bottom: 1px solid var(--rule);
+  padding: 2px 0; outline: none;
+}
+.ld-note-title:focus { border-bottom-color: var(--accent); }
+.ld-note-text {
+  font-family: var(--font-serif); font-size: 12.5px; line-height: 1.6; color: var(--text);
+  background: transparent; border: none; padding: 0; outline: none; resize: vertical; min-height: 44px;
+}
+.ld-note-foot { display: flex; align-items: center; gap: 8px; }
+.ld-note-foot .ld-hint { font-size: 10.5px; }
+.ld-note-foot .ld-mini { margin-left: auto; }
+
 /* 专注阅读模式（F11）：收掉所有工具栏，只留页面 */
 body.focus-mode #toolbar,
 body.focus-mode #notetools,
