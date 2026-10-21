@@ -282,7 +282,7 @@ window.LibraryUI = (function () {
     el.empty.hidden = list.length !== 0;
     el.empty.textContent = isTrash() ? '回收站是空的。'
       : (state.query.trim() || saved) ? '没有匹配的条目。'
-      : '还没有条目。点右上角「导入文档」，或把 PDF / Word / PPT / Excel / Markdown 等文件拖进来。';
+      : '还没有条目。点右上角「添加文档」，或把 PDF / Word / PPT / Excel / Markdown 等文件拖进来。';
     if (el.selectAll) {
       const checked = list.filter((x) => !x.deletedAt && state.selectedKeys.has(x.key)).length;
       el.selectAll.checked = list.length > 0 && checked === list.length;
@@ -703,14 +703,36 @@ window.LibraryUI = (function () {
     if (typeof window.__libOpen === 'function') window.__libOpen(res);
   }
 
-  async function importPdf() {
-    const res = await window.pdfBridge.openPdfDialog();
-    if (res && res.ok && res.filePath) {
-      // dedupe: 同一个文件已经在库里就别再塞一条（导入/拖入的用户语义）
-      const added = await L().addPdf(res.filePath, { dedupe: true });
-      if (added && added.ok && added.item) { state.selectedKey = added.item.key; state.scope = { type: 'all' }; }
-      await refresh();
+  // 统一入库：对话框添加与拖入共用，dedupe 由 lib-add-pdf 处理。
+  async function addPaths(paths) {
+    let added = 0, deduped = 0, failed = 0, lastKey = null;
+    for (const p of paths) {
+      const r = await L().addPdf(p, { dedupe: true });
+      if (r && r.ok && r.item) {
+        if (r.deduped) deduped++; else added++;
+        lastKey = r.item.key;
+      } else failed++;
     }
+    if (lastKey) state.selectedKey = lastKey;
+    state.scope = { type: 'all' };
+    await refresh();
+    return { added, deduped, failed };
+  }
+
+  function toastAdded(r) {
+    const parts = [];
+    if (r.added) parts.push('已添加 ' + r.added + ' 个文档');
+    if (r.deduped) parts.push('已在库中 ' + r.deduped + ' 个');
+    if (r.failed) parts.push('失败 ' + r.failed + ' 个');
+    window.App && window.App.toast && window.App.toast(parts.length ? parts.join('，') : '没有添加文档');
+  }
+
+  // 只选路径，不预先读取/转换；真正读取发生在打开条目时。
+  async function addDocuments() {
+    if (!window.pdfBridge || !window.pdfBridge.pickDocuments) return;
+    const res = await window.pdfBridge.pickDocuments();
+    if (!res || !res.ok || !res.filePaths || !res.filePaths.length) return;
+    toastAdded(await addPaths(res.filePaths));
   }
 
   async function handleDrop(e) {
@@ -718,20 +740,20 @@ window.LibraryUI = (function () {
     // 后端 lib-add-pdf 会再校验一次扩展名；这里只挡一下目录和空文件。
     const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []).filter((f) => f && f.name);
     if (!files.length) return;
-    let n = 0, lastKey = null, failed = 0;
+    const paths = [];
+    let missing = 0;
     for (const file of files) {
       let p = '';
       try { p = window.pdfBridge.pathForFile(file) || ''; } catch (_) {}
-      if (!p) { failed++; continue; }
-      const r = await L().addPdf(p, { dedupe: true });
-      if (r && r.ok && r.item) { n++; lastKey = r.item.key; }
-      else failed++;
+      if (p) paths.push(p); else missing++;
     }
-    if (!n) { window.App && window.App.toast && window.App.toast(failed ? '没有可导入的文档（格式不支持或路径不可用）' : '无法取得文件路径'); return; }
-    if (lastKey) state.selectedKey = lastKey;
-    state.scope = { type: 'all' };
-    await refresh();
-    window.App && window.App.toast && window.App.toast('已导入 ' + n + ' 个文档' + (failed ? '，' + failed + ' 个跳过' : ''));
+    if (!paths.length) { window.App && window.App.toast && window.App.toast('无法取得文件路径'); return; }
+    const r = await addPaths(paths);
+    if (!r.added && !r.deduped) {
+      window.App && window.App.toast && window.App.toast('没有可添加的文档（格式不支持或路径不可用）');
+      return;
+    }
+    toastAdded({ added: r.added, deduped: r.deduped, failed: r.failed + missing });
   }
 
   async function trashItem(key) {
@@ -1067,6 +1089,130 @@ window.LibraryUI = (function () {
     else if (r && !r.canceled) window.App && window.App.toast && window.App.toast('导出失败：' + (r.error || '未知错误'));
   }
 
+  // ---------- 参考文献表（v29） ----------
+  // 只在渲染层拼装：条目数据已经在 state 里，不需要主进程再读一次库。
+  // 范围三种：当前列表（含搜索/收藏集/标签筛选与当前排序）/ 选中条目 / 整库。
+  function bibStyleId() {
+    return (el.bib && el.bib.style.value) || state.citeStyle || 'gbt7714';
+  }
+
+  function bibScopeItems() {
+    const scope = (el.bib && el.bib.scope.value) || 'list';
+    if (scope === 'selected') return state.items.filter((x) => state.selectedKeys.has(x.key) && !x.deletedAt);
+    if (scope === 'all') return state.items.filter((x) => !x.deletedAt);
+    return visibleItems().filter((x) => !x.deletedAt);
+  }
+
+  function bibOrder() {
+    const v = (el.bib && el.bib.order.value) || 'auto';
+    if (v === 'author' || v === 'entry') return v;
+    return window.Bib ? window.Bib.defaultOrder(bibStyleId()) : 'entry';
+  }
+
+  function currentBibliography() {
+    if (!window.Bib || !el.bib) return { text: '', count: 0, skipped: 0, entries: [] };
+    return window.Bib.build(bibScopeItems(), {
+      style: bibStyleId(),
+      order: bibOrder(),
+      markdown: el.bib.format.value === 'markdown',
+      includeKeys: el.bib.keys.checked,
+      title: el.bib.title.value.trim(),
+      // 用整库分配好的 citekey，避免只选部分条目时出现不同的 -2 后缀
+      citekeys: state.citekeys,
+    });
+  }
+
+  function renderBib() {
+    if (!el.bib || el.bib.modal.hidden) return;
+    const r = currentBibliography();
+    const md = el.bib.format.value === 'markdown';
+    const scopeName = { list: '当前列表', selected: '已选条目', all: '整库' }[el.bib.scope.value] || '当前列表';
+    el.bib.preview.value = r.text || '';
+    el.bib.copy.textContent = md ? '复制 Markdown' : '复制纯文本';
+    let meta = r.count
+      ? r.count + ' 条 · ' + scopeName + ' · ' + (r.styleLabel || '')
+      : scopeName + '里没有可生成的条目';
+    if (r.skipped) meta += ' · 跳过 ' + r.skipped + ' 条（无标题/已删除）';
+    el.bib.count.textContent = meta;
+    el.bib.copy.disabled = r.count === 0;
+    el.bib.save.disabled = r.count === 0;
+    el.bib.status.textContent = '';
+  }
+
+  function openBib(preferSelected) {
+    if (!el.bib) return;
+    if (!state.items.some((x) => !x.deletedAt)) {
+      window.App && window.App.toast && window.App.toast('库里还没有条目');
+      return;
+    }
+    if (el.bib.style && !el.bib.style.options.length && window.Cite) {
+      el.bib.style.innerHTML = Cite.STYLES.map((s) =>
+        '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('');
+    }
+    const sel = state.selectedKeys.size;
+    const opt = el.bib.scope.querySelector('option[value="selected"]');
+    if (opt) {
+      opt.disabled = sel === 0;
+      opt.textContent = sel ? '已选条目（' + sel + '）' : '已选条目（未选）';
+    }
+    el.bib.style.value = state.citeStyle || 'gbt7714';
+    el.bib.scope.value = (preferSelected || sel) ? 'selected' : 'list';
+    if (el.bib.scope.value === 'selected' && !sel) el.bib.scope.value = 'list';
+    el.bib.order.value = 'auto';
+    el.bib.format.value = 'markdown';
+    el.bib.keys.checked = false;
+    el.bib.title.value = '参考文献';
+    el.bib.modal.hidden = false;
+    renderBib();
+    setTimeout(() => { if (el.bib && !el.bib.modal.hidden) el.bib.preview.focus(); }, 30);
+  }
+
+  function closeBib() {
+    if (el.bib) el.bib.modal.hidden = true;
+  }
+
+  async function copyBibliography() {
+    const r = currentBibliography();
+    if (!r.count || !window.pdfBridge || !window.pdfBridge.copyText) return;
+    const md = el.bib.format.value === 'markdown';
+    try {
+      const res = await window.pdfBridge.copyText(r.text);
+      if (res && res.ok) {
+        el.bib.status.textContent = '已复制 ' + r.count + ' 条' + (md ? ' Markdown' : '纯文本') + '到剪贴板';
+        window.App && window.App.toast && window.App.toast('参考文献表已复制');
+      } else {
+        el.bib.status.textContent = '复制失败';
+      }
+    } catch (_) {
+      el.bib.status.textContent = '复制失败';
+    }
+  }
+
+  async function saveBibliography() {
+    const r = currentBibliography();
+    if (!r.count) return;
+    if (!window.pdfBridge || !window.pdfBridge.saveText) {
+      el.bib.status.textContent = '当前环境不能保存文件';
+      return;
+    }
+    const md = el.bib.format.value === 'markdown';
+    try {
+      const res = await window.pdfBridge.saveText({
+        text: r.text,
+        format: md ? 'markdown' : 'text',
+        defaultName: 'Trove-参考文献-' + new Date().toISOString().slice(0, 10),
+      });
+      if (res && res.ok) {
+        el.bib.status.textContent = '已保存：' + res.path;
+        window.App && window.App.toast && window.App.toast('参考文献表已保存');
+      } else if (res && !res.canceled) {
+        el.bib.status.textContent = '保存失败：' + (res.error || '未知错误');
+      }
+    } catch (err) {
+      el.bib.status.textContent = '保存失败：' + (err && err.message ? err.message : err);
+    }
+  }
+
   function saveCurrentSearch() {
     const q = state.query.trim();
     if (!q || !el.saveSearch) return;
@@ -1384,6 +1530,13 @@ window.LibraryUI = (function () {
         citekeyAt: $('ld-citekey-at'), citekeyStatus: $('ld-citekey-status'),
         relations: $('ld-relations'), relSelect: $('ld-rel-select'), relAdd: $('ld-rel-add'),
       },
+      bib: {
+        modal: $('bib-modal'), style: $('bib-style'), scope: $('bib-scope'),
+        order: $('bib-order'), format: $('bib-format'), keys: $('bib-keys'),
+        title: $('bib-title'), preview: $('bib-preview'), count: $('bib-count'),
+        copy: $('bib-copy'), save: $('bib-save'), status: $('bib-status'),
+        close: $('bib-close'), close2: $('bib-close2'),
+      },
     };
 
     // 搜索框：每次按键都重画整张列表，条目一多就会卡。去抖一下（90ms），
@@ -1399,7 +1552,7 @@ window.LibraryUI = (function () {
       }, 90);
       scheduleFulltext();
     });
-    el.import.addEventListener('click', importPdf);
+    el.import.addEventListener('click', addDocuments);
     // 右键菜单 / 颜色浮层：点别处或滚动就收起
     document.addEventListener('mousedown', (e) => {
       if (cardMenu && !cardMenu.contains(e.target)) closeCardMenu();
@@ -1547,6 +1700,29 @@ window.LibraryUI = (function () {
     if (el.importRefs) el.importRefs.addEventListener('click', importRefs);
     if (el.exportRefs) el.exportRefs.addEventListener('click', exportRefs);
     if (el.settingsBtn) el.settingsBtn.addEventListener('click', openSettings);
+
+    // 参考文献表（v29）
+    if (el.bib && el.bib.modal) {
+      el.bib.close.addEventListener('click', closeBib);
+      el.bib.close2.addEventListener('click', closeBib);
+      const bibTop = $('lib-bib');
+      if (bibTop) bibTop.addEventListener('click', () => openBib(false));
+      const bibBulk = $('lib-bulk-bib');
+      if (bibBulk) bibBulk.addEventListener('click', () => openBib(true));
+      for (const key of ['style', 'scope', 'order', 'format']) {
+        el.bib[key].addEventListener('change', () => {
+          if (key === 'style') {
+            state.citeStyle = el.bib.style.value;
+            if (el.ld.citeStyle) el.ld.citeStyle.value = state.citeStyle;
+          }
+          renderBib();
+        });
+      }
+      el.bib.title.addEventListener('input', renderBib);
+      el.bib.keys.addEventListener('change', renderBib);
+      el.bib.copy.addEventListener('click', copyBibliography);
+      el.bib.save.addEventListener('click', saveBibliography);
+    }
 
     // 设置弹层
     if (el.settingsModal) {
@@ -1826,6 +2002,7 @@ window.LibraryUI = (function () {
     document.addEventListener('keydown', (e) => {
       const modalOpen = (el.settingsModal && !el.settingsModal.hidden)
         || (el.dupModal && !el.dupModal.hidden)
+        || (el.bib && el.bib.modal && !el.bib.modal.hidden)
         || (el.bulkModal && !el.bulkModal.hidden);
       if (!isOpen() && !modalOpen) return;
       if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
@@ -1856,6 +2033,7 @@ window.LibraryUI = (function () {
         if (cardMenu || colorPop) { e.preventDefault(); closeCardMenu(); closeColorPop(); return; }
         if (el.settingsModal && !el.settingsModal.hidden) { e.preventDefault(); closeSettings(); }
         else if (el.dupModal && !el.dupModal.hidden) { e.preventDefault(); el.dupModal.hidden = true; }
+        else if (el.bib && el.bib.modal && !el.bib.modal.hidden) { e.preventDefault(); closeBib(); }
         else if (el.bulkModal && !el.bulkModal.hidden) { e.preventDefault(); el.bulkModal.hidden = true; }
         else if (state.selectedKey) { e.preventDefault(); closeDetail(); }
         else if (isOpen()) { e.preventDefault(); hide(); }   // Esc 收起整个库，回到阅读器
@@ -1887,6 +2065,7 @@ window.LibraryUI = (function () {
     if (el.root) el.root.hidden = true;
     closeSettings();
     if (el.dupModal) el.dupModal.hidden = true;
+    if (el.bib && el.bib.modal) el.bib.modal.hidden = true;
     if (el.bulkModal) el.bulkModal.hidden = true;
     closeDetail();
   }

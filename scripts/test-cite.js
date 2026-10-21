@@ -44,6 +44,7 @@ ok('学位论文用 [D] 标识', s.indexOf('[D].') > 0, s);
 
 s = Cite.gbt({ itemType: 'conferencePaper', title: '会议论文', creators: ['孙七'], year: '2022', publication: '某会议', pages: '5-9' });
 ok('会议论文用 [C]// 标识', s.indexOf('[C]//某会议.') > 0, s);
+ok('会议论文年份与页码之间不留 .:', s.indexOf('2022: 5-9.') > 0 && s.indexOf('.:') < 0, s);
 
 s = Cite.gbt({ itemType: 'webpage', title: '网页标题', creators: ['周八'], url: 'https://example.com/a' });
 ok('网页用 [EB/OL] 标识', s.indexOf('[EB/OL].') > 0, s);
@@ -124,8 +125,9 @@ const typeCase = (itemType, code, extra) => {
   return { s: s2, hit: s2.indexOf('[' + code + ']') > 0 };
 };
 
-let tc = typeCase('bookSection', 'M');
+let tc = typeCase('bookSection', 'M', { pages: '1-12' });
 ok('图书章节用 [M]//', tc.hit && tc.s.indexOf('[M]//来源') > 0, tc.s);
+ok('图书章节年份与页码之间不留 .:', tc.s.indexOf('2020: 1-12.') > 0, tc.s);
 tc = typeCase('newspaperArticle', 'N');
 ok('报纸文章用 [N]', tc.hit && tc.s.indexOf('[N].') > 0, tc.s);
 tc = typeCase('preprint', 'Z');

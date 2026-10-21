@@ -186,13 +186,19 @@
       case 'conferencePaper':
       case 'presentation':
         out += t + '[C]//' + (pub || '会议论文集') + '.';
-        if (y) out += ' ' + y + '.';
-        if (pg) out += ': ' + pg + '.';
+        if (y) {
+          out += ' ' + y;
+          if (pg) out += ': ' + pg;
+          out += '.';
+        } else if (pg) out += ' ' + pg + '.';
         break;
       case 'bookSection':
         out += t + '[M]//' + (pub || '论文集') + '.';
-        if (y) out += ' ' + y + '.';
-        if (pg) out += ': ' + pg + '.';
+        if (y) {
+          out += ' ' + y;
+          if (pg) out += ': ' + pg;
+          out += '.';
+        } else if (pg) out += ' ' + pg + '.';
         break;
       case 'book':
       case 'encyclopediaArticle':
@@ -339,8 +345,8 @@
     return out;
   }
 
-  // ---------- IEEE（编号制，单条按 [1] 排） ----------
-  function ieee(it) {
+  // ---------- IEEE（编号制；单条默认 [1]，参考文献表可传入实际序号） ----------
+  function ieee(it, num) {
     if (!it) return '';
     const t = str(it.title);
     if (!t) return '';
@@ -351,7 +357,8 @@
     const iss = str(it.issue);
     const pg = str(it.pages);
     const y = str(it.year);
-    let out = '[1] ';
+    const seq = Number.isFinite(+num) && +num > 0 ? Math.floor(+num) : 1;
+    let out = '[' + seq + '] ';
     if (a) out += a + ', ';
     out += '"' + t + ',"';
     if (pub) out += ' ' + pub + ',';
@@ -459,12 +466,13 @@
     return k ? '[@' + k + ']' : '';
   }
 
-  // 统一入口：style 走对应样式，其它一律按 GB/T 处理
-  function format(it, style) {
+  // 统一入口：style 走对应样式，其它一律按 GB/T 处理。
+  // num 只影响 IEEE 的序号；单条引用不传时保持 [1]。
+  function format(it, style, num) {
     if (!it) return '';
     if (style === 'apa') return apa(it);
     if (style === 'chicago') return chicago(it);
-    if (style === 'ieee') return ieee(it);
+    if (style === 'ieee') return ieee(it, num);
     if (style === 'mla') return mla(it);
     return gbt(it);
   }

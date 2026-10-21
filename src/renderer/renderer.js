@@ -50,8 +50,12 @@ const App = window.App = {
 function availW() { return Math.max(200, App.els.viewer.clientWidth - 32); }
 function availH() { return Math.max(200, App.els.viewer.clientHeight - 32); }
 
+// 没有打开文档时，页宽 / 页高还是占位值 1，算缩放会得到 941 倍这种废数
+function hasDoc(s) { return !!(s.pdfDoc || (s.richPages && s.richPages.length)); }
+
 function computeScale() {
   const s = App.state;
+  if (!hasDoc(s)) return 1;
   if (s.mode === 'rich') {
     if (s.scaleMode === 'page-actual') return 1;
     if (s.scaleMode === 'page-width') return availW() / 900;
@@ -67,6 +71,7 @@ function computeScale() {
 // 布局：设置每页 CSS 尺寸（占位稳定，滚动不跳动），重排已渲染页
 function applyLayout() {
   const s = App.state;
+  if (!hasDoc(s)) { App.els.zoom.textContent = '—'; return; }
   s.scale = computeScale();
   if (s.mode === 'rich') {
     // 富文档用 CSS zoom：字号、表格、图片一起缩放，滚动高度由浏览器自动算
@@ -505,6 +510,7 @@ function closeDocument() {
   if (App.els.pageCount) App.els.pageCount.textContent = '/ 0';
   if (App.els.pageInput) { App.els.pageInput.value = '1'; App.els.pageInput.max = '1'; }
   if (App.els.fileName) App.els.fileName.textContent = '';
+  if (App.els.zoom) App.els.zoom.textContent = '—';
   setStatus('就绪');
   renderTabs();
   if (window.LibraryUI && window.pdfBridge.isApp) window.LibraryUI.show();

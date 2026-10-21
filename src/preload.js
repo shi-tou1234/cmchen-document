@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   isApp: process.argv.includes('--pdfreader-app'),
   // 主动请求主进程弹出打开对话框，返回 { ok, kind, fileName, filePath, startPage, data|pages }
   openPdfDialog: () => ipcRenderer.invoke('open-pdf-dialog'),
+  // v29：只选文档路径（可多选），不读取/转换内容；库界面「添加文档」用
+  pickDocuments: () => ipcRenderer.invoke('pick-documents'),
   // 订阅来自菜单「打开 PDF」/最近文件/命令行 的打开事件
   onPdfOpened: (cb) => {
     ipcRenderer.on('pdf-opened', (_e, payload) => cb(payload));
@@ -40,6 +42,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   exportPagePng: (info) => ipcRenderer.invoke('export-page-png', info),
   // v21：把所有文档的批注汇总成一份 Markdown（outPath 可选，给了就不弹对话框）
   exportAllNotes: (outPath) => ipcRenderer.invoke('export-all-notes', { outPath }),
+  // v29：通用「保存文本」对话框（参考文献表用；Markdown / 纯文本）
+  saveText: (info) => ipcRenderer.invoke('save-text', info),
   // v26：去掉原生菜单栏（文件/视图/系统）后，这几件事改从界面发起
   clearRecent: () => ipcRenderer.invoke('clear-recent'),
   setDefaultPdfReader: () => ipcRenderer.invoke('set-default-pdf-reader'),

@@ -116,6 +116,27 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
 .tbtn.danger { color: var(--danger); }
 .tbtn.danger:hover { background: var(--danger-soft); color: var(--danger); }
 
+/* ---------- 阅读 / 文献库 视图切换 ---------- */
+.mode-switch {
+  display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto;
+  padding: 2px; background: var(--surface-3);
+  border: 1px solid var(--rule-2); border-radius: var(--r-2);
+}
+.mode-switch .mode-tab {
+  border: 0; background: transparent; color: var(--ink-3);
+  font: inherit; font-size: 12px; line-height: 1.3;
+  padding: 4px 10px; border-radius: var(--r); cursor: pointer;
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.mode-switch .mode-tab:hover { color: var(--ink); }
+.mode-switch .mode-tab.active {
+  background: var(--surface); color: var(--ink); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(40, 34, 24, .10), inset 0 0 0 1px var(--rule);
+}
+.mode-switch .mode-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* 侧栏里的切换控件不撑满，和阅读器工具栏那个保持同宽同位 */
+#lib-side .mode-switch { align-self: flex-start; }
+
 /* 批注搜索 / 标签（v19） */
 .anno-search {
   width: 100%; margin-bottom: 8px; padding: 5px 9px; font-size: 12px; font-family: inherit;
@@ -251,7 +272,7 @@ body.theme-dark.invert-pages .page .textlayer { filter: invert(1) hue-rotate(180
 /* 文件名按钮的样式在「文档快速切换面板」那一节里（v18） */
 
 /* ---------- 阅读区 ---------- */
-#viewer { flex: 1 1 auto; overflow: auto; scroll-behavior: auto; padding: 22px 20px 40px; background: var(--paper); }
+#viewer { flex: 1 1 auto; overflow: auto; scroll-behavior: auto; padding: 22px 20px 40px; background: var(--paper); position: relative; }
 #pages { display: flex; flex-direction: column; align-items: center; gap: 18px; min-height: 100%; }
 .page {
   position: relative; background: #fff; overflow: hidden;
@@ -268,7 +289,11 @@ body.tool-pen .page .anno, body.tool-highlight .page .anno,
 body.tool-line .page .anno, body.tool-rect .page .anno, body.tool-arrow .page .anno { cursor: crosshair; }
 .page .anno text { user-select: none; }
 
-#empty-hint { color: var(--ink-3); font-family: var(--font-serif); font-size: 16px; margin-top: 70px; text-align: center; }
+/* 空态提示绝对居中：不占布局高度，空文档时阅读区不会出现多余滚动条 */
+#empty-hint {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--ink-3); font-size: 15px; text-align: center; padding: 0 24px; pointer-events: none;
+}
 body.has-doc #empty-hint { display: none; }
 
 /* ---------- 状态栏 ---------- */
@@ -339,13 +364,20 @@ body.has-doc #empty-hint { display: none; }
 
 #lib-main { flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; min-width: 0; background: var(--surface); container-type: inline-size; }
 #lib-head {
-  display: flex; align-items: baseline; gap: 10px; padding: 14px 18px 12px;
+  display: flex; align-items: center; gap: 14px; padding: 12px 18px;
   border-bottom: 1px solid var(--rule); background: var(--surface); flex-wrap: wrap;
 }
-#lib-scope-title { font-family: var(--font-serif); font-size: 20px; color: var(--ink); letter-spacing: .01em; }
-.lib-count { font-size: 11px; color: var(--ink-3); font-family: var(--font-mono); }
+/* 标题和条数共用一条基线，避免大字与小字上下错落 */
+.lib-head-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
+#lib-scope-title {
+  font-size: 19px; font-weight: 600; color: var(--ink);
+  letter-spacing: .01em; white-space: nowrap;
+}
+.lib-count { font-size: 11.5px; color: var(--ink-3); font-family: var(--font-mono); }
+.lib-head-view { display: flex; align-items: center; gap: 12px; }
 .lib-head-actions { margin-left: auto; display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
 .lib-head-actions .tbtn { padding: 4px 8px; font-size: 12px; }
+.lib-head-actions .sep { margin: 0 5px; }
 .lib-sort-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); }
 #lib-sort {
   background: var(--surface); color: var(--ink-2); border: 1px solid var(--rule-2);
@@ -1090,3 +1122,13 @@ body.rich-doc #doc-view ::selection { background: rgba(255, 213, 79, .55); }
   .lib-columns > :nth-child(5), .lib-card .lctags { display: none; }
 }
 body.theme-dark.invert-pages .doc-page { filter: invert(1) hue-rotate(180deg); }
+
+/* 参考文献表（v29） */
+.bib-head { display: flex; align-items: center; gap: 8px; }
+.bib-preview {
+  width: 100%; height: 34vh; min-height: 220px; resize: vertical;
+  font-family: var(--font-sans); font-size: 12.5px; line-height: 1.75;
+  color: var(--ink); background: var(--surface-3); border: 1px solid var(--rule-2);
+  border-radius: var(--r); padding: 10px 12px; outline: none; white-space: pre-wrap;
+}
+.bib-preview:focus { border-color: var(--accent); }

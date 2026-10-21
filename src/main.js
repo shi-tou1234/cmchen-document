@@ -311,22 +311,24 @@ ipcMain.on('smoke-result', (_e, payload) => {
   app.exit(payload && payload.ok ? 0 : 2);
 });
 
+const DOC_DIALOG_FILTERS = [
+  { name: '所有支持的文档', extensions: [...docconvert.SUPPORTED_EXTS] },
+  { name: 'PDF 文件', extensions: ['pdf'] },
+  { name: 'Word 文档', extensions: ['docx', 'doc'] },
+  { name: '演示文稿', extensions: ['pptx', 'odp'] },
+  { name: '表格', extensions: ['xlsx', 'xls', 'ods', 'csv'] },
+  { name: '文本 / Markdown', extensions: ['md', 'markdown', 'txt', 'html', 'htm', 'rtf'] },
+  { name: '电子书', extensions: ['epub'] },
+  { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif'] },
+  { name: '所有文件', extensions: ['*'] },
+];
+
 // 弹出文件对话框，读取文档；PDF 回字节，其它格式回转换好的页面。
 async function openPdfViaDialog() {
   if (!win) return { ok: false };
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
     title: '打开文档',
-    filters: [
-      { name: '所有支持的文档', extensions: [...docconvert.SUPPORTED_EXTS] },
-      { name: 'PDF 文件', extensions: ['pdf'] },
-      { name: 'Word 文档', extensions: ['docx', 'doc'] },
-      { name: '演示文稿', extensions: ['pptx', 'odp'] },
-      { name: '表格', extensions: ['xlsx', 'xls', 'ods', 'csv'] },
-      { name: '文本 / Markdown', extensions: ['md', 'markdown', 'txt', 'html', 'htm', 'rtf'] },
-      { name: '电子书', extensions: ['epub'] },
-      { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif'] },
-      { name: '所有文件', extensions: ['*'] },
-    ],
+    filters: DOC_DIALOG_FILTERS,
     properties: ['openFile'],
     defaultPath: appState.lastDir || undefined,
   });
@@ -345,6 +347,22 @@ async function openPdfViaDialog() {
 }
 
 ipcMain.handle('open-pdf-dialog', () => openPdfViaDialog());
+
+// 只选文件、不读取内容：库界面的「添加文档」用它，避免把文件先转换一遍再入库。
+async function pickDocumentsViaDialog() {
+  if (!win) return { ok: false };
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: '添加文档',
+    filters: DOC_DIALOG_FILTERS,
+    properties: ['openFile', 'multiSelections'],
+    defaultPath: appState.lastDir || undefined,
+  });
+  if (canceled || !filePaths.length) return { ok: false, canceled: true };
+  appState.lastDir = path.dirname(filePaths[0]);
+  saveWindowState(appState);
+  return { ok: true, filePaths };
+}
+ipcMain.handle('pick-documents', () => pickDocumentsViaDialog());
 
 // 渲染进程上报当前页码（按文件记住，下次打开回到同一位置）
 ipcMain.on('set-page', (_e, info) => { if (info) recordPage(info.path, info.page); });
@@ -557,7 +575,7 @@ function importRefsFile(file) {
 
 async function importRefsViaDialog() {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-    title: '导入 BibTeX / RIS 文献',
+    title: '导入 BibTeX / RIS 题录',
     filters: [{ name: 'BibTeX / RIS', extensions: ['bib', 'bibtex', 'ris', 'txt'] }],
     properties: ['openFile'],
   });
@@ -883,6 +901,40 @@ ipcMain.handle('lib-import-refs', (_e, info) => {
 ipcMain.handle('lib-export-refs', (_e, info) => {
   if (info && info.outPath) return exportRefsTo(info.outPath);
   return exportRefsViaDialog();
+});
+// v29：渲染层已经拼好的文本（目前是参考文献表）落盘。
+// 文件对话框留在主进程，渲染层只传 text / format / 建议文件名。
+ipcMain.handle('save-text', async (_e, info) => {
+  if (!info || typeof info.text !== 'string' || !info.text.trim()) {
+    return { ok: false, error: '没有可保存的内容' };
+  }
+  if (info.outPath) {
+    try {
+      atomicWrite(String(info.outPath), info.text);
+      return { ok: true, path: String(info.outPath), bytes: Buffer.byteLength(info.text) };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+  }
+  const markdown = info.format !== 'text';
+  const base = String(info.defaultName || ('Trove-参考文献-' + new Date().toISOString().slice(0, 10)))
+    .replace(/[\\/:*?"<>|]/g, '-').replace(/\.(md|txt)$/i, '');
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: '保存参考文献表',
+    defaultPath: path.join(appState.lastBackupDir || '', base + (markdown ? '.md' : '.txt')),
+    filters: markdown
+      ? [{ name: 'Markdown', extensions: ['md'] }, { name: '纯文本', extensions: ['txt'] }]
+      : [{ name: '纯文本', extensions: ['txt'] }, { name: 'Markdown', extensions: ['md'] }],
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  try {
+    atomicWrite(filePath, info.text);
+    appState.lastBackupDir = path.dirname(filePath);
+    saveWindowState(appState);
+    return { ok: true, path: filePath, bytes: Buffer.byteLength(info.text) };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
 });
 ipcMain.handle('lib-duplicates', () => ({ groups: library.findDuplicates() }));
 ipcMain.handle('lib-merge-items', (_e, info) => {

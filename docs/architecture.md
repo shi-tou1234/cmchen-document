@@ -6,7 +6,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 ┌──────────────────────────── 主进程 src/main.js ────────────────────────────┐
 │ 窗口 · IPC · 打开文档 · 备份恢复 · 数据目录 · 单实例 · 全文索引 · 格式转换  │
 │   library.js   fulltext.js   docconvert.js   settings.js   formats.js      │
-│   cite.js      metadata.js   pdfmeta.js      usermigrate.js                │
+│   cite.js      bib.js        metadata.js   pdfmeta.js     usermigrate.js  │
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     │ preload.js / contextBridge
                                     │ window.pdfBridge.*  (invoke / send / on)
@@ -127,6 +127,13 @@ PDF 每页一个 `.page` 容器，里面是 `canvas` + `.textlayer` + `.hl-layer
 - 启动后延迟 1.2 秒后台补索引，不阻塞首屏；也可以在设置里关掉自动索引。
 - 搜索是子串匹配 + AND 多关键词，返回 `{page, snippet, source}`；`source` 区分全文 / 批注 / 摘录 / 笔记。
 - 索引不属于用户数据，备份不包含；丢了在设置里点"重建索引"。
+
+## 引用与参考文献表
+
+- `cite.js` 只格式化**单条**：5 种样式、37 类标识、citekey。
+- `bib.js` 负责**一批**：按样式决定默认排序（编号制保持传入顺序，作者-年份制按姓氏），同作者同年补 a / b，编号制重新编号，最后包成 Markdown 或纯文本。
+- citekey 由渲染层传入整库分配的 Map，避免只选部分条目时出现不同的 `-2` 后缀。
+- 保存走通用 `save-text` IPC：渲染层拼好文本，主进程只弹系统对话框 + 原子写，不再读一遍库。
 
 ## 格式转换的安全边界
 

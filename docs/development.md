@@ -47,6 +47,7 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 | `src/docconvert.js` | Word / PPT / Excel / EPUB / Markdown → 安全 HTML |
 | `src/formats.js` | BibTeX / RIS / CSL-JSON 解析与导出 |
 | `src/cite.js` | 5 种引用样式、37 类标识、citekey |
+| `src/bib.js` | 参考文献表：排序 / 编号 / 同年 a-b / Markdown 与纯文本 |
 | `src/metadata.js` | Crossref / arXiv 抓取 |
 | `src/pdfmeta.js` | 读 PDF 的 Title / Author |
 | `src/settings.js` | 设置白名单、原子写、损坏回退 |
@@ -73,7 +74,7 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 }
 ```
 
-这样会跑 34 个 Node 驱动的脚本；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
+这样会跑 35 个 Node 驱动的脚本；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
 
 | 类型 | 数量 | 怎么跑 |
 |---|---|---|
@@ -203,7 +204,7 @@ NSIS 安装包默认装到当前用户目录（`%LOCALAPPDATA%\Programs\Trove`�
 
 ## 发布清单
 
-- [ ] `node scripts/test-usermigrate.js` 等 9 个纯 Node 回归全过
+- [ ] `node scripts/test-usermigrate.js` 等 10 个纯 Node 回归全过
 - [ ] Electron 回归全过（至少 library-ui / richdoc / reader-plus / backup / datadir / single-instance）
 - [ ] `npx electron-builder --win dir` → rcedit → portable + nsis
 - [ ] `node scripts/test-packaged.js "build\Trove-1.1.0-portable.exe"` 17 项全过

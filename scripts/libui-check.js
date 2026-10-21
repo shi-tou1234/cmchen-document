@@ -242,6 +242,59 @@ module.exports = `(async () => {
     push('v27 交互块未抛错', false, step + ': ' + (e && e.message ? e.message : e));
   }
 
+  // ---------- v29：参考文献表 ----------
+  step = 'bib';
+  try {
+    $('[data-scope="all"]').click();
+    await waitFor(() => cards() === 2, 3000);
+    $('#lib-bib').click();
+    await waitFor(() => !document.getElementById('bib-modal').hidden, 3000);
+    push('参考文献弹层打开', !document.getElementById('bib-modal').hidden);
+    push('样式下拉有 5 种', $$('#bib-style option').length === 5, 'options=' + $$('#bib-style option').length);
+    const bibText = $('#bib-preview').value;
+    push('默认按当前列表生成两条（GB/T）', bibText.indexOf('## 参考文献') === 0 && bibText.indexOf('[1] ') > 0 &&
+      bibText.indexOf('Beta') > 0 && bibText.indexOf('Alpha') > 0, bibText.slice(0, 120));
+    push('计数显示 2 条', /2 条/.test(($('#bib-count') || {}).textContent || ''), ($('#bib-count') || {}).textContent);
+
+    setSelect('#bib-style', 'apa');
+    await sleep(60);
+    const apaText = $('#bib-preview').value;
+    push('APA 改为作者字母序（李四在张三前）', apaText.indexOf('Beta') < apaText.indexOf('Alpha 改'),
+      apaText.slice(0, 90));
+
+    setSelect('#bib-format', 'text');
+    await sleep(40);
+    push('纯文本格式不带 Markdown 标题', $('#bib-preview').value.indexOf('## ') < 0, $('#bib-preview').value.slice(0, 40));
+
+    $('#bib-keys').checked = true;
+    $('#bib-keys').dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(40);
+    push('可选附引用键 [@key]', $('#bib-preview').value.indexOf('[@') > 0, $('#bib-preview').value.slice(-80));
+
+    $('#bib-close').click();
+    await sleep(40);
+    push('参考文献弹层可关闭', document.getElementById('bib-modal').hidden);
+
+    const cbA = $('[data-select-key="itA"]');
+    cbA.click();
+    await sleep(60);
+    $('#lib-bulk-bib').click();
+    await waitFor(() => !document.getElementById('bib-modal').hidden, 3000);
+    const selText = $('#bib-preview').value;
+    push('批量栏入口按选中条目生成（只 1 条）', /1 条/.test(($('#bib-count') || {}).textContent || '') &&
+      selText.indexOf('Alpha 改') > 0 && selText.indexOf('Beta') < 0, selText.slice(0, 80));
+    push('范围下拉显示已选数量', /已选条目（1）/.test(($('#bib-scope option[value="selected"]') || {}).textContent || ''),
+      ($('#bib-scope option[value="selected"]') || {}).textContent);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await sleep(40);
+    push('Esc 关闭参考文献弹层', document.getElementById('bib-modal').hidden);
+    $('#lib-bulk-clear').click();
+    await sleep(40);
+  } catch (e) {
+    push('v29 参考文献块未抛错', false, step + ': ' + (e && e.message ? e.message : e));
+  }
+
   // 回到全部条目 → 点卡片进阅读（回归：覆盖层 → 阅读器钩子没被 v10 改坏）
   $('[data-scope="all"]').click();
   await waitFor(() => cards() === 2, 3000);
