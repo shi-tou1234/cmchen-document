@@ -661,6 +661,11 @@ window.LibraryUI = (function () {
     if (el.setSort) el.setSort.value = state.settings.defaultSort || 'added';
     if (el.setAutoIndex) el.setAutoIndex.checked = state.settings.autoIndex !== false;
     if (el.setInvertPages) el.setInvertPages.checked = !!state.settings.invertPages;
+    if (el.setViewMode) el.setViewMode.value = state.settings.viewMode === 'page' ? 'page' : 'scroll';
+    if (window.App && App.setViewMode && state.settings.viewMode) {
+      App.state.viewMode = state.settings.viewMode === 'page' ? 'page' : 'scroll';
+      document.body.classList.toggle('view-page', App.state.viewMode === 'page');
+    }
     if (el.setDataDir) el.setDataDir.textContent = state.settings.dataDir || '（默认 userData）';
     setSettingsStatus('');
     el.settingsModal.hidden = false;
@@ -676,6 +681,7 @@ window.LibraryUI = (function () {
       defaultSort: el.setSort ? el.setSort.value : 'added',
       autoIndex: el.setAutoIndex ? el.setAutoIndex.checked : true,
       invertPages: el.setInvertPages ? el.setInvertPages.checked : false,
+      viewMode: el.setViewMode ? el.setViewMode.value : 'scroll',
     };
     const r = await window.pdfBridge.setSettings(patch);
     if (!r || !r.ok) { setSettingsStatus('保存失败：' + ((r && r.error) || '未知错误')); return; }
@@ -685,6 +691,7 @@ window.LibraryUI = (function () {
     if (el.sort) el.sort.value = state.sort;
     applyTheme(state.settings.theme);
     if (window.App && App.applyInvert) App.applyInvert(!!state.settings.invertPages);
+    if (window.App && App.setViewMode) App.setViewMode(state.settings.viewMode === 'page' ? 'page' : 'scroll');
     await refresh();
     setSettingsStatus('设置已保存');
     window.App && window.App.toast && window.App.toast('设置已保存');
@@ -1035,7 +1042,7 @@ window.LibraryUI = (function () {
       ft: $('lib-ft'), bulk: $('lib-bulk'), bulkCount: $('lib-bulk-count'), selectAll: $('lib-select-all'),
       dup: $('lib-dup'), importRefs: $('lib-import-refs'), exportRefs: $('lib-export-refs'),
       settingsBtn: $('lib-settings'),
-      settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'),
+      settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
       setAutoIndex: $('set-auto-index'), setInvertPages: $('set-invert-pages'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
       setFtStatus: $('set-ft-status'), setIndex: $('set-index'), setReindex: $('set-reindex'),
       dupModal: $('dup-modal'), dupBody: $('dup-body'), dupStatus: $('dup-status'),

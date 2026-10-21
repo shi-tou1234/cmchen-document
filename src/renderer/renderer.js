@@ -24,11 +24,12 @@ const App = window.App = {
     unitMaxW: 1, unitMaxH: 1,
     fileName: '',
     filePath: '',
+    viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
     annos: new Map(),    // pageNum -> shape[]
     rendered: new Map(), // pageNum -> bool
     visible: new Set(),  // 当前视口内的页
     textCache: new Map(), // pageNum -> TextItem[]
-    search: { query: '', results: [], rects: new Map() }, // rects: pageNum -> [{x,y,w,h}]
+    search: { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 }, // rects: pageNum -> [{x,y,w,h}]
   },
   tabs: [],          // v12：多标签页会话（内存里保留原始字节，切换不重新读盘）
   activeTabId: null,
@@ -119,6 +120,9 @@ function freePage(n) {
 // 也把页码带跑了：状态栏页码提前跳、记住的阅读位置也跟着错。
 function setupObserver() {
   App.io = new IntersectionObserver((entries) => {
+    // 单页模式下不用观察器管渲染（隐藏/显示的快照乱序会把刚渲染的页又释放掉），
+    // 那边由 scrollToPage 自己负责。
+    if (App.state.viewMode === 'page') return;
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) {
@@ -131,6 +135,7 @@ function setupObserver() {
   }, { root: App.els.viewer, rootMargin: '600px 0px' });
 
   App.vo = new IntersectionObserver((entries) => {
+    if (App.state.viewMode === 'page') return;
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) App.state.visible.add(n);
@@ -138,6 +143,18 @@ function setupObserver() {
     }
     syncCurrentPage();
   }, { root: App.els.viewer, rootMargin: '0px 0px' });
+}
+
+// 把视口附近的页渲染出来（从单页模式切回连续滚动时用）
+function renderVisiblePages() {
+  const vr = App.els.viewer.getBoundingClientRect();
+  for (let n = 1; n <= App.state.numPages; n++) {
+    const el = App.pageEl(n);
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.bottom < vr.top - 900 || r.top > vr.bottom + 900) continue;
+    if (!App.state.rendered.get(n)) renderPageNum(n);
+  }
 }
 
 // 当前页 = 视口内最靠上的一页（上一页还露着边就仍算上一页，与常见阅读器一致）
@@ -203,7 +220,7 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.rendered = new Map();
     s.visible = new Set();
     s.textCache = new Map();
-    s.search = { query: '', results: [], rects: new Map() };
+    s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
     searchSeq++;              // 作废上一份文档还在跑的搜索
     pageImageCache = new Map();  // 换文档了，图片位置缓存作废
     if (window.Anno && Anno.reset) Anno.reset();  // 撤销栈不能跨文档
@@ -222,6 +239,9 @@ async function loadPdf(data, fileName, smoke, meta) {
     setupObserver();
     await buildPageBlocks(pdfDoc);
     applyLayout();
+    // 阅读方式（连续滚动 / 单页）跟着设置走
+    document.body.classList.toggle('view-page', s.viewMode === 'page');
+    applyPageVisibility(s.currentPage);
     const start = Math.min(pdfDoc.numPages, Math.max(1, m.startPage || 1));
     s.startPage = start;
     scrollToPage(start, true);
@@ -481,6 +501,8 @@ function paintSearchHl(n) {
     d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
     host.appendChild(d);
   }
+  // 重画会冲掉「当前命中」的标记，这里补回来
+  markCurrentHit();
 }
 
 // 全文搜索：遍历所有页文本，命中处生成「跳转结果 + 单位坐标高亮矩形」。
@@ -489,7 +511,7 @@ App.doSearch = async function (queryRaw) {
   const s = App.state;
   const q = String(queryRaw || '').trim().toLowerCase();
   const seq = ++searchSeq;          // 本次搜索的代号：后面的 await 都要先验它
-  s.search = { query: q, results: [], rects: new Map() };
+  s.search = { query: q, results: [], rects: new Map(), hits: [], hitIndex: -1 };
   if (!q || !s.pdfDoc) {
     clearSearchHl();                // 清空时必须把已经画上的高亮擦掉
     renderSearchResults();
@@ -518,6 +540,7 @@ App.doSearch = async function (queryRaw) {
       const list = s.search.rects.get(n) || [];
       list.push(rect);
       s.search.rects.set(n, list);
+      s.search.hits.push({ page: n, rect: rect });
       while (idx !== -1) {
         const snippet = item.str.length > 60 ? item.str.slice(0, 60) + '…' : item.str;
         s.search.results.push({ page: n, snippet });
@@ -556,6 +579,47 @@ function renderSearchResults() {
 function escHtml(t) {
   return String(t == null ? '' : t).replace(/[&<>"']/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- 搜索命中上下跳（F3 / Shift+F3） ----------
+function markCurrentHit() {
+  for (const el of document.querySelectorAll('#pages .page .hl-layer .hl.is-current')) {
+    el.classList.remove('is-current');
+  }
+  const s = App.state;
+  const hits = s.search.hits || [];
+  const i = s.search.hitIndex == null ? -1 : s.search.hitIndex;
+  if (i < 0 || !hits.length) return;
+  const h = hits[i];
+  if (!h) return;
+  const pageEl = App.pageEl(h.page);
+  if (!pageEl) return;
+  const list = s.search.rects.get(h.page) || [];
+  const idx = list.indexOf(h.rect);
+  const nodes = pageEl.querySelectorAll('.hl-layer .hl');
+  if (idx >= 0 && nodes[idx]) nodes[idx].classList.add('is-current');
+}
+
+function gotoSearchHit(step) {
+  const s = App.state;
+  const hits = s.search.hits || [];
+  if (!hits.length) { toast('没有搜索命中'); return; }
+  let i = (s.search.hitIndex == null ? -1 : s.search.hitIndex);
+  i = i + step;
+  if (i < 0) i = hits.length - 1;
+  if (i >= hits.length) i = 0;
+  s.search.hitIndex = i;
+  const h = hits[i];
+  scrollToPage(h.page);
+  const pageEl = App.pageEl(h.page);
+  if (pageEl) {
+    const vr = App.els.viewer.getBoundingClientRect();
+    const pr = pageEl.getBoundingClientRect();
+    const y = pr.top + h.rect.y * (s.scale || 1) - vr.top - vr.height * 0.3;
+    App.els.viewer.scrollTop += y;
+  }
+  markCurrentHit();
+  setStatus('第 ' + (i + 1) + ' / ' + hits.length + ' 处命中 · ' + s.search.query);
 }
 
 // ---------- 侧栏：目录 / 缩略图 / 批注 ----------
@@ -639,9 +703,19 @@ async function buildOutlinePane() {
     for (const node of nodes) {
       const btn = document.createElement('button');
       btn.className = 'outline-node';
-      btn.textContent = node.title || '(无标题)';
+      const title = document.createElement('span');
+      title.className = 'otitle';
+      title.textContent = node.title || '(无标题)';
+      btn.appendChild(title);
       const pg = await destPage(node.dest);
-      if (pg) btn.addEventListener('click', () => scrollToPage(pg));
+      if (pg) {
+        // 顺手标上页码，找章节时不用来回滚
+        const p = document.createElement('span');
+        p.className = 'opg';
+        p.textContent = 'P' + pg;
+        btn.appendChild(p);
+        btn.addEventListener('click', () => scrollToPage(pg));
+      }
       wrap.appendChild(btn);
       if (node.items && node.items.length) wrap.appendChild(await build(node.items, depth + 1));
     }
@@ -1133,10 +1207,47 @@ async function restoreAnnos(filePath) {
 }
 
 // ---------- 翻页导航（滚动定位） ----------
+// 单页模式：只显示当前页，其余页 display:none（靠 .is-current 标记）
+function applyPageVisibility(cur) {
+  const mode = App.state.viewMode;
+  for (let n = 1; n <= App.state.numPages; n++) {
+    const el = App.pageEl(n);
+    if (!el) continue;
+    el.classList.toggle('is-current', mode === 'page' && n === cur);
+  }
+}
+
+// 切换阅读方式：连续滚动 / 单页翻页
+App.setViewMode = function (mode) {
+  const m = mode === 'page' ? 'page' : 'scroll';
+  App.state.viewMode = m;
+  document.body.classList.toggle('view-page', m === 'page');
+  applyPageVisibility(App.state.currentPage);
+  if (m === 'page') {
+    // 单页：把当前页渲染出来，其余页先不渲染（省内存）
+    if (!App.state.rendered.get(App.state.currentPage)) renderPageNum(App.state.currentPage);
+  } else {
+    renderVisiblePages();
+  }
+  relayoutKeepingPosition();
+  try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ viewMode: m }); } catch (_) {}
+  return m;
+};
+
 function scrollToPage(n, instant) {
   n = Math.min(App.state.numPages, Math.max(1, n));
   const el = App.pageEl(n);
   if (!el) return;
+  if (App.state.viewMode === 'page') {
+    // 单页模式：换页就是把「当前页」标记挪过去；上一页的位图顺手释放（只留当前页，内存可控）
+    const prev = App.state.currentPage;
+    applyPageVisibility(n);
+    if (!App.state.rendered.get(n)) renderPageNum(n);
+    if (prev && prev !== n && App.state.rendered.get(prev)) freePage(prev);
+    updateCurrentPage(n);
+    App.els.viewer.scrollTop = 0;
+    return;
+  }
   el.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'start' });
   if (!App.state.rendered.get(n)) renderPageNum(n);
   updateCurrentPage(n);
@@ -1435,6 +1546,7 @@ function bind() {
       }
     }
     if (e.key === 'F11') { App.setFocusMode(); e.preventDefault(); return; }
+    if (e.key === 'F3') { gotoSearchHit(e.shiftKey ? -1 : 1); e.preventDefault(); return; }
     switch (e.key) {
       case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;
       case 'ArrowRight': case 'PageDown': case ' ': nextPage(); e.preventDefault(); break;
@@ -1476,6 +1588,14 @@ function bind() {
       '-',
       { label: '放大看这一块（看图模式）', run: () => { Anno.setTool('image'); toast('点页面任意位置放大查看'); } },
       { label: '复制页码', run: () => { window.pdfBridge.copyText(String(n)); toast('已复制页码 ' + n); } },
+      '-',
+      {
+        label: App.state.viewMode === 'page' ? '改成连续滚动' : '改成单页翻页',
+        run: () => {
+          const m = App.setViewMode(App.state.viewMode === 'page' ? 'scroll' : 'page');
+          toast(m === 'page' ? '已切换到单页翻页' : '已切换到连续滚动');
+        },
+      },
     ]);
   });
   document.addEventListener('click', closeCtxMenu);

@@ -137,6 +137,20 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
   background: var(--bg-input); border: 1px solid var(--accent); border-radius: var(--r-xs); outline: none;
 }
 
+/* 单页翻页模式（v22）：只显示当前页 */
+body.view-page #pages { gap: 0; }
+body.view-page .page { display: none; }
+body.view-page .page.is-current { display: flex; }
+body.view-page #viewer { padding: 16px 20px; }
+
+/* 大纲条目带页码（v22） */
+.outline-node { display: flex; align-items: baseline; gap: 8px; }
+.outline-node .otitle { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline-node .opg { flex: 0 0 auto; font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); }
+
+/* 当前搜索命中（v22） */
+.page .hl-layer .hl.is-current { background: rgba(255, 213, 0, .75); box-shadow: 0 0 0 2px var(--accent); }
+
 /* 专注阅读模式（F11）：收掉所有工具栏，只留页面 */
 body.focus-mode #toolbar,
 body.focus-mode #notetools,
