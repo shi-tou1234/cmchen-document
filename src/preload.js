@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   pathForFile: (file) => {
     try { return webUtils.getPathForFile(file) || ''; } catch (_) { return ''; }
   },
+  // v18：文档快速切换用——最近打开列表 / 直接打开某个路径
+  recentList: () => ipcRenderer.invoke('recent-list'),
+  openPath: (path) => ipcRenderer.invoke('open-path', { path }),
   // 上报当前页码（主进程按文件记住，下次打开回到同一页）
   reportPage: (path, page) => ipcRenderer.send('set-page', { path, page }),
   // 拖拽打开的文件也要进「最近打开」

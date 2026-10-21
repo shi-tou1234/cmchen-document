@@ -1,14 +1,14 @@
-# PDF Reader v11/v12/v13/v14/v15/v16/v17 开发交接文档
+# PDF Reader v11/v12/v13/v14/v15/v16/v17/v18 开发交接文档
 
-> 更新时间：2026-10-20（v17 看图模式：点 PDF 图片放大看原图）  
+> 更新时间：2026-10-21（v18 工具常驻 / 快捷键 / 文档快速切换 / 导入读 PDF 元数据）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点）。**
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 针对「按钮操作不方便、要在页面间来回切换」把工具带常驻、加了工具快捷键与文档快速切换面板，导入时也读 PDF 自带元数据。**
 
 ## 收尾后的一句话现状
 
 - 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 43 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
-- v13 起回归脚本共 22 个（新增 `test-bugfix.js` 21 项断言），v14 起 24 个（新增 `test-cite.js` 33 项、`test-v14.js` 29 项），v17 起 25 个（新增 `test-imageview.js` 14 项），全部通过。
+- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，**v18 起 26 个**（新增 `test-v18.js` 20 项），全部通过。
 - **推送方式（v17 实测有效）**：SteamTools 证书那条路现在不通（`sslCAInfo` 指向 SteamTools CA，直连 GitHub 时证书链对不上，报 `unable to get local issuer certificate`）。hosts 里已没有 github 的劫持，直接用系统证书库即可：
   ```powershell
   git -c http.sslBackend=schannel push -u origin main

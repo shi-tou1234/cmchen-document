@@ -444,58 +444,23 @@ const Anno = window.Anno = (() => {
     return arr[idx];
   }
 
-  // ---- 工具切换 + 绘制下拉 ----
+  // ---- 工具切换（v18：工具常驻一排，不再收进下拉） ----
   function setTool(t) {
     state.tool = t;
     document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image');
     document.body.classList.add('tool-' + t);
     for (const b of document.querySelectorAll('.ntool')) b.classList.toggle('active', b.dataset.tool === t);
-    // 「绘制 ▾」按钮：非选择态高亮，并把当前工具图标回填到按钮上
-    const drawBtn = document.getElementById('draw-btn');
-    const cur = document.getElementById('draw-current');
-    if (drawBtn) drawBtn.classList.toggle('active', t !== 'select');
-    if (cur) {
-      const src = document.querySelector('.ntool[data-tool="' + t + '"] svg')
-        || (t === 'select' ? document.querySelector('.ntool[data-tool="pen"] svg') : null);
-      if (src) cur.innerHTML = src.outerHTML;
-    }
     if (t === 'image') {
       App.toast && App.toast('看图模式：点页面任意位置放大查看');
     }
   }
 
-  function setPop(open) {
-    const pop = document.getElementById('draw-pop');
-    const btn = document.getElementById('draw-btn');
-    if (!pop || !btn) return;
-    pop.hidden = !open;
-    btn.classList.toggle('open', open);
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
-
   function init() {
     bindGlobalPointer();
-    // 工具按钮（含下拉内的绘制工具 + 栏外的选择）
+    // 工具按钮：整排常驻，点一下就切，不用开合下拉
     for (const b of document.querySelectorAll('.ntool')) {
-      b.addEventListener('click', () => { setTool(b.dataset.tool); setPop(false); });
+      b.addEventListener('click', () => setTool(b.dataset.tool));
     }
-    // 「绘制 ▾」开关
-    const drawBtn = document.getElementById('draw-btn');
-    if (drawBtn) drawBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const pop = document.getElementById('draw-pop');
-      setPop(pop ? pop.hidden : false);
-    });
-    // 点击浮层外部 / 按 Esc 关闭
-    document.addEventListener('click', (e) => {
-      const pop = document.getElementById('draw-pop');
-      if (!pop || pop.hidden) return;
-      const wrap = pop.closest('.dd-wrap');
-      if (wrap && !wrap.contains(e.target)) setPop(false);
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { const pop = document.getElementById('draw-pop'); if (pop && !pop.hidden) setPop(false); }
-    });
     document.getElementById('note-color').addEventListener('input', (e) => { state.color = e.target.value; });
     document.getElementById('note-width').addEventListener('change', (e) => { state.width = parseFloat(e.target.value) || 3; });
     document.getElementById('btn-undo').addEventListener('click', undo);

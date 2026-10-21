@@ -7,6 +7,12 @@ if (window.pdfjsLib) {
 
 const $ = (id) => document.getElementById(id);
 
+// 工具快捷键（v18：工具常驻一排，顺手给每个工具一个字母键）
+const TOOL_KEYS = {
+  v: 'image', p: 'pen', h: 'highlight', l: 'line',
+  r: 'rect', a: 'arrow', t: 'text', n: 'note', e: 'eraser',
+};
+
 const App = window.App = {
   state: {
     pdfDoc: null,
@@ -1204,6 +1210,7 @@ function bind() {
 
   // 文献库：暴露打开钩子给覆盖层用；工具栏「库」按钮回到库；启动即显示库
   window.__libOpen = (payload) => openDocument(payload, { newTab: true });
+  if (window.DocSwitch) window.DocSwitch.init();
   if (window.LibraryUI) {
     window.LibraryUI.init();
     const libBtn = $('btn-library');
@@ -1254,12 +1261,14 @@ function bind() {
     // 早先只排除了输入类元素，按钮上按空格会翻页，还顺手 preventDefault 掉按钮的原生激活。
     if (e.target && e.target.closest && e.target.closest('button, a, [role="button"], [contenteditable="true"]')) return;
     if (window.LibraryUI && window.LibraryUI.isOpen()) return; // 库开着时方向键不应在后台翻 PDF
+    if (e.defaultPrevented) return;                          // 弹窗/灯箱已经处理过这个键
     if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { Anno.undo(); e.preventDefault(); return; }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { doSave(); e.preventDefault(); return; }
-    if (e.key === 'v' || e.key === 'V') {
-      Anno.setTool(Anno.state.tool === 'image' ? 'select' : 'image');
-      e.preventDefault();
-      return;
+    // 工具快捷键：v 看图 / p 画笔 / h 荧光 / l 直线 / r 矩形 / a 箭头 / t 文字 / n 便签 / e 橡皮
+    if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+      const tool = TOOL_KEYS[e.key.toLowerCase()];
+      if (tool) { Anno.setTool(tool); e.preventDefault(); return; }
+      if (e.key === 'Escape') { Anno.setTool('select'); e.preventDefault(); return; }
     }
     switch (e.key) {
       case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;

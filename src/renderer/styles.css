@@ -114,25 +114,10 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
 .tbtn.danger { color: var(--danger); }
 .tbtn.danger:hover { background: var(--danger-soft); color: var(--danger); }
 
-/* 绘制下拉 */
-.dd-wrap { position: relative; display: inline-flex; }
-.dd-btn { padding: 5px 8px; gap: 5px; }
-.dd-btn .dd-icon { display: inline-flex; }
-.dd-btn .dd-icon svg { width: 17px; height: 17px; display: block; }
-.dd-btn .chev { width: 13px; height: 13px; opacity: .55; margin-left: -2px; }
-.dd-btn.active { background: var(--ink); color: var(--surface); }
-.dd-btn.open { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule-2); }
-
-.dd-pop {
-  position: absolute; top: calc(100% + 5px); left: 0; z-index: 60;
-  background: var(--surface); border: 1px solid var(--rule-2); border-radius: var(--r-2);
-  box-shadow: var(--shadow-pop); padding: 10px; width: 232px;
-}
-.dd-pop[hidden] { display: none; }
-.dd-tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
-.dd-tools .ntool { justify-content: center; padding: 8px 0; }
-.dd-divider { height: 1px; background: var(--rule); margin: 10px -2px; }
-.dd-style { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
+/* 工具带（v18：工具常驻一排，不再有下拉浮层） */
+#notetools .ntool { padding: 6px 7px; }
+#notetools .nlbl { margin: 0 4px; }
+#notetools #note-width { padding: 3px 4px; }
 
 #toolbar select, #notetools select {
   background: var(--surface); color: var(--ink); border: 1px solid var(--rule-2);
@@ -151,7 +136,7 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
 }
 #page-input:focus { outline: none; border-color: var(--accent); }
 #page-count { min-width: 30px; color: var(--ink-3); font-family: var(--font-mono); font-size: 11px; }
-.filename { font-family: var(--font-serif); font-size: 13px; color: var(--ink-2); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 6px; }
+/* 文件名按钮的样式在「文档快速切换面板」那一节里（v18） */
 
 /* ---------- 阅读区 ---------- */
 #viewer { flex: 1 1 auto; overflow: auto; scroll-behavior: auto; padding: 22px 20px 40px; background: var(--paper); }
@@ -615,6 +600,54 @@ body.tool-eraser .textlayer { pointer-events: none; }
 .dup-row { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; cursor: pointer; }
 .dup-title { font-family: var(--font-serif); font-weight: 600; color: var(--ink); }
 .dup-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+
+/* ---------- 文档快速切换面板（v18） ---------- */
+.filename {
+  font-family: var(--font-serif); font-size: 13px; color: var(--ink-2);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 5px 9px; border: 1px solid transparent; border-radius: var(--r);
+  background: transparent; cursor: pointer; font-family: var(--font-serif);
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.filename:hover { background: var(--surface-2); color: var(--ink); border-color: var(--rule-2); }
+.filename:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+.dsw {
+  position: fixed; top: 44px; right: 14px; z-index: 110;
+  width: 380px; max-height: 70vh; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--rule-2); border-radius: var(--r-2);
+  box-shadow: var(--shadow-pop); overflow: hidden;
+}
+.dsw-head {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.dsw-x { margin-left: auto; border: none; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: var(--r-xs); }
+.dsw-x:hover { background: var(--surface-2); color: var(--ink); }
+.dsw-search {
+  margin: 10px 12px 4px; padding: 6px 9px; font-size: 12.5px; font-family: inherit;
+  color: var(--ink); background: var(--bg-input); border: 1px solid var(--rule-2);
+  border-radius: var(--r); outline: none;
+}
+.dsw-search:focus { border-color: var(--accent); }
+.dsw-list { flex: 1 1 auto; overflow: auto; padding: 4px 6px 10px; }
+.dsw-sec {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--ink-3); padding: 8px 8px 4px;
+}
+.dsw-row {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  border: none; background: transparent; border-radius: var(--r);
+  padding: 6px 8px; cursor: pointer; color: var(--ink); font: inherit; font-size: 12.5px;
+  transition: background .12s ease;
+}
+.dsw-row:hover { background: var(--surface-2); }
+.dsw-name { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-serif); }
+.dsw-sub { flex: 1 1 auto; color: var(--ink-3); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsw-pg { margin-left: auto; color: var(--accent-text); font-size: 10.5px; font-family: var(--font-mono); flex: 0 0 auto; }
+.dsw-empty { padding: 18px 10px; text-align: center; color: var(--ink-3); font-size: 12px; }
 
 /* ---------- 看图模式 + 图片灯箱（v17） ---------- */
 body.tool-image .page { cursor: zoom-in; }

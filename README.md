@@ -46,11 +46,13 @@ npm start
 | `Ctrl+滚轮` | 缩放 | `Ctrl+0` | 适应宽度 |
 | `←` `→` `PgUp` `PgDn` `空格` | 翻页 | `Home` `End` | 首页 / 末页 |
 | `Ctrl+Z` | 撤销标注 | `Ctrl+S` | 导出带标注的 PDF 副本 |
-| `V` | 看图模式开关 | `Esc` | 取消输入 / 关闭弹窗 / 收起文献库 |
+| `V` `P` `H` `L` `R` `A` `T` `N` `E` | 切换工具（看图/画笔/荧光/直线/矩形/箭头/文字/便签/橡皮） | `Esc` | 回选择 / 取消输入 / 关闭弹窗 |
 
 文字批注：`Enter` 完成、`Shift+Enter` 换行、`Esc` 取消。
 
 看图：按 `V` 或点工具栏第二个按钮（放大镜）进入「看图」模式，再点页面任意位置即弹灯箱——点到位图给**原图像素**（照片放多大都不糊），点到位图之外给那一块的**高清重渲染**（矢量手写、插图同样清晰）。灯箱里滚轮缩放、拖拽平移、`←` `→` 换图、`Esc` 关闭。
+
+换文档：点工具栏右上角的文件名，弹出「切换文档」面板（当前标签 / 最近打开 / 文献库，可搜索），点一下直接换，不用回文献库。
 
 ---
 
@@ -94,7 +96,8 @@ npm start
 | `node scripts/test-reader-plus.js` | 阅读器端到端：文本层 / 搜索 / 缩略图 / 标注恢复（17） |
 | `node scripts/test-bugfix.js` | 跨文档撤销隔离 / 页码指示 / 搜索清空 / 库退路 / 缩放 / 键盘（21） |
 | `node scripts/test-v14.js` | 标签选择器 / 复制引用 / 批注多格式导出（29） |
-| `node scripts/test-imageview.js` | 看图模式：定位内嵌位图 → 灯箱放大 / 缩放 / 翻页 / 关闭（14） |
+| `node scripts/test-imageview.js` | 看图模式：定位内嵌位图 → 灯箱放大 / 缩放 / 翻页 / 关闭（16） |
+| `node scripts/test-v18.js` | 工具带常驻 / 工具快捷键 / 导入读 PDF 元数据 / 文档快速切换（20） |
 | `node scripts/test-packaged.js` | 打包产物冒烟（15） |
 | `electron.exe scripts/test-pen.js` | 画笔：串页 / 悬挂 / 误点 / 抽稀平滑 / 多行 / 竞态 |
 | `electron.exe scripts/test-real-input.js` | 真实鼠标（走命中测试）——合成事件抓不到的那类问题 |
@@ -155,11 +158,13 @@ pdf-reader/
 │  ├─ settings.js        # 设置读写
 │  ├─ formats.js         # BibTeX / RIS
 │  ├─ metadata.js        # DOI / arXiv 抓取
+│  ├─ pdfmeta.js         # 读 PDF 自带元数据（Title/Author），导入时自动填表
 │  ├─ cite.js            # 引用格式化（GB/T 7714 + APA）
 │  ├─ preload.js         # contextBridge
 │  └─ renderer/          # index.html · styles.css · renderer.js · library-ui.js
 │                        # annotations.js · selection.js · lightbox.js · pdfimages.js
-├─ scripts/              # 24 个回归脚本 + 探针 + 打包/图标/样本工具
+│                        # docswitch.js
+├─ scripts/              # 26 个回归脚本 + 探针 + 打包/图标/样本工具
 └─ assets/               # sample.pdf · icon.ico …
 ```
 

@@ -7,6 +7,7 @@ const settings = require('./settings.js');
 const fulltext = require('./fulltext.js');
 const formats = require('./formats.js');
 const metadata = require('./metadata.js');
+const pdfmeta = require('./pdfmeta.js');
 
 let win = null;
 
@@ -509,7 +510,18 @@ async function exportRefsViaDialog() {
 // ---------- 本地库 IPC ----------
 // 只回传可结构化克隆的纯数据；open-item 复用 readPdfPayload，渲染层拿到字节自己 loadPdf。
 ipcMain.handle('lib-summary', () => library.summary());
-ipcMain.handle('lib-add-pdf', (_e, info) => {
+// v18：最近打开列表（文档快速切换面板用）
+ipcMain.handle('recent-list', () => recentList().map((r) => ({
+  path: r.path, name: r.name || path.basename(r.path), page: r.page || 0,
+})));
+// v18：直接打开某个路径（从快速切换面板点「最近打开」时用）
+ipcMain.handle('open-path', (_e, info) => {
+  const p = info && info.path;
+  if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
+  openFromPath(p);
+  return { ok: true };
+});
+ipcMain.handle('lib-add-pdf', async (_e, info) => {
   const p = info && info.path;
   if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
   const o = (info && info.opts) || {};
@@ -528,9 +540,19 @@ ipcMain.handle('lib-add-pdf', (_e, info) => {
       return { ok: true, item: exist, deduped: true };
     }
   }
-  const item = library.addPdf(p, o);
+  // v18：读 PDF 自带元数据填标题/作者（填不上再回退到文件名猜）
+  let meta = {};
+  try { meta = await pdfmeta.readMeta(p); } catch (_) { meta = {}; }
+  const title = o.title || pdfmeta.usableTitle(meta.title);
+  const creators = Array.isArray(o.creators) && o.creators.length
+    ? o.creators
+    : (pdfmeta.usableAuthor(meta.author) ? [meta.author] : []);
+  const item = library.addPdf(p, Object.assign({}, o, {
+    title: title || undefined,
+    creators,
+  }));
   fulltext.indexOne(item).catch((err) => console.warn('[fulltext] index add failed:', err && err.message));
-  return { ok: true, item };
+  return { ok: true, item, meta: { title: meta.title || '', author: meta.author || '' } };
 });
 ipcMain.handle('lib-open-item', (_e, info) => {
   const it = info && library.findItem(info.key);
