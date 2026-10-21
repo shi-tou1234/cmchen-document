@@ -12,11 +12,14 @@ module.exports = `(async () => {
 
   // ---------- 1. 工具带常驻 ----------
   const tools = $$('#notetools .ntool');
-  push('工具带常驻一排（≥9 个工具）', tools.length >= 9, 'n=' + tools.length);
-  const want = ['select', 'image', 'pen', 'highlight', 'line', 'rect', 'arrow', 'text', 'note', 'eraser'];
-  const have = tools.map((b) => b.dataset.tool);
+  const inline = $$('#notetools > .ntool');
+  push('常用工具常驻工具带（≥6 个）', inline.length >= 6, 'n=' + inline.length);
+  const want = ['select', 'image', 'pen', 'highlight', 'text', 'note'];
+  const have = inline.map((b) => b.dataset.tool);
   push('常用工具都在工具带上', want.every((w) => have.indexOf(w) >= 0), have.join(','));
-  push('不再有「绘制 ▾」下拉', !$('#draw-btn') && !$('#draw-pop'), 'draw-btn=' + !!$('#draw-btn'));
+  const moreTools = $$('#more-pop .ntool').map((b) => b.dataset.tool);
+  push('罕见工具收进「更多」浮层', moreTools.length >= 4 && moreTools.indexOf('line') >= 0, moreTools.join(','));
+  push('「更多」按钮存在', !!$('#more-btn'));
   push('颜色/粗细直接摆在工具带上', !!$('#note-color') && !!$('#note-width'));
 
   // ---------- 2. 工具快捷键 ----------
@@ -30,7 +33,7 @@ module.exports = `(async () => {
   key('Escape'); await sleep(80);
   push('按 Esc 回到选择', document.body.classList.contains('tool-select'), document.body.className);
   // 点按钮也能切
-  const rectBtn = $('#notetools .ntool[data-tool="rect"]');
+  const rectBtn = $('#notetools .ntool[data-tool="rect"]') || $('#more-pop .ntool[data-tool="rect"]');
   if (rectBtn) rectBtn.click();
   await sleep(80);
   push('点工具按钮即切换', document.body.classList.contains('tool-rect'), document.body.className);

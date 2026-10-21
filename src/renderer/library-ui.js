@@ -17,6 +17,7 @@ window.LibraryUI = (function () {
     selectedKeys: new Set(),
     tagFilter: new Set(),   // v14：标签选择器（多选，命中任一即可）
     citeStyle: 'gbt7714',   // v14：引用样式
+    secOpen: { searches: false, tags: false },  // v19：进阶分区默认折叠（新手少看两眼）
     ft: { query: '', results: [], stats: null, loading: false, error: '' },
     settings: { theme: 'light', defaultSort: 'added', autoIndex: true, dataDir: '' },
     dupGroups: [],
@@ -109,12 +110,25 @@ window.LibraryUI = (function () {
   function render() {
     renderSidebar();
     renderTagList();
+    renderSecToggles();
     renderGrid();
     renderDetail();
     renderBulk();
     renderFt();
     if (el.sort) el.sort.value = state.sort;
     if (el.emptyTrash) el.emptyTrash.hidden = !isTrash();
+  }
+
+  // 折叠分区（智能收藏集 / 标签）：默认收起，点标题展开
+  function renderSecToggles() {
+    for (const btn of document.querySelectorAll('.lib-sec-toggle')) {
+      const key = btn.dataset.sec;
+      const open = !!state.secOpen[key];
+      btn.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      const target = key === 'tags' ? el.tagList : el.searches;
+      if (target) target.hidden = !open;
+    }
   }
 
   // ---------- 标签选择器（v14） ----------
@@ -1002,6 +1016,14 @@ window.LibraryUI = (function () {
       scheduleFulltext();
     });
     el.import.addEventListener('click', importPdf);
+    // v19：折叠分区（智能收藏集 / 标签）
+    for (const btn of document.querySelectorAll('.lib-sec-toggle')) {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.sec;
+        state.secOpen[key] = !state.secOpen[key];
+        renderSecToggles();
+      });
+    }
     // v14：引用样式切换 + 复制引用
     if (el.ld.citeStyle) el.ld.citeStyle.addEventListener('change', () => {
       state.citeStyle = el.ld.citeStyle.value || 'gbt7714';

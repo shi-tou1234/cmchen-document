@@ -173,5 +173,42 @@ try {
 } catch (e) { threw = true; }
 ok('坏数据/空输入不抛错', !threw);
 
+// ---------- CSL-JSON（v19：Zotero 也能导出这个格式） ----------
+const cslText = JSON.stringify([{
+  id: 'smith2020',
+  type: 'article-journal',
+  title: 'Neural Networks for PDF Reading',
+  author: [{ family: 'Smith', given: 'John' }, { literal: 'ACME Research Group' }],
+  issued: { 'date-parts': [[2020]] },
+  'container-title': 'Journal of Testing',
+  volume: '12', issue: '3', page: '45-67',
+  DOI: '10.1000/xyz.123', URL: 'https://example.org/a',
+  abstract: 'An abstract.', language: 'en',
+  keyword: ['machine learning', 'PDF'],
+}], null, 2);
+ok('按扩展名识别 CSL-JSON', formats.detectFormat(cslText, 'x.json') === 'csljson');
+ok('无扩展名按内容识别 CSL-JSON', formats.detectFormat(cslText, 'x.txt') === 'csljson');
+const cslRecs = formats.parseCslJson(cslText);
+ok('CSL-JSON 解析出条目', cslRecs.length === 1, 'n=' + cslRecs.length);
+ok('CSL-JSON 类型映射', cslRecs[0].itemType === 'journalArticle', cslRecs[0].itemType);
+ok('CSL-JSON 标题', cslRecs[0].title === 'Neural Networks for PDF Reading', cslRecs[0].title);
+ok('CSL-JSON 作者 family+given 合并', cslRecs[0].creators[0] === 'Smith, John', JSON.stringify(cslRecs[0].creators));
+ok('CSL-JSON 作者 literal 原样', cslRecs[0].creators[1] === 'ACME Research Group', JSON.stringify(cslRecs[0].creators));
+ok('CSL-JSON 日期取年', cslRecs[0].year === '2020', cslRecs[0].year);
+ok('CSL-JSON 容器名→出版物', cslRecs[0].publication === 'Journal of Testing', cslRecs[0].publication);
+ok('CSL-JSON 卷期页码', cslRecs[0].volume === '12' && cslRecs[0].issue === '3' && cslRecs[0].pages === '45-67');
+ok('CSL-JSON DOI/URL', cslRecs[0].doi === '10.1000/xyz.123' && cslRecs[0].url === 'https://example.org/a');
+ok('CSL-JSON 关键词切数组', JSON.stringify(cslRecs[0].tags) === '["machine learning","PDF"]', JSON.stringify(cslRecs[0].tags));
+const cslOut = formats.recordsToCslJson(cslRecs);
+const cslBack = JSON.parse(cslOut);
+ok('CSL-JSON 导出是数组', Array.isArray(cslBack) && cslBack.length === 1);
+ok('CSL-JSON 导出 type', cslBack[0].type === 'article-journal', cslBack[0].type);
+ok('CSL-JSON 导出用 literal 作者', !!(cslBack[0].author && cslBack[0].author[0].literal), JSON.stringify(cslBack[0].author));
+ok('CSL-JSON 导出 date-parts', JSON.stringify(cslBack[0].issued) === '{"date-parts":[[2020]]}', JSON.stringify(cslBack[0].issued));
+ok('CSL-JSON 往返标题一致', cslBack[0].title === cslRecs[0].title);
+let cslThrew = false;
+try { formats.parseCslJson('{ 坏 json'); } catch (e) { cslThrew = true; }
+ok('CSL-JSON 坏数据被 parseRefs 兜住', !formats.parseRefs('{ 坏 json', 'x.json').records.length);
+
 console.log('[formats] ' + (fail ? 'FAIL (' + fail + '/' + (pass + fail) + ')' : 'PASS (' + pass + ')'));
 process.exit(fail ? 2 : 0);

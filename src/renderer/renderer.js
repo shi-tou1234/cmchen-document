@@ -586,6 +586,8 @@ function initSidebar() {
     if (del) { deleteAnno(+del.dataset.annoPage, +del.dataset.annoIdx); return; }
     const cmt = e.target.closest('[data-anno-comment]');
     if (cmt) { editAnnoComment(+cmt.dataset.annoPage, +cmt.dataset.annoIdx); return; }
+    const tagBtn = e.target.closest('[data-anno-tag]');
+    if (tagBtn) { e.stopPropagation(); addAnnoTag(tagBtn, +tagBtn.dataset.annoPage, +tagBtn.dataset.annoIdx); return; }
     const jump = e.target.closest('[data-anno-jump]');
     if (jump) scrollToPage(+jump.dataset.annoJump);
     const ex = e.target.closest('[data-note-fmt]');
@@ -691,7 +693,13 @@ function markCurrentThumb() {
   for (const t of $('sb-thumbs').querySelectorAll('.thumb')) t.classList.toggle('current', +t.dataset.page === cur);
 }
 
-// 批注面板：当前文档全部标注列表（点击跳页 / 单条删除 / 导出笔记）
+// 批注面板：当前文档全部标注列表（点击跳页 / 单条删除 / 加标签 / 搜索 / 导出）
+let annoQuery = '';
+
+function annoTagsOf(sh) {
+  return Array.isArray(sh && sh.tags) ? sh.tags.filter(Boolean) : [];
+}
+
 function refreshAnnoPane() {
   const host = $('sb-annos');
   if (!host) return;
@@ -700,7 +708,16 @@ function refreshAnnoPane() {
   if (!list) {
     const l = document.createElement('div');
     l.id = 'anno-list';
-    // v14：批注可导出成 Markdown / CSV / 纯文本三种格式
+    const search = document.createElement('input');
+    search.id = 'anno-search';
+    search.type = 'search';
+    search.className = 'anno-search';
+    search.placeholder = '搜批注 / 评论';
+    search.addEventListener('input', (e) => {
+      annoQuery = String(e.target.value || '').trim().toLowerCase();
+      refreshAnnoPane();
+    });
+    // v19：批注导出可挑格式
     const bar = document.createElement('div');
     bar.className = 'anno-export-bar';
     bar.innerHTML =
@@ -708,11 +725,14 @@ function refreshAnnoPane() {
       '<button class="tbtn sb-export-note" data-note-fmt="md" title="导出为 Markdown（可直接贴进笔记软件）">MD</button>' +
       '<button class="tbtn sb-export-note" data-note-fmt="csv" title="导出为 CSV（表格）">CSV</button>' +
       '<button class="tbtn sb-export-note" data-note-fmt="txt" title="导出为纯文本">TXT</button>';
-    host.appendChild(l); host.appendChild(bar);
+    host.appendChild(search);
+    host.appendChild(l);
+    host.appendChild(bar);
   }
   const s = App.state;
   const rows = [];
   const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
+  const q = annoQuery;
   for (const [n, shapes] of s.annos) {
     shapes.forEach((sh, i) => {
       let label;
@@ -724,21 +744,65 @@ function refreshAnnoPane() {
       } else {
         label = toolName[sh.tool] || sh.tool;
       }
-      rows.push({ n, i, sh, label });
+      const tags = annoTagsOf(sh);
+      // 搜索：批注文字、评论、标签都参与匹配
+      if (q) {
+        const hay = (String(label) + ' ' + String(sh.comment || '') + ' ' + tags.join(' ')).toLowerCase();
+        if (hay.indexOf(q) < 0) return;
+      }
+      rows.push({ n, i, sh, label, tags });
     });
   }
   const l2 = host.querySelector('#anno-list');
-  if (!rows.length) { l2.innerHTML = '<div class="sb-empty">还没有标注。选中文字可高亮/评论，或用「绘制 ▾」里的工具画点什么。</div>'; return; }
+  if (!rows.length) {
+    l2.innerHTML = '<div class="sb-empty">' + (q ? '没有匹配的批注' : '还没有标注。选中文字可高亮/评论，或用「绘制 ▾」里的工具画点什么。') + '</div>';
+    return;
+  }
   l2.innerHTML = rows.map((r) =>
     '<div class="anno-item" data-anno-jump="' + r.n + '" title="跳到第 ' + r.n + ' 页">' +
     '<span class="dot" style="background:' + r.sh.color + '"></span>' +
     '<span class="txt">' + escHtml(r.label) + '</span>' +
+    (r.tags.length ? '<span class="anno-tags">' + r.tags.map((t) => '<span class="anno-tag">' + escHtml(t) + '</span>').join('') + '</span>' : '') +
     '<span class="pg">P' + r.n + '</span>' +
     (r.sh.tool === 'mark'
       ? '<button class="edit" data-anno-comment="1" data-anno-page="' + r.n + '" data-anno-idx="' + r.i + '" title="编辑评论">✎</button>'
       : '') +
+    '<button class="tagbtn" data-anno-tag="1" data-anno-page="' + r.n + '" data-anno-idx="' + r.i + '" title="给这条批注加标签">🏷</button>' +
     '<button class="del" data-anno-del="1" data-anno-page="' + r.n + '" data-anno-idx="' + r.i + '" title="删除这条">✕</button>' +
     '</div>').join('');
+}
+
+// 给一条批注加标签（点 🏷 弹出小输入框）
+function addAnnoTag(anchor, page, idx) {
+  const arr = App.state.annos.get(page);
+  const sh = arr && arr[idx];
+  if (!sh) return;
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'anno-tag-input';
+  inp.placeholder = '标签，回车确认';
+  const done = (commit) => {
+    if (commit) {
+      const v = inp.value.trim();
+      if (v) {
+        const tags = annoTagsOf(sh);
+        if (tags.indexOf(v) < 0) {
+          tags.push(v);
+          Anno.updateShape(page, idx, { tags });
+          App.toast && App.toast('已加标签：' + v);
+        }
+      }
+    }
+    if (inp.isConnected) inp.replaceWith(anchor);
+    refreshAnnoPane();
+  };
+  anchor.replaceWith(inp);
+  inp.focus();
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); done(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); done(false); }
+  });
+  inp.addEventListener('blur', () => done(false));
 }
 
 // 选区高亮的评论可随时补写/修改；空评论等于纯高亮
@@ -1329,6 +1393,26 @@ function bind() {
 
   Anno.init();
   if (window.SelectionUI) window.SelectionUI.init();
+  initHintBar();
+}
+
+// 首次上手提示：只出现一次（记在 settings.json）
+function initHintBar() {
+  const bar = $('hint-bar');
+  if (!bar) return;
+  const close = () => {
+    bar.hidden = true;
+    try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ hintSeen: true }); } catch (_) {}
+  };
+  const btn = $('hint-x');
+  if (btn) btn.addEventListener('click', close);
+  Promise.resolve()
+    .then(() => (window.pdfBridge && window.pdfBridge.getSettings ? window.pdfBridge.getSettings() : null))
+    .then((st) => {
+      if (!st || st.hintSeen) { bar.hidden = true; return; }
+      bar.hidden = false;
+    })
+    .catch(() => { bar.hidden = true; });
 }
 
 document.addEventListener('DOMContentLoaded', bind);

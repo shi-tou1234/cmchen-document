@@ -62,7 +62,7 @@
     <button id="tab-new" class="tbtn tab-new" title="打开新标签页">＋</button>
   </div>
 
-  <!-- 标注工具栏：工具常驻一排（v18：不再收进下拉，换工具不用来回开合） -->
+  <!-- 标注工具栏：常用工具常驻一排，罕见工具收进「更多」（选完不自动收起，可连点几个） -->
   <div id="notetools">
     <button class="ntool tbtn" data-tool="select" title="选择 / 浏览 (Esc)">
       <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 3l12 8-5.2.8 3.1 5.6-2.3 1.3-3.1-5.7L6 18z"/></svg>
@@ -77,24 +77,34 @@
     <button class="ntool tbtn" data-tool="highlight" title="荧光笔 (H)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6-8 8H6v-6z"/><path d="M4 20h11"/></svg>
     </button>
-    <button class="ntool tbtn" data-tool="line" title="直线 (L)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/></svg>
-    </button>
-    <button class="ntool tbtn" data-tool="rect" title="矩形 (R)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg>
-    </button>
-    <button class="ntool tbtn" data-tool="arrow" title="箭头 (A)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M12 5h7v7"/></svg>
-    </button>
     <button class="ntool tbtn" data-tool="text" title="文字 (T)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19l6-13 6 13"/><path d="M8.6 13.5h6.8"/></svg>
     </button>
     <button class="ntool tbtn" data-tool="note" title="便签（点击页面落一个气泡便签）(N)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v10l-6 6H5z"/><path d="M13 20v-6h6"/></svg>
     </button>
-    <button class="ntool tbtn" data-tool="eraser" title="橡皮擦 (E)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5l7-7 6 6-4.5 4.5H8z"/><path d="M4 20.5h16"/></svg>
-    </button>
+    <div class="dd-wrap">
+      <button id="more-btn" class="dd-btn tbtn" title="更多工具：直线 / 矩形 / 箭头 / 橡皮" aria-haspopup="true" aria-expanded="false">
+        <span>更多</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="more-pop" class="dd-pop" hidden>
+        <div class="dd-tools">
+          <button class="ntool tbtn" data-tool="line" title="直线 (L)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="rect" title="矩形 (R)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="arrow" title="箭头 (A)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M12 5h7v7"/></svg>
+          </button>
+          <button class="ntool tbtn" data-tool="eraser" title="橡皮擦 (E)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5l7-7 6 6-4.5 4.5H8z"/><path d="M4 20.5h16"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
     <span class="nsep"></span>
     <label class="nlbl" title="标注颜色"><input id="note-color" type="color" value="#e53935" /></label>
     <label class="nlbl">粗细
@@ -117,6 +127,12 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>
       <span>导出副本</span>
     </button>
+  </div>
+
+  <!-- 首次上手提示（只出现一次，记在本地） -->
+  <div id="hint-bar" hidden>
+    <span>把 PDF 拖进窗口就能读；选中文字可高亮，上面的工具栏可以画批注。资料管理在左上角「库」。</span>
+    <button id="hint-x" title="知道了">知道了</button>
   </div>
 
   <!-- 侧栏：目录 / 缩略图 / 批注列表 -->
@@ -153,10 +169,12 @@
       <div id="lib-collections"></div>
       <button id="lib-new-coll" class="tbtn lib-side-btn">＋ 新建收藏集</button>
       <div class="lib-side-sep"></div>
+      <button class="lib-sec-toggle" data-sec="searches" aria-expanded="false" title="保存过的搜索条件">智能收藏集<span class="chev">▸</span></button>
       <div id="lib-searches"></div>
       <button id="lib-save-search" class="tbtn lib-side-btn" hidden>＋ 保存当前搜索</button>
       <div class="lib-side-sep"></div>
-      <div id="lib-tags" class="lib-tags"></div>
+      <button class="lib-sec-toggle" data-sec="tags" aria-expanded="false" title="按标签筛选条目">标签<span class="chev">▸</span></button>
+      <div id="lib-tags" class="lib-tags" hidden></div>
     </aside>
     <section id="lib-main">
       <header id="lib-head">
@@ -232,6 +250,9 @@
             <select id="ld-cite-style" title="引用样式">
               <option value="gbt7714">GB/T 7714-2015</option>
               <option value="apa">APA 7</option>
+              <option value="chicago">Chicago 17</option>
+              <option value="ieee">IEEE</option>
+              <option value="mla">MLA 9</option>
             </select>
             <button id="ld-cite-copy" class="ld-mini">复制引用</button>
             <span id="ld-cite-status" class="ld-hint"></span>

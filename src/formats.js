@@ -248,14 +248,21 @@ function detectFormat(text, filename) {
   const ext = String(filename || '').toLowerCase().replace(/^.*\./, '');
   if (ext === 'bib' || ext === 'bibtex') return 'bibtex';
   if (ext === 'ris') return 'ris';
+  if (ext === 'json') return 'csljson';
   if (/^\s*@[A-Za-z]+\s*[{(]/m.test(text)) return 'bibtex';
   if (/^\s*TY\s{1,2}-/m.test(text)) return 'ris';
+  if (/^\s*[\[{]/.test(text) && /"type"\s*:/.test(text)) return 'csljson';
   return 'bibtex';
 }
 
 function parseRefs(text, filename) {
   const format = detectFormat(text, filename);
-  return { format, records: format === 'ris' ? parseRis(text) : parseBibtex(text) };
+  if (format === 'ris') return { format, records: parseRis(text) };
+  if (format === 'csljson') {
+    try { return { format, records: parseCslJson(text) }; }
+    catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
+  }
+  return { format, records: parseBibtex(text) };
 }
 
 const BIB_TYPE = {
@@ -336,8 +343,78 @@ function recordsToRis(records) {
   return out.join('\n');
 }
 
+// ---------- CSL-JSON（citeproc 的标准数据格式，Zotero 也能导出） ----------
+// 与 BibTeX/RIS 的区别：字段是结构化的（作者分 family/given、日期是 date-parts）。
+// 本项目的作者是逗号分隔的纯字符串，所以导出时用 CSL 允许的 {"literal": "..."} 形式，
+// 不假装有姓/名结构。
+const CSL_TYPE = {
+  journalArticle: 'article-journal', conferencePaper: 'paper-conference', book: 'book',
+  thesis: 'thesis', report: 'report', webpage: 'webpage', document: 'document',
+};
+const CSL_TYPE_BACK = {
+  'article-journal': 'journalArticle', 'article-magazine': 'journalArticle',
+  'paper-conference': 'conferencePaper', proceedings: 'conferencePaper',
+  book: 'book', thesis: 'thesis', report: 'report', webpage: 'webpage',
+  manuscript: 'document', document: 'document', article: 'document', paper: 'document',
+};
+
+function cslToRecord(o) {
+  if (!o || typeof o !== 'object') return null;
+  const rec = {
+    itemType: CSL_TYPE_BACK[String(o.type || '').toLowerCase()] || 'document',
+    title: s(o.title),
+    creators: [],
+    year: '',
+    publication: s(o['container-title'] || o['event-title'] || o.publisher || o['publisher-place'] || o.genre),
+    volume: s(o.volume), issue: s(o.issue), pages: s(o.page),
+    doi: s(o.DOI), url: s(o.URL), abstract: s(o.abstract), note: s(o.note),
+    language: s(o.language), tags: [],
+  };
+  const aus = Array.isArray(o.author) ? o.author : (o.author ? [o.author] : []);
+  for (const a of aus) {
+    if (!a || typeof a !== 'object') continue;
+    if (a.literal) { rec.creators.push(s(a.literal)); continue; }
+    const fam = s(a.family), giv = s(a.given);
+    const name = fam && giv ? (fam + ', ' + giv) : (fam || giv);
+    if (name) rec.creators.push(name);
+  }
+  const parts = o.issued && o.issued['date-parts'] && o.issued['date-parts'][0];
+  if (parts && parts.length) rec.year = String(parts[0]);
+  if (Array.isArray(o.keyword)) rec.tags = o.keyword.map(s).filter(Boolean);
+  else if (o.keyword) rec.tags = String(o.keyword).split(/[,;]/).map((x) => x.trim()).filter(Boolean);
+  return (rec.title || rec.creators.length) ? rec : null;
+}
+
+function parseCslJson(text) {
+  const data = JSON.parse(String(text || '').replace(/^﻿/, ''));
+  const arr = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : [data]);
+  return arr.map(cslToRecord).filter(Boolean);
+}
+
+function recordsToCslJson(records) {
+  const out = (records || []).map((r) => {
+    const o = { id: r.key, type: CSL_TYPE[r.itemType] || 'document', title: s(r.title) };
+    if ((r.creators || []).length) o.author = r.creators.map((c) => ({ literal: c }));
+    const y = yearOf(r.year);
+    if (y) o.issued = { 'date-parts': [[Number(y) || y]] };
+    if (s(r.publication)) o['container-title'] = s(r.publication);
+    if (s(r.volume)) o.volume = s(r.volume);
+    if (s(r.issue)) o.issue = s(r.issue);
+    if (s(r.pages)) o.page = s(r.pages);
+    if (s(r.doi)) o.DOI = s(r.doi);
+    if (s(r.url)) o.URL = s(r.url);
+    if (s(r.abstract)) o.abstract = s(r.abstract);
+    if (s(r.note)) o.note = s(r.note);
+    if (s(r.language)) o.language = s(r.language);
+    if ((r.tags || []).length) o.keyword = r.tags.slice();
+    return o;
+  });
+  return JSON.stringify(out, null, 2);
+}
+
 module.exports = {
   parseBibtex, parseRis, parseRefs, detectFormat,
-  recordsToBibtex, recordsToRis,
+  recordsToBibtex, recordsToRis, parseCslJson, recordsToCslJson,
   _bibToRecord: bibToRecord, _risToRecord: risToRecord, _splitAuthors: splitAuthors,
+  _cslToRecord: cslToRecord,
 };

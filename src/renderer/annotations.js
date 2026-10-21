@@ -444,7 +444,7 @@ const Anno = window.Anno = (() => {
     return arr[idx];
   }
 
-  // ---- 工具切换（v18：工具常驻一排，不再收进下拉） ----
+  // ---- 工具切换 + 「更多」浮层 ----
   function setTool(t) {
     state.tool = t;
     document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image');
@@ -455,12 +455,43 @@ const Anno = window.Anno = (() => {
     }
   }
 
+  // 「更多」浮层：选完工具**不自动收起**（可以连着点几个），点外部或 Esc 才关
+  function setPop(open) {
+    const pop = document.getElementById('more-pop');
+    const btn = document.getElementById('more-btn');
+    if (!pop || !btn) return;
+    pop.hidden = !open;
+    btn.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  function popOpen() {
+    const pop = document.getElementById('more-pop');
+    return !!(pop && !pop.hidden);
+  }
+
   function init() {
     bindGlobalPointer();
-    // 工具按钮：整排常驻，点一下就切，不用开合下拉
+    // 工具按钮：点一下就切（浮层里的也不会收起浮层）
     for (const b of document.querySelectorAll('.ntool')) {
       b.addEventListener('click', () => setTool(b.dataset.tool));
     }
+    // 「更多」开关
+    const moreBtn = document.getElementById('more-btn');
+    if (moreBtn) moreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const pop = document.getElementById('more-pop');
+      setPop(pop ? pop.hidden : false);
+    });
+    // 点浮层外部 / 按 Esc 关闭
+    document.addEventListener('click', (e) => {
+      if (!popOpen()) return;
+      const pop = document.getElementById('more-pop');
+      const wrap = pop.closest('.dd-wrap');
+      if (wrap && !wrap.contains(e.target)) setPop(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && popOpen()) { e.preventDefault(); setPop(false); }
+    });
     document.getElementById('note-color').addEventListener('input', (e) => { state.color = e.target.value; });
     document.getElementById('note-width').addEventListener('change', (e) => { state.width = parseFloat(e.target.value) || 3; });
     document.getElementById('btn-undo').addEventListener('click', undo);

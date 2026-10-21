@@ -13,6 +13,7 @@ const DEFAULTS = {
   theme: 'light',         // light | dark | system
   autoIndex: true,        // 启动后自动建全文索引
   restoreTabs: false,     // 预留：下次启动恢复标签页（本版不启用）
+  hintSeen: false,        // v19：首次上手提示是否已经看过
 };
 
 const SORTS = new Set(['added', 'modified', 'title', 'year']);
@@ -45,6 +46,7 @@ function sanitize(raw) {
   if (THEMES.has(src.theme)) out.theme = src.theme;
   if (typeof src.autoIndex === 'boolean') out.autoIndex = src.autoIndex;
   if (typeof src.restoreTabs === 'boolean') out.restoreTabs = src.restoreTabs;
+  if (typeof src.hintSeen === 'boolean') out.hintSeen = src.hintSeen;
   return out;
 }
 

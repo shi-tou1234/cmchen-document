@@ -90,7 +90,27 @@ ok('format(apa) 走 APA', Cite.format(journal, 'apa') === Cite.apa(journal));
 ok('format 未知样式退回 GB/T', Cite.format(journal, 'nope') === Cite.gbt(journal));
 ok('styleLabel 有中文名', Cite.styleLabel('gbt7714') === 'GB/T 7714-2015', Cite.styleLabel('gbt7714'));
 ok('typeLabel 有中文名', Cite.typeLabel(journal) === '期刊文章', Cite.typeLabel(journal));
-ok('样式表有两项', Cite.STYLES.length === 2, String(Cite.STYLES.length));
+ok('样式表有 5 种', Cite.STYLES.length === 5, String(Cite.STYLES.length));
+
+// ---------- 新增样式（v19：Chicago / IEEE / MLA） ----------
+s = Cite.chicago(journal);
+ok('Chicago 含年份与标题引号', s.indexOf('2020.') > 0 && s.indexOf('"深度学习综述."') > 0, s);
+ok('Chicago 含刊名卷期页码', /计算机学报 43 \(2\): 100-110\./.test(s), s);
+ok('Chicago 作者超 3 个用 et al.', Cite.chicago({ ...journal, creators: ['A', 'B', 'C', 'D'] }).indexOf('et al.') > 0);
+
+s = Cite.ieee(journal);
+ok('IEEE 以 [1] 开头', s.indexOf('[1] ') === 0, s);
+ok('IEEE 含 vol./no./pp.', /vol\. 43, no\. 2, pp\. 100-110/.test(s), s);
+ok('IEEE 含年份与 doi', s.indexOf('2020') > 0 && s.indexOf('doi: 10.1000/a') > 0, s);
+
+s = Cite.mla(journal);
+ok('MLA 标题带引号', s.indexOf('"深度学习综述."') > 0, s);
+ok('MLA 含 vol. 与 pp.', s.indexOf('vol. 43') > 0 && s.indexOf('pp. 100-110') > 0, s);
+
+ok('format(chicago) 走 Chicago', Cite.format(journal, 'chicago') === Cite.chicago(journal));
+ok('format(ieee) 走 IEEE', Cite.format(journal, 'ieee') === Cite.ieee(journal));
+ok('format(mla) 走 MLA', Cite.format(journal, 'mla') === Cite.mla(journal));
+ok('样式表有 5 种', Cite.STYLES.length === 5, String(Cite.STYLES.length));
 
 console.log('[cite] ' + (fail ? 'FAIL (' + fail + ')' : 'PASS'));
 process.exit(fail ? 2 : 0);

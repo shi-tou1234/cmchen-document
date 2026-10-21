@@ -488,9 +488,10 @@ async function importRefsViaDialog() {
 function exportRefsTo(target) {
   try {
     const ext = path.extname(target).toLowerCase();
-    const format = ext === '.ris' ? 'ris' : 'bibtex';
+    const format = ext === '.ris' ? 'ris' : (ext === '.json' ? 'csljson' : 'bibtex');
     const records = library.summary().items.filter((x) => !x.deletedAt);
-    const text = format === 'ris' ? formats.recordsToRis(records) : formats.recordsToBibtex(records);
+    const text = format === 'ris' ? formats.recordsToRis(records)
+      : (format === 'csljson' ? formats.recordsToCslJson(records) : formats.recordsToBibtex(records));
     atomicWrite(target, text);
     return { ok: true, path: target, format, count: records.length, bytes: Buffer.byteLength(text) };
   } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
@@ -499,9 +500,13 @@ function exportRefsTo(target) {
 async function exportRefsViaDialog() {
   const base = 'PDF-Reader-文献库-' + new Date().toISOString().slice(0, 10);
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: '导出 BibTeX / RIS',
+    title: '导出 BibTeX / RIS / CSL-JSON',
     defaultPath: path.join(appState.lastBackupDir || '', base + '.bib'),
-    filters: [{ name: 'BibTeX', extensions: ['bib'] }, { name: 'RIS', extensions: ['ris'] }],
+    filters: [
+      { name: 'BibTeX', extensions: ['bib'] },
+      { name: 'RIS', extensions: ['ris'] },
+      { name: 'CSL-JSON', extensions: ['json'] },
+    ],
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
   return exportRefsTo(filePath);

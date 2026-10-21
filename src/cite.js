@@ -45,6 +45,9 @@
   const STYLES = [
     { id: 'gbt7714', label: 'GB/T 7714-2015' },
     { id: 'apa', label: 'APA 7' },
+    { id: 'chicago', label: 'Chicago 17（作者-年份）' },
+    { id: 'ieee', label: 'IEEE' },
+    { id: 'mla', label: 'MLA 9' },
   ];
 
   const str = (v) => String(v == null ? '' : v).trim();
@@ -190,10 +193,95 @@
     return out;
   }
 
-  // 统一入口：style 走 gbt7714 / apa，其它一律按 GB/T 处理
+  // ---------- Chicago 17（作者-年份） ----------
+  function chicago(it) {
+    if (!it) return '';
+    const t = str(it.title);
+    if (!t) return '';
+    const list = authorsOf(it);
+    const a = list.length > 3 ? list.slice(0, 3).join(', ') + ', et al.' : list.join(' and ');
+    const y = str(it.year) || 'n.d.';
+    const pub = str(it.publication);
+    const vol = str(it.volume);
+    const iss = str(it.issue);
+    const pg = str(it.pages);
+    let out = a ? a + '. ' : '';
+    out += y + '. ';
+    out += '"' + t + '."';
+    if (pub) out += ' ' + pub;
+    if (vol) {
+      out += ' ' + vol;
+      if (iss) out += ' (' + iss + ')';
+    }
+    if (pg) out += ': ' + pg;
+    out += '.';
+    const doi = str(it.doi);
+    if (doi) out += ' https://doi.org/' + doi + '.';
+    return out;
+  }
+
+  // ---------- IEEE（编号制，单条按 [1] 排） ----------
+  function ieee(it) {
+    if (!it) return '';
+    const t = str(it.title);
+    if (!t) return '';
+    const list = authorsOf(it);
+    const a = list.length ? list.join(', ') : '';
+    const pub = str(it.publication);
+    const vol = str(it.volume);
+    const iss = str(it.issue);
+    const pg = str(it.pages);
+    const y = str(it.year);
+    let out = '[1] ';
+    if (a) out += a + ', ';
+    out += '"' + t + ',"';
+    if (pub) out += ' ' + pub + ',';
+    if (vol) out += ' vol. ' + vol + ',';
+    if (iss) out += ' no. ' + iss + ',';
+    if (pg) {
+      const parts = String(pg).split('-');
+      out += ' pp. ' + (parts.length > 1 ? parts[0] + '-' + parts[1] : parts[0]) + ',';
+    }
+    if (y) out += ' ' + y + '.';
+    const doi = str(it.doi);
+    if (doi) out += ' doi: ' + doi + '.';
+    return out;
+  }
+
+  // ---------- MLA 9 ----------
+  function mla(it) {
+    if (!it) return '';
+    const t = str(it.title);
+    if (!t) return '';
+    const list = authorsOf(it);
+    const a = list.length > 2 ? list[0] + ', et al.' : (list.length === 2 ? list[0] + ', and ' + list[1] : (list[0] || ''));
+    const pub = str(it.publication);
+    const vol = str(it.volume);
+    const iss = str(it.issue);
+    const pg = str(it.pages);
+    const y = str(it.year);
+    let out = a ? a + '. ' : '';
+    out += '"' + t + '."';
+    if (pub) out += ' ' + pub + ',';
+    if (vol) {
+      out += ' vol. ' + vol + ',';
+      if (iss) out += ' no. ' + iss + ',';
+    }
+    if (y) out += ' ' + y + ',';
+    if (pg) out += ' pp. ' + pg + '.';
+    else out += '.';
+    const doi = str(it.doi);
+    if (doi) out += ' https://doi.org/' + doi + '.';
+    return out;
+  }
+
+  // 统一入口：style 走对应样式，其它一律按 GB/T 处理
   function format(it, style) {
     if (!it) return '';
     if (style === 'apa') return apa(it);
+    if (style === 'chicago') return chicago(it);
+    if (style === 'ieee') return ieee(it);
+    if (style === 'mla') return mla(it);
     return gbt(it);
   }
 
@@ -206,5 +294,5 @@
     return TYPE_NAME[str(it && it.itemType) || 'document'] || '文档';
   }
 
-  return { format, gbt, apa, authorsOf, styleLabel, typeLabel, STYLES, TYPE_CODE, TYPE_NAME };
+  return { format, gbt, apa, chicago, ieee, mla, authorsOf, styleLabel, typeLabel, STYLES, TYPE_CODE, TYPE_NAME };
 });

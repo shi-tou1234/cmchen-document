@@ -54,7 +54,7 @@ module.exports = `(async () => {
   push('引用预览含标题与刊名', gbtText.indexOf('Alpha') >= 0 && gbtText.indexOf('测试期刊') >= 0, gbtText);
 
   const styleSel = $('#ld-cite-style');
-  push('有引用样式选择', !!styleSel && styleSel.options.length === 2, styleSel ? String(styleSel.options.length) : 'null');
+  push('有引用样式选择', !!styleSel && styleSel.options.length >= 2, styleSel ? String(styleSel.options.length) : 'null');
   if (styleSel) {
     styleSel.value = 'apa';
     styleSel.dispatchEvent(new Event('change'));
