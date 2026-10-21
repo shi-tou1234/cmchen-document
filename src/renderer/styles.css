@@ -137,6 +137,33 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
   background: var(--bg-input); border: 1px solid var(--accent); border-radius: var(--r-xs); outline: none;
 }
 
+/* 专注阅读模式（F11）：收掉所有工具栏，只留页面 */
+body.focus-mode #toolbar,
+body.focus-mode #notetools,
+body.focus-mode #tabbar,
+body.focus-mode #statusbar,
+body.focus-mode #hint-bar,
+body.focus-mode #sidebar { display: none; }
+body.focus-mode #viewer { padding: 14px; }
+body.focus-mode .page { box-shadow: none; }
+
+/* 深色模式下把页面反色（夜读护眼，设置里可关） */
+body.theme-dark.invert-pages .page canvas { filter: invert(1) hue-rotate(180deg); }
+body.theme-dark.invert-pages .page .textlayer { filter: invert(1) hue-rotate(180deg); }
+
+/* 页面右键菜单 */
+.ctx-menu {
+  position: fixed; z-index: 130; min-width: 176px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--rule-2); border-radius: var(--r-2);
+  box-shadow: var(--shadow-pop); display: flex; flex-direction: column;
+}
+.ctx-menu button {
+  border: none; background: transparent; color: var(--text); font: inherit; font-size: 12.5px;
+  text-align: left; padding: 6px 10px; border-radius: var(--r-xs); cursor: pointer;
+}
+.ctx-menu button:hover { background: var(--surface-2); }
+.ctx-menu .ctx-sep { height: 1px; background: var(--rule); margin: 4px 6px; }
+
 /* 工具带（v19：常用工具常驻，罕见工具收进「更多」，选完不自动收起） */
 #notetools .ntool { padding: 6px 7px; }
 #notetools .nlbl { margin: 0 4px; }

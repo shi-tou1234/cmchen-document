@@ -14,6 +14,7 @@ const DEFAULTS = {
   autoIndex: true,        // 启动后自动建全文索引
   restoreTabs: false,     // 预留：下次启动恢复标签页（本版不启用）
   hintSeen: false,        // v19：首次上手提示是否已经看过
+  invertPages: false,     // v20：深色模式下把页面反色（护眼）
 };
 
 const SORTS = new Set(['added', 'modified', 'title', 'year']);
@@ -47,6 +48,7 @@ function sanitize(raw) {
   if (typeof src.autoIndex === 'boolean') out.autoIndex = src.autoIndex;
   if (typeof src.restoreTabs === 'boolean') out.restoreTabs = src.restoreTabs;
   if (typeof src.hintSeen === 'boolean') out.hintSeen = src.hintSeen;
+  if (typeof src.invertPages === 'boolean') out.invertPages = src.invertPages;
   return out;
 }
 

@@ -31,8 +31,13 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path }),
   // 批注导出为纯文本笔记
   exportNote: (info) => ipcRenderer.invoke('export-note', info),
+  // 菜单命令：专注阅读模式 / 导出当前页图片（主进程菜单触发）
+  onToggleFocusMode: (cb) => { ipcRenderer.on('toggle-focus-mode', () => cb()); },
+  onExportPagePng: (cb) => { ipcRenderer.on('export-page-png', () => cb()); },
   // 复制纯文本到系统剪贴板（v14：复制引用等）
   copyText: (text) => ipcRenderer.invoke('copy-text', { text }),
+  // v20：把当前页导出成 PNG（数据是 dataURL）
+  exportPagePng: (info) => ipcRenderer.invoke('export-page-png', info),
   // 应用设置（v11）
   getSettings: () => ipcRenderer.invoke('settings-get'),
   setSettings: (patch) => ipcRenderer.invoke('settings-set', patch),

@@ -772,6 +772,27 @@ ipcMain.handle('copy-text', (_e, info) => {
   catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 });
 
+// v20：把当前页导出成 PNG（渲染层给 dataURL，主进程只管落盘）
+ipcMain.handle('export-page-png', async (_e, info) => {
+  try {
+    const dataUrl = String((info && info.dataUrl) || '');
+    const m = /^data:image\/png;base64,(.+)$/i.exec(dataUrl);
+    if (!m) return { ok: false, error: '图片数据不对' };
+    const buf = Buffer.from(m[1], 'base64');
+    const name = String((info && info.fileName) || 'page.png').replace(/[\\/:*?"<>|]/g, '_');
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: '导出当前页为图片',
+      defaultPath: path.join(appState.lastBackupDir || '', name),
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(filePath, buf);
+    return { ok: true, path: filePath, bytes: buf.length };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 // ---------- 导出带标注的 PDF 副本 ----------
 function hexToRgb(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
@@ -887,6 +908,8 @@ function buildMenu() {
         },
         { label: '最近打开', submenu: recentSubmenu() },
         { type: 'separator' },
+        { label: '导出当前页为图片…', accelerator: 'CmdOrCtrl+Shift+P', click: () => { if (win) win.webContents.send('export-page-png'); } },
+        { type: 'separator' },
         { label: '导入 BibTeX / RIS…', click: () => importRefsViaDialog() },
         { label: '导出 BibTeX / RIS…', click: () => exportRefsViaDialog() },
         { type: 'separator' },
@@ -900,6 +923,8 @@ function buildMenu() {
     {
       label: '视图',
       submenu: [
+        { label: '专注阅读模式', accelerator: 'F11', click: () => { if (win) win.webContents.send('toggle-focus-mode'); } },
+        { type: 'separator' },
         { role: 'reload', label: '重新加载' },
         { role: 'toggleDevTools', label: '开发者工具' },
       ],

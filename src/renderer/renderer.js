@@ -851,32 +851,36 @@ App.buildNoteText = function buildNoteText(fmt) {
   return lines.join('\n');
 };
 
-// 批注导出：Markdown 版（给 Obsidian / Logseq / Typora 这类笔记软件用）
+// 批注导出：Markdown 版（给 Obsidian / Logseq 这类笔记软件用）
+// 格式按 Zotero 的引用习惯来：原文用引用块，评论另起一行，页码用小节标题，标签写成 #标签
 function buildNoteMd() {
   const s = App.state;
   const toolName = { pen: '画笔', highlight: '荧光', line: '直线', rect: '矩形', arrow: '箭头', text: '文字', note: '便签', mark: '选区高亮' };
   const pages = [...s.annos.keys()].filter((n) => (s.annos.get(n) || []).length).sort((a, b) => a - b);
+  const total = pages.reduce((sum, n) => sum + (s.annos.get(n) || []).length, 0);
   const out = [];
   out.push('# ' + (s.fileName || '文档') + ' 批注笔记');
   out.push('');
-  out.push('> 导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }));
+  out.push('> 导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }) +
+    ' · 共 ' + total + ' 条批注，' + pages.length + ' 页');
   out.push('');
   for (const n of pages) {
     out.push('## 第 ' + n + ' 页');
     out.push('');
     for (const sh of s.annos.get(n)) {
+      const tags = Array.isArray(sh.tags) ? sh.tags.filter(Boolean) : [];
       if (sh.tool === 'mark') {
-        // 引用块：多行文本每行都加 '> '，粘进笔记软件仍是引用
+        // 原文用引用块
         out.push(String(sh.text || '').split('\n').map((x) => '> ' + x).join('\n'));
         if (sh.comment) out.push('', '**评论**：' + String(sh.comment).split('\n').join(' '));
-        out.push('');
       } else if (sh.tool === 'text' || sh.tool === 'note') {
         out.push('- **' + toolName[sh.tool] + '**：' + String(sh.text || '').split('\n').join(' '));
       } else {
         out.push('- **' + (toolName[sh.tool] || sh.tool) + '**' + (sh.color ? '（' + colorName(sh.color) + '）' : ''));
       }
+      if (tags.length) out.push('  **标签**：' + tags.map((t) => '#' + t).join(' '));
+      out.push('');
     }
-    out.push('');
   }
   return out.join('\n');
 }
@@ -1021,6 +1025,75 @@ async function openImageLightbox(pageEl, clientX, clientY) {
     index = 0;
   }
   Lightbox.open({ items, index });
+}
+
+// ---------- 专注阅读模式（F11） ----------
+App.setFocusMode = function (on) {
+  const next = on === undefined ? !document.body.classList.contains('focus-mode') : !!on;
+  document.body.classList.toggle('focus-mode', next);
+  if (next) {
+    toast('专注阅读模式：Esc 或 F11 退出');
+    setTimeout(applyLayout, 60);
+  }
+  return next;
+};
+
+// ---------- 页面右键菜单 ----------
+let ctxMenu = null;
+function closeCtxMenu() {
+  if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
+}
+function openCtxMenu(x, y, items) {
+  closeCtxMenu();
+  ctxMenu = document.createElement('div');
+  ctxMenu.className = 'ctx-menu';
+  ctxMenu.style.left = Math.round(x) + 'px';
+  ctxMenu.style.top = Math.round(y) + 'px';
+  for (const it of items) {
+    if (it === '-') {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-sep';
+      ctxMenu.appendChild(sep);
+      continue;
+    }
+    const b = document.createElement('button');
+    b.textContent = it.label;
+    b.addEventListener('click', () => { closeCtxMenu(); it.run(); });
+    ctxMenu.appendChild(b);
+  }
+  document.body.appendChild(ctxMenu);
+  // 贴着窗口边缘收一收
+  const r = ctxMenu.getBoundingClientRect();
+  if (r.right > window.innerWidth - 8) ctxMenu.style.left = Math.max(8, window.innerWidth - r.width - 8) + 'px';
+  if (r.bottom > window.innerHeight - 8) ctxMenu.style.top = Math.max(8, window.innerHeight - r.height - 8) + 'px';
+}
+
+// 当前页导出为 PNG
+async function exportCurrentPagePng() {
+  const el = App.pageEl(App.state.currentPage);
+  const canvas = el && el.querySelector('canvas');
+  if (!canvas || !canvas.width) { toast('当前页还没渲染出来'); return; }
+  let dataUrl = '';
+  try { dataUrl = canvas.toDataURL('image/png'); } catch (e) { toast('导出失败：' + (e && e.message || e)); return; }
+  const name = (App.state.fileName || 'page').replace(/\.pdf$/i, '') + '-p' + App.state.currentPage + '.png';
+  const res = await window.pdfBridge.exportPagePng({ dataUrl, fileName: name });
+  if (res && res.ok) { toast('已导出：' + res.path); setStatus('已导出当前页图片：' + res.path); }
+  else if (res && res.canceled) setStatus('已取消导出');
+  else setStatus('导出失败：' + ((res && res.error) || '未知错误'));
+}
+
+// 复制当前页文字
+async function copyPageText() {
+  const n = App.state.currentPage;
+  let items = [];
+  try { items = await getTextContent(n); } catch (_) {}
+  const text = (items || []).map((it) => (it && it.str) || '').join(' ').replace(/\s+/g, ' ').trim();
+  if (!text) { toast('这一页没有可选文字'); return; }
+  try {
+    const r = await window.pdfBridge.copyText(text);
+    if (r && r.ok) toast('已复制第 ' + n + ' 页文字');
+    else toast('复制失败');
+  } catch (_) { toast('复制失败'); }
 }
 
 // ---------- 标注自动保存 / 恢复（按文件路径存 userData/annotations/） ----------
@@ -1177,6 +1250,12 @@ function applyTheme(theme) {
 }
 App.applyTheme = applyTheme;
 
+// 深色模式下把页面反色（夜读护眼）
+function applyInvert(on) {
+  document.body.classList.toggle('invert-pages', !!on);
+}
+App.applyInvert = applyInvert;
+
 // ---------- 冒烟 ----------
 function runSmoke(fileName) {
   const s = App.state;
@@ -1332,8 +1411,15 @@ function bind() {
     if (!e.ctrlKey && !e.altKey && !e.metaKey) {
       const tool = TOOL_KEYS[e.key.toLowerCase()];
       if (tool) { Anno.setTool(tool); e.preventDefault(); return; }
-      if (e.key === 'Escape') { Anno.setTool('select'); e.preventDefault(); return; }
+      if (e.key === 'Escape') {
+        if (window.Lightbox && Lightbox.isOpen()) return;   // 灯箱自己处理 Esc
+        if (document.body.classList.contains('focus-mode')) { App.setFocusMode(false); e.preventDefault(); return; }
+        Anno.setTool('select');
+        e.preventDefault();
+        return;
+      }
     }
+    if (e.key === 'F11') { App.setFocusMode(); e.preventDefault(); return; }
     switch (e.key) {
       case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;
       case 'ArrowRight': case 'PageDown': case ' ': nextPage(); e.preventDefault(); break;
@@ -1362,6 +1448,24 @@ function bind() {
     e.stopPropagation();
     openImageLightbox(pageEl, e.clientX, e.clientY);
   });
+
+  // 页面右键菜单：把不常用的操作收在这里，工具栏就不用越堆越多
+  E.pages.addEventListener('contextmenu', (e) => {
+    const pageEl = e.target.closest && e.target.closest('.page');
+    if (!pageEl) return;
+    e.preventDefault();
+    const n = +pageEl.dataset.page;
+    openCtxMenu(e.clientX, e.clientY, [
+      { label: '复制第 ' + n + ' 页文字', run: copyPageText },
+      { label: '导出第 ' + n + ' 页为图片', run: exportCurrentPagePng },
+      '-',
+      { label: '放大看这一块（看图模式）', run: () => { Anno.setTool('image'); toast('点页面任意位置放大查看'); } },
+      { label: '复制页码', run: () => { window.pdfBridge.copyText(String(n)); toast('已复制页码 ' + n); } },
+    ]);
+  });
+  document.addEventListener('click', closeCtxMenu);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCtxMenu(); });
+  window.addEventListener('blur', closeCtxMenu);
 
   let rt = null;
   window.addEventListener('resize', () => {
@@ -1393,6 +1497,8 @@ function bind() {
 
   Anno.init();
   if (window.SelectionUI) window.SelectionUI.init();
+  if (window.pdfBridge.onToggleFocusMode) window.pdfBridge.onToggleFocusMode(() => App.setFocusMode());
+  if (window.pdfBridge.onExportPagePng) window.pdfBridge.onExportPagePng(() => exportCurrentPagePng());
   initHintBar();
 }
 
