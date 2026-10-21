@@ -3,12 +3,12 @@
 > 更新时间：2026-10-21（v24 触控板缩放闪烁修复 + 一批顺手性修复）  
 > 项目目录：`D:\项目\pdf阅读\pdf-reader`  
 > 目标仓库：`https://github.com/shi-tou1234/cmchen-document`  
-> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 1d96490；推送需按第 7 节第 11 条绕开 Steam++ 的 hosts 劫持）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 工具带常驻 + 工具快捷键 + 文档快速切换 + 导入读 PDF 元数据，v19 界面减负 + 引用样式 5 种 + CSL-JSON 互通 + 批注标签与搜索，v20 专注模式 + 页面右键菜单 + 导出当前页 PNG + 深色反色，v21 缩放保持位置 + 标签管理 + 汇总导出批注，v22 单页/滚动双模式 + 搜索命中上下跳 + 大纲带页码，v23 独立阅读笔记（数据层 v4），**v24 触控板缩放闪烁修复 + 搜索去抖 + 库滚动位置保留（按要求不做同步）**。
+> 当前结论：**v11/v12 收尾已完成。探针已全部转正为正式回归（全部失败即非零退出），备份/恢复、数据目录 move/merge/replace、单实例双开、真实导出高亮烧录、打包产物冒烟、NSIS 安装/卸载都已实测通过。已推送到 GitHub（main HEAD = 37ce202；推送用 `git -c http.sslBackend=schannel push origin main`）。v13 修掉 6 组实测复现的缺陷，v14 加了标签选择器 / 复制引用 / 批注多格式导出，v15 重做视觉层并精简 README，v16 换成学术编辑风，v17 加上看图模式（图片灯箱，交互移植自博客站点），v18 工具带常驻 + 工具快捷键 + 文档快速切换 + 导入读 PDF 元数据，v19 界面减负 + 引用样式 5 种 + CSL-JSON 互通 + 批注标签与搜索，v20 专注模式 + 页面右键菜单 + 导出当前页 PNG + 深色反色，v21 缩放保持位置 + 标签管理 + 汇总导出批注，v22 单页/滚动双模式 + 搜索命中上下跳 + 大纲带页码，v23 独立阅读笔记（数据层 v4），**v24 触控板缩放闪烁修复 + 搜索去抖 + 库滚动位置保留（按要求不做同步）**。
 
 ## 收尾后的一句话现状
 
-- 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 43 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
-- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，v18 起 26 个，v19 起 27 个，v20 起 28 个，v21 起 29 个，v22 起 30 个，**v23 起 31 个**（新增 `test-v23.js` 20 项），全部通过。
+- 临时探针已删除，正式回归共 14 个测试文件，全部通过：library 82 / lib-ui 45 / fulltext 36 / formats 59 / settings 22 / metadata 47 / selection 14 / tabs 14 / ui-v11 22 / ui-v12 21 / backup 32 / datadir 19 / single-instance 7 / export-highlight 12 / packaged 15。
+- v13 起回归脚本共 22 个，v14 起 24 个，v17 起 25 个，v18 起 26 个，v19 起 27 个，v20 起 28 个，v21 起 29 个，v22 起 30 个，v23 起 31 个，**v24 仍是 31 个**（v24 的断言加在已有的 `test-imageview.js` 里，触控板连发小 delta 后缩放平缓且不越界），全部通过。
 
 ## 三条踩过的坑（别再踩）
 
@@ -26,10 +26,22 @@
   ```powershell
   git -c http.sslBackend=schannel push -u origin main
   ```
+- **推送偶发连不上（v24 实测）**：2026-10-21 出现过 `github.com:443` 连上但数据不通（curl 超时、`git push` 报 `Recv failure: Connection was reset` / `Failed to connect`）。同时 `api.github.com` 与 `objects.githubusercontent.com` 正常 → 是 github.com 单域被干扰，不是本机断网。
+  - 直接**重试几次**即可恢复（当天重试第三次就推上去了）。
+  - 排查用：`Test-NetConnection github.com -Port 443`（通不代表能传数据）、`curl -w "%{http_code}" https://api.github.com/`（用来区分「全断」还是「单域被挡」）。
+  - 本机 git 凭据里存着可用 token（`git credential fill` 能取到），万一 https 长时不通，可以用 GitHub Git Data API（`api.github.com`）走 blob→tree→commit→update ref 兜底提交。
+- **打包命令（v24 修正）**：`--prepackaged` 后面**必须带目录**，否则报 `The "paths[1]" argument must be of type string. Received type boolean (true)`：
+  ```powershell
+  npx electron-builder --win dir
+  # 用 rcedit 给 build\win-unpacked\PDF Reader.exe 套图标（rcedit 在 electron-builder 的 winCodeSign 缓存里）
+  npx electron-builder --win portable --prepackaged build\win-unpacked
+  npx electron-builder --win nsis    --prepackaged build\win-unpacked
+  ```
+  注意：**永远不要 rcedit portable exe 本身**，只改 win-unpacked 里那个。
 - **文档结构（v15）**：`README.md` 只讲「有什么 / 怎么用 / 怎么测 / 有什么边界」；逐版本演进记录在 `CHANGELOG.md`；交接细节与约定留在本文件。改 README 时不要再往里堆版本流水账。
 - **视觉约定（v16）**：暖纸底 + 墨色字 + 印泥红强调色；衬线标题 / 等宽元信息；发丝线分层，阴影只给浮层；条目是表格行不是卡片。**不要再往回加蓝底、圆角胶囊、软阴影卡片**——那是这轮要推翻的「AI 味」。
 - **跨项目复用（v17）**：图片灯箱的交互（缩放/拖拽/捏合/翻页/计数/滚动锁定）来自博客站点 `D:\项目\博客站点\src\components\misc\Markdown.astro` 的 markdown-image-lightbox，移植到 `src/renderer/lightbox.js`；博客那边只读不改。
-- v13 重新打包（2026-10-20）：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,276,569 B）、`PDF-Reader-Setup-1.0.0.exe`（83,641,859 B，NSIS）。打包冒烟在 win-unpacked 与 portable 上各跑过一遍，都是 PASS(15)；**NSIS 本轮没有在本机静默安装**（避免动用户机器），如需验证安装/卸载请手动跑一次 `/S /currentuser`。
+- v24 重新打包（2026-10-21）：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,303,936 B）、`PDF-Reader-Setup-1.0.0.exe`（83,681,431 B，NSIS）。打包冒烟在 win-unpacked 与 portable 上各跑过一遍，都是 PASS(15)。
 - 打包产物已产出并冒烟：`build/win-unpacked/`、`PDF-Reader-1.0.0-portable.exe`（74,277,787 B）、`PDF-Reader-Setup-1.0.0.exe`（83,635,175 B，NSIS）。
 - 安装 → 已安装版冒烟 → 静默卸载，全部通过（快捷方式/安装目录随之清理）。
 - 收尾过程中修掉 8 个真实缺陷（详见 README v11/v12 章节），其中**「导出副本在真实链路失效」是 v10 起就存在的高危 bug**。
