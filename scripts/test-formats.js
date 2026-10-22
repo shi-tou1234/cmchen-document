@@ -218,5 +218,84 @@ let cslThrew = false;
 try { formats.parseCslJson('{ 坏 json'); } catch (e) { cslThrew = true; }
 ok('CSL-JSON 坏数据被 parseRefs 兜住', !formats.parseRefs('{ 坏 json', 'x.json').records.length);
 
+// ---------- EndNote（.enw） ----------
+const enwText = [
+  '%0 Journal Article',
+  '%A Smith, John',
+  '%A Doe, Jane',
+  '%T Deep Learning for PDF Layout Analysis',
+  '%J Journal of Document AI',
+  '%D 2024',
+  '%V 12',
+  '%N 3',
+  '%P 100-118',
+  '%R 10.1000/enw.2024',
+  '%U https://example.org/enw',
+  '%X We present an endnote record.',
+  '%K deep learning, layout',
+  '%@ 1234-5678',
+  '%I ACM',
+  '',
+  '%0 Book',
+  '%A 张三',
+  '%T 深度学习导论',
+  '%D 2023',
+  '%I 科学出版社',
+].join('\r\n');
+ok('按扩展名识别 EndNote', formats.detectFormat(enwText, 'refs.enw') === 'endnote');
+ok('无扩展名按 %0 识别 EndNote', formats.detectFormat(enwText, 'refs.txt') === 'endnote');
+const enwRecs = formats.parseEndNote(enwText);
+ok('EndNote 解析出两条', enwRecs.length === 2, 'n=' + enwRecs.length);
+ok('EndNote 类型映射期刊文章', enwRecs[0].itemType === 'journalArticle', enwRecs[0].itemType);
+ok('EndNote 类型映射图书', enwRecs[1].itemType === 'book', enwRecs[1].itemType);
+ok('EndNote 标题', enwRecs[0].title === 'Deep Learning for PDF Layout Analysis', enwRecs[0].title);
+ok('EndNote 多作者结构化', enwRecs[0].creators.length === 2
+  && enwRecs[0].creators[0].lastName === 'Smith' && enwRecs[0].creators[0].firstName === 'John', JSON.stringify(enwRecs[0].creators));
+ok('EndNote 中文作者不拆', enwRecs[1].creators[0].lastName === '张三', JSON.stringify(enwRecs[1].creators));
+ok('EndNote 年份/期刊/卷期页', enwRecs[0].year === '2024' && enwRecs[0].publication === 'Journal of Document AI'
+  && enwRecs[0].volume === '12' && enwRecs[0].issue === '3' && enwRecs[0].pages === '100-118');
+ok('EndNote DOI 去前缀', enwRecs[0].doi === '10.1000/enw.2024', enwRecs[0].doi);
+ok('EndNote 关键词切数组', JSON.stringify(enwRecs[0].tags) === '["deep learning","layout"]', JSON.stringify(enwRecs[0].tags));
+ok('EndNote ISSN 进 fields', enwRecs[0].fields.issn === '1234-5678', JSON.stringify(enwRecs[0].fields));
+ok('EndNote 出版社进 fields', enwRecs[0].fields.publisher === 'ACM', JSON.stringify(enwRecs[0].fields));
+
+// ---------- RefWorks（tagged） ----------
+const rwText = [
+  'RT Journal Article',
+  'A1 Brown, Alice',
+  'A2 Clark, Bob',
+  'T1 Reading Papers at Scale',
+  'JF Journal of Big Reading',
+  'YR 2022',
+  'VO 7',
+  'IS 2',
+  'SP 20',
+  'OP 35',
+  'DO 10.1000/rw.2022',
+  'UL https://example.org/rw',
+  'AB A refworks abstract.',
+  'K1 reading, scale',
+  'SN 8765-4321',
+  'PB Elsevier',
+  '',
+  'RT Book',
+  'A1 李四',
+  'T1 文献管理实践',
+  'YR 2021',
+  'PB 人民邮电出版社',
+].join('\n');
+ok('按内容识别 RefWorks', formats.detectFormat(rwText, 'refs.txt') === 'refworks');
+const rwRecs = formats.parseRefWorks(rwText);
+ok('RefWorks 解析出两条', rwRecs.length === 2, 'n=' + rwRecs.length);
+ok('RefWorks 类型映射', rwRecs[0].itemType === 'journalArticle' && rwRecs[1].itemType === 'book',
+  rwRecs[0].itemType + '/' + rwRecs[1].itemType);
+ok('RefWorks 作者与编者分开', rwRecs[0].creators[0].creatorType === 'author'
+  && rwRecs[0].creators[1].creatorType === 'editor', JSON.stringify(rwRecs[0].creators.map((c) => c.creatorType)));
+ok('RefWorks 起始-结束页拼页码', rwRecs[0].pages === '20-35', rwRecs[0].pages);
+ok('RefWorks DOI', rwRecs[0].doi === '10.1000/rw.2022', rwRecs[0].doi);
+ok('RefWorks 关键词切数组', JSON.stringify(rwRecs[0].tags) === '["reading","scale"]', JSON.stringify(rwRecs[0].tags));
+ok('parseRefs 走 EndNote 分支', formats.parseRefs(enwText, 'x.enw').format === 'endnote');
+ok('parseRefs 走 RefWorks 分支', formats.parseRefs(rwText, 'x.txt').format === 'refworks');
+
 console.log('[formats] ' + (fail ? 'FAIL (' + fail + '/' + (pass + fail) + ')' : 'PASS (' + pass + ')'));
 process.exit(fail ? 2 : 0);

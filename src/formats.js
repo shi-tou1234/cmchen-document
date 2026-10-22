@@ -281,11 +281,155 @@ function parseRis(text) {
   return records;
 }
 
+// ---------- EndNote（.enw，%0 标签） ----------
+const ENW_TYPES = {
+  'journal article': 'journalArticle', 'book': 'book', 'book section': 'bookSection',
+  'conference paper': 'conferencePaper', 'conference proceedings': 'conferencePaper',
+  'thesis': 'thesis', 'report': 'report', 'web page': 'webpage',
+  'edited book': 'book', 'magazine article': 'journalArticle', 'newspaper article': 'journalArticle',
+};
+
+function parseEndNote(text) {
+  const records = [];
+  let cur = null;
+  const flush = () => {
+    if (!cur) return;
+    if (cur['%0'] || cur['%T']) records.push(enwToRecord(cur));
+    cur = null;
+  };
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^%([0-9A-Za-z@!?$&()*+]) (.*)$/.exec(line);
+    if (!m) {
+      // 空行 = 一条结束（EndNote 导出常在记录之间留空行）
+      if (!String(line).trim()) flush();
+      continue;
+    }
+    if (m[1] === '0' && cur && (cur['%0'] || cur['%T'])) flush();
+    if (!cur) cur = {};
+    (cur['%' + m[1]] = cur['%' + m[1]] || []).push(m[2].trim());
+  }
+  flush();
+  return records;
+}
+
+function enwToRecord(tags) {
+  const get = (...names) => {
+    for (const n of names) if (tags[n] && tags[n].length) return tags[n][0];
+    return '';
+  };
+  const getAll = (...names) => {
+    const out = [];
+    for (const n of names) for (const v of (tags[n] || [])) out.push(s(v));
+    return out;
+  };
+  const names = (list, type) => list.map((x) => {
+    const p = Creators.parseName(x);
+    return { firstName: p.firstName, lastName: p.lastName, creatorType: type };
+  }).filter((c) => c.firstName || c.lastName);
+  const keywords = [];
+  for (const v of getAll('%K')) for (const k of String(v).split(/[;,]/)) if (s(k)) keywords.push(s(k));
+  const pagesRaw = get('%P');
+  return {
+    itemType: ENW_TYPES[String(get('%0') || '').toLowerCase()] || 'document',
+    title: get('%T') || '未命名文献',
+    creators: [
+      ...names(getAll('%A'), 'author'),
+      ...names(getAll('%E'), 'editor'),
+    ],
+    year: yearOf(get('%D', '%8')),
+    publication: get('%J', '%B', '%I'),
+    volume: get('%V'),
+    issue: get('%N'),
+    pages: pagesRaw,
+    doi: get('%R').replace(/^https?:\/\/doi\.org\//i, ''),
+    url: get('%U'),
+    abstract: get('%X'),
+    language: get('%G'),
+    tags: keywords,
+    fields: {
+      isbn: /^\d[\d-]{8,}$/.test(get('%@')) ? get('%@') : '',
+      issn: get('%@'),
+      publisher: get('%I'),
+    },
+  };
+}
+
+// ---------- RefWorks（tagged 格式，两位标签） ----------
+const RW_TYPES = {
+  journal: 'journalArticle', 'journal article': 'journalArticle', book: 'book',
+  'book, section': 'bookSection', 'book section': 'bookSection',
+  'conference proceeding': 'conferencePaper', 'dissertation/thesis': 'thesis',
+  report: 'report', 'web page': 'webpage',
+};
+
+function parseRefWorks(text) {
+  const records = [];
+  let cur = null;
+  const flush = () => {
+    if (!cur) return;
+    if (cur.T1 || cur.RT) records.push(rwToRecord(cur));
+    cur = null;
+  };
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!String(line).trim()) { flush(); continue; }
+    if (/^ER\b/.test(line)) { flush(); continue; }
+    const m = /^([A-Z][A-Z0-9])\s+(.*)$/.exec(line);
+    if (!m) continue;
+    if (!cur) cur = {};
+    (cur[m[1]] = cur[m[1]] || []).push(m[2].trim());
+  }
+  flush();
+  return records;
+}
+
+function rwToRecord(tags) {
+  const get = (...names) => {
+    for (const n of names) if (tags[n] && tags[n].length) return tags[n][0];
+    return '';
+  };
+  const getAll = (...names) => {
+    const out = [];
+    for (const n of names) for (const v of (tags[n] || [])) out.push(s(v));
+    return out;
+  };
+  const names = (list, type) => list.map((x) => {
+    const p = Creators.parseName(x);
+    return { firstName: p.firstName, lastName: p.lastName, creatorType: type };
+  }).filter((c) => c.firstName || c.lastName);
+  const keywords = [];
+  for (const v of getAll('K1')) for (const k of String(v).split(/[;,]/)) if (s(k)) keywords.push(s(k));
+  const sp = get('SP'), op = get('OP');
+  return {
+    itemType: RW_TYPES[String(get('RT') || '').toLowerCase()] || 'document',
+    title: get('T1') || '未命名文献',
+    creators: [
+      ...names(getAll('A1'), 'author'),
+      ...names(getAll('A2'), 'editor'),
+      ...names(getAll('A3', 'A4'), 'contributor'),
+    ],
+    year: yearOf(get('YR', 'FD')),
+    publication: get('JF', 'JO', 'T2', 'PB'),
+    volume: get('VO'),
+    issue: get('IS'),
+    pages: sp ? (op ? sp + '-' + op : sp) : '',
+    doi: get('DO').replace(/^https?:\/\/doi\.org\//i, ''),
+    url: get('UL'),
+    abstract: get('AB'),
+    language: get('LA'),
+    tags: keywords,
+    fields: { issn: get('SN'), isbn: '', publisher: get('PB') },
+  };
+}
+
 function detectFormat(text, filename) {
   const ext = String(filename || '').toLowerCase().replace(/^.*\./, '');
   if (ext === 'bib' || ext === 'bibtex') return 'bibtex';
   if (ext === 'ris') return 'ris';
   if (ext === 'json') return 'csljson';
+  if (ext === 'enw' || ext === 'enlp') return 'endnote';
+  if (ext === 'refworks' || ext === 'rw') return 'refworks';
+  if (/^\s*%0\s/m.test(text)) return 'endnote';
+  if (/^\s*RT\s+\S/m.test(text) && /^\s*A1\s/m.test(text)) return 'refworks';
   if (/^\s*@[A-Za-z]+\s*[{(]/m.test(text)) return 'bibtex';
   if (/^\s*TY\s{1,2}-/m.test(text)) return 'ris';
   if (/^\s*[\[{]/.test(text) && /"type"\s*:/.test(text)) return 'csljson';
@@ -295,6 +439,8 @@ function detectFormat(text, filename) {
 function parseRefs(text, filename) {
   const format = detectFormat(text, filename);
   if (format === 'ris') return { format, records: parseRis(text) };
+  if (format === 'endnote') return { format, records: parseEndNote(text) };
+  if (format === 'refworks') return { format, records: parseRefWorks(text) };
   if (format === 'csljson') {
     try { return { format, records: parseCslJson(text) }; }
     catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
@@ -493,7 +639,7 @@ function recordsToCslJson(records) {
 }
 
 module.exports = {
-  parseBibtex, parseRis, parseRefs, detectFormat,
+  parseBibtex, parseRis, parseEndNote, parseRefWorks, parseRefs, detectFormat,
   recordsToBibtex, recordsToRis, parseCslJson, recordsToCslJson,
   _bibToRecord: bibToRecord, _risToRecord: risToRecord, _splitAuthors: splitAuthors,
   _cslToRecord: cslToRecord,

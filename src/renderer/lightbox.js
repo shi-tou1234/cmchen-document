@@ -292,6 +292,8 @@ const Lightbox = (function () {
             '<button type="button" class="lb-btn lb-zoom-label" data-lb-zoom-reset aria-label="复位缩放">100%</button>' +
             '<button type="button" class="lb-btn" data-lb-zoom-in aria-label="放大">＋</button>' +
             '<button type="button" class="lb-btn" data-lb-invert aria-pressed="false" aria-label="反色显示" title="反色显示：看白底图夜里不刺眼；再点恢复原色">◐</button>' +
+            // v9：图片标注落盘 —— 把这一块存进库里，能在标注视图里搜到 / 打标签 / 生成笔记
+            '<button type="button" class="lb-btn lb-save-anno" data-lb-save-anno aria-label="存为图片标注" title="存为图片标注：保存到文献库，可搜索 / 打标签 / 生成笔记">存为标注</button>' +
             '<button type="button" class="lb-btn lb-close" data-lb-close aria-label="关闭">' +
               '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>' +
             '</button>' +
@@ -318,6 +320,7 @@ const Lightbox = (function () {
       unlockScroll();
       state.items = [];
       state.index = -1;
+      state.saveCtx = null;
       state.src = null;      // 放开原图位图（大图很占内存）
       state.bitW = 0;
       state.bitH = 0;
@@ -330,6 +333,15 @@ const Lightbox = (function () {
       // 必须放宽到 Element：点在 ✕ 图标（<svg>/<path>）上时 target 是 SVGElement，
       // 不是 HTMLElement —— 以前这里写成 HTMLElement，点图标永远关不掉（v27 修）
       if (!(t instanceof Element)) return;
+      if (t.closest('[data-lb-save-anno]')) {
+        // 图片标注落盘：把当前这张图 + 它在 PDF 里的位置交给阅读器存进库
+        const src = state.src;
+        const ctx = state.saveCtx;
+        if (!src || !ctx) { close(); return; }
+        close();
+        if (window.App && App.saveImageAnno) App.saveImageAnno(src, ctx);
+        return;
+      }
       if (t.closest('[data-lb-close]')) { close(); return; }
       if (t === root || t.closest('.lb-backdrop')) close();
     });
@@ -462,6 +474,10 @@ const Lightbox = (function () {
     ensure();
     state.items = items;
     state.onClose = o.onClose || null;
+    // v9：图片标注的落点上下文（{ path, page, rect, text }），没有就只能看不能存
+    state.saveCtx = o.saveCtx || null;
+    const saveBtn = state.root && state.root.querySelector('[data-lb-save-anno]');
+    if (saveBtn) saveBtn.hidden = !state.saveCtx;
     const root = state.root;
     root.hidden = false;
     root.classList.add('is-open');

@@ -56,19 +56,31 @@ const Anno = window.Anno = (() => {
         base.appendChild(inkNode(sh, 0.4)); break;
       case 'mark': {
         // 文字选区高亮：矩形来自真实文本层选区，存单位坐标，缩放后不漂。
-        // kind:'quote' 是「摘录」，用更淡的底 + 虚线和普通高亮区分。
+        // kind:'quote' 是「摘录」，用更淡的底 + 虚线和普通高亮区分；
+        // kind:'underline' 是「下划线」，只在每行底部画一条线（Zotero 的下划线标注）。
         const g = document.createElementNS(NS, 'g');
-        g.setAttribute('class', 'text-mark' + (sh.kind === 'quote' ? ' text-quote' : ''));
+        g.setAttribute('class', 'text-mark'
+          + (sh.kind === 'quote' ? ' text-quote' : '')
+          + (sh.kind === 'underline' ? ' text-underline' : ''));
         for (const r of (sh.rects || [])) {
-          g.appendChild(el('rect', {
-            x: r.x, y: r.y, width: Math.max(1, r.w), height: Math.max(1, r.h),
-            fill: sh.color || '#ffd54f', 'fill-opacity': sh.kind === 'quote' ? '0.18' : '0.42',
-            stroke: sh.color || '#ffd54f', 'stroke-opacity': sh.kind === 'quote' ? '0.75' : '0.55', 'stroke-width': '1',
-            rx: '1.5',
-          }));
+          if (sh.kind === 'underline') {
+            const th = 2;   // 线宽：单位坐标，缩放时跟着页面一起放大
+            g.appendChild(el('rect', {
+              x: r.x, y: r.y + Math.max(0, r.h - th), width: Math.max(1, r.w), height: th,
+              fill: sh.color || '#ffd54f', 'fill-opacity': '0.95', rx: '1',
+            }));
+          } else {
+            g.appendChild(el('rect', {
+              x: r.x, y: r.y, width: Math.max(1, r.w), height: Math.max(1, r.h),
+              fill: sh.color || '#ffd54f', 'fill-opacity': sh.kind === 'quote' ? '0.18' : '0.42',
+              stroke: sh.color || '#ffd54f', 'stroke-opacity': sh.kind === 'quote' ? '0.75' : '0.55', 'stroke-width': '1',
+              rx: '1.5',
+            }));
+          }
         }
         const ti = el('title', {});
-        ti.textContent = (sh.kind === 'quote' ? '摘录：' : '') + String(sh.text || '') + (sh.comment ? '\n评论：' + sh.comment : '');
+        const label = sh.kind === 'quote' ? '摘录：' : sh.kind === 'underline' ? '下划线：' : '';
+        ti.textContent = label + String(sh.text || '') + (sh.comment ? '\n评论：' + sh.comment : '');
         g.appendChild(ti);
         base.appendChild(g);
         break;
@@ -99,6 +111,27 @@ const Anno = window.Anno = (() => {
             ts.textContent = ln;
             t.appendChild(ts);
           });
+        }
+        break;
+      }
+      case 'image': {
+        // 图片标注（v9）：页面上画一个虚线框标出位置，缩略图在文献库「标注」里看
+        for (const r of (sh.rects || [])) {
+          const box = el('rect', {
+            x: r.x, y: r.y, width: Math.max(1, r.w), height: Math.max(1, r.h),
+            fill: 'none', stroke: sh.color || '#8a7f6a', 'stroke-width': 1.2,
+            'stroke-dasharray': '5 3', rx: '2',
+          });
+          const bti = el('title', {});
+          bti.textContent = String(sh.text || '图片标注');
+          box.appendChild(bti);
+          top.appendChild(box);
+          const badge = el('text', {
+            x: r.x + 4, y: r.y + 13, fill: sh.color || '#8a7f6a',
+            'font-size': '11', 'font-family': 'system-ui, "Segoe UI", sans-serif',
+          });
+          badge.textContent = '图';
+          top.appendChild(badge);
         }
         break;
       }

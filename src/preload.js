@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   // v8：从标注生成带页面截图的笔记
   noteFromAnno: (info) => ipcRenderer.invoke('note-from-anno', info),
   noteImage: (path) => ipcRenderer.invoke('note-image', { path }),
+  // v9：图片标注落盘（灯箱「存为标注」）
+  saveImageAnno: (info) => ipcRenderer.invoke('anno-save-image', info),
   // 批注导出为纯文本笔记
   exportNote: (info) => ipcRenderer.invoke('export-note', info),
   // 菜单命令：专注阅读模式 / 导出当前页图片（主进程菜单触发）
@@ -50,6 +52,10 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   onExportPagePng: (cb) => { ipcRenderer.on('export-page-png', () => cb()); },
   // 复制纯文本到系统剪贴板（v14：复制引用等）
   copyText: (text) => ipcRenderer.invoke('copy-text', { text }),
+  // v9：打开网页链接（笔记 Markdown 预览里的链接）
+  openExternal: (url) => ipcRenderer.invoke('open-external', { url }),
+  // v9：打印当前文档（交给系统默认程序）
+  printFile: (path) => ipcRenderer.invoke('print-file', { path }),
   // v20：把当前页导出成 PNG（数据是 dataURL）
   exportPagePng: (info) => ipcRenderer.invoke('export-page-png', info),
   // v21：把所有文档的批注汇总成一份 Markdown（outPath 可选，给了就不弹对话框）
@@ -71,6 +77,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   lib: {
     summary: () => ipcRenderer.invoke('lib-summary'),
     addPdf: (path, opts) => ipcRenderer.invoke('lib-add-pdf', { path, opts }),
+    // v9：独立笔记条目
+    newNote: (info) => ipcRenderer.invoke('lib-new-note', info),
     openItem: (key, page) => ipcRenderer.invoke('lib-open-item', { key, page }),
     updateItem: (key, patch) => ipcRenderer.invoke('lib-update-item', { key, patch }),
     // 回收站：removeItem 现在等于“移入回收站”（软删除）
@@ -98,6 +106,13 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     addNote: (key, note) => ipcRenderer.invoke('lib-add-note', { key, note }),
     updateNote: (key, id, patch) => ipcRenderer.invoke('lib-update-note', { key, id, patch }),
     removeNote: (key, id) => ipcRenderer.invoke('lib-remove-note', { key, id }),
+    // v9：按父条目元数据重命名附件文件（标注与全文索引随迁）
+    renameFile: (keys) => ipcRenderer.invoke('lib-rename-file', { keys }),
+    // v9：撤销 / 重做（快照式，覆盖删除、标签、收藏集、批量等）
+    undo: () => ipcRenderer.invoke('lib-undo'),
+    redo: () => ipcRenderer.invoke('lib-redo'),
+    undoInfo: () => ipcRenderer.invoke('lib-undo-info'),
+    onFilesRenamed: (cb) => { ipcRenderer.on('files-renamed', (_e, info) => cb(info)); },
     revealItem: (key) => ipcRenderer.invoke('lib-reveal-item', { key }),
     relinkItem: (key) => ipcRenderer.invoke('lib-relink-item', { key }),
     // v11：库级全文检索 / 备份 / 数据目录

@@ -1190,6 +1190,84 @@ function annoPublic(id, m) {
   };
 }
 
+// ---------- 撤销 / 重做（v9） ----------
+// 快照式：每次「可撤销操作」执行前后各序列化一次库，有变化就压一个撤销点。
+// 比起给每个操作写反向逻辑，这样覆盖全、不会漏字段，代价是两步 JSON.stringify
+// （库通常几百 KB ~ 几 MB，用户手动操作时才跑，可以接受）。
+const UNDO_LIMIT = 20;
+let undoStack = [];
+let redoStack = [];
+
+function snapshotJson() { return JSON.stringify(load()); }
+
+function restoreSnapshot(str) {
+  try {
+    cache = normalize(JSON.parse(str));
+    save();
+    return true;
+  } catch (_) { return false; }
+}
+
+function undoInfo() {
+  return {
+    canUndo: undoStack.length,
+    canRedo: redoStack.length,
+    undoDesc: undoStack.length ? undoStack[undoStack.length - 1].desc : '',
+    redoDesc: redoStack.length ? redoStack[redoStack.length - 1].desc : '',
+  };
+}
+
+function undo() {
+  const it = undoStack.pop();
+  if (!it) return { ok: false, error: '没有可撤销的操作' };
+  const nowSnap = snapshotJson();
+  if (!restoreSnapshot(it.snap)) return { ok: false, error: '撤销失败：备份数据损坏' };
+  redoStack.push({ desc: it.desc, snap: nowSnap });
+  if (redoStack.length > UNDO_LIMIT) redoStack.shift();
+  return { ok: true, desc: it.desc };
+}
+
+function redo() {
+  const it = redoStack.pop();
+  if (!it) return { ok: false, error: '没有可重做的操作' };
+  const nowSnap = snapshotJson();
+  if (!restoreSnapshot(it.snap)) return { ok: false, error: '重做失败：备份数据损坏' };
+  undoStack.push({ desc: it.desc, snap: nowSnap });
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  return { ok: true, desc: it.desc };
+}
+
+// 给导出函数套一层：执行前后比对，真有变化才留撤销点（返回 false / 没有改动时不污染栈）。
+// 注意 addPdf / importItems 之类是 async：要等 Promise 落定后再比快照，否则永远比在中间态。
+function enableUndo(names) {
+  for (const name of Object.keys(names)) {
+    const orig = module.exports[name];
+    if (typeof orig !== 'function' || orig.__undoWrapped) continue;
+    const wrapped = function (...args) {
+      let before = '';
+      try { before = snapshotJson(); } catch (_) {}
+      const finish = () => {
+        let after = before;
+        try { after = snapshotJson(); } catch (_) {}
+        if (before && after !== before) {
+          undoStack.push({ desc: names[name], snap: before });
+          if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+          redoStack = [];
+        }
+      };
+      const r = orig.apply(module.exports, args);
+      if (r && typeof r.then === 'function') {
+        r.then(finish, finish);
+        return r;
+      }
+      finish();
+      return r;
+    };
+    wrapped.__undoWrapped = true;
+    module.exports[name] = wrapped;
+  }
+}
+
 module.exports = {
   init, filePath, load, save, summary,
   addPdf, addItem, updateItem, removeItem,
@@ -1205,5 +1283,42 @@ module.exports = {
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,
   exportStore, replaceStore, mergeStore, backupNow,
   guessTitleFromPath, ITEM_TYPES,
+  undo, redo, undoInfo,
   resetCache() { cache = null; }, // 测试钩子：模拟新进程从磁盘重载
+  resetUndo() { undoStack = []; redoStack = []; },   // 测试钩子：清空撤销栈（不动数据）
 };
+
+// 哪些操作可以撤销（描述会显示在提示里）。笔记的逐字编辑不进撤销栈，否则打字就把栈填满了。
+enableUndo({
+  addPdf: '添加文档',
+  trashItem: '移入回收站',
+  restoreItem: '从回收站还原',
+  deleteItemForever: '永久删除条目',
+  emptyTrash: '清空回收站',
+  trashItems: '批量移入回收站',
+  updateItem: '修改条目信息',
+  addItem: '新建条目',
+  addTag: '添加标签',
+  removeTag: '移除标签',
+  renameTag: '重命名标签',
+  removeTagEverywhere: '全库移除标签',
+  mergeTags: '合并标签',
+  addCollection: '新建收藏集',
+  removeCollection: '删除收藏集',
+  renameCollection: '重命名收藏集',
+  setCollections: '修改收藏集归属',
+  moveItem: '移动到收藏集',
+  bulkUpdate: '批量编辑',
+  importItems: '导入题录',
+  mergeItems: '合并重复条目',
+  addRelation: '添加关联',
+  removeRelation: '解除关联',
+  addSearch: '保存搜索条件',
+  removeSearch: '删除搜索条件',
+  setAnnoTags: '标注加标签',
+  addAnnoTags: '标注批量加标签',
+  removeAnnoTag: '标注移除标签',
+  updateAnno: '编辑标注',
+  linkAnnoToItem: '关联标注与条目',
+  unlinkAnno: '解除标注关联',
+});

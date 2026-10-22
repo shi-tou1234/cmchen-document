@@ -224,6 +224,8 @@ async function loadPdf(data, fileName, smoke, meta) {
   const s = App.state;
   const m = meta || {};
   const my = ++loadSeq;
+  // v9：切文档前先停掉朗读，别让上一篇的声音念着新一篇的文字
+  if (App.speakStop) App.speakStop();
   try {
     setStatus('解析中…');
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -497,6 +499,7 @@ function closeDocument() {
   if (App.richVO) { try { App.richVO.disconnect(); } catch (_) {} }
   pageImageCache = new Map();
   if (window.Anno && Anno.reset) Anno.reset();   // 撤销栈不能跨文档
+  if (App.speakStop) App.speakStop();            // v9：关文档别再念上一篇
   searchSeq++;
   s.pdfDoc = null; s.sourceBytes = null; s.numPages = 0; s.currentPage = 1;
   s.mode = 'pdf'; s.richPages = null; s.itemKey = ''; s.item = null; s.citation = '';
@@ -713,6 +716,9 @@ function paintSearchHl(n) {
 App.doSearch = async function (queryRaw) {
   const s = App.state;
   const q = String(queryRaw || '').trim().toLowerCase();
+  // 从文献库点全文结果进来时是程序化调用，把词回填到搜索框，让用户看到「在搜什么」
+  const sbx = $('search-box');
+  if (sbx && sbx.value.trim() !== String(queryRaw || '').trim()) sbx.value = String(queryRaw || '');
   const seq = ++searchSeq;          // 本次搜索的代号：后面的 await 都要先验它
   if (s.mode === 'rich') { richSearch(queryRaw, seq); return; }
   s.search = { query: q, results: [], rects: new Map(), hits: [], hitIndex: -1 };
@@ -758,6 +764,8 @@ App.doSearch = async function (queryRaw) {
   for (const [n, v] of s.rendered) { if (v) paintSearchHl(n); }
   renderSearchResults();
   setStatus(`「${queryRaw}」共 ${s.search.results.length} 处命中`);
+  // v9：有命中就直接跳到第一处（从文献库点全文结果进来时，落点就是命中位置）
+  if (s.search.hits.length) gotoSearchHit(1);
 };
 
 // 擦掉所有页面上已经画出的搜索高亮（清空搜索 / 换文档时调用）
@@ -1548,6 +1556,7 @@ async function openImageLightbox(pageEl, clientX, clientY) {
     Lightbox.open({
       items: [{ canvas: c, label: '第 ' + pageNum + ' 页 · 图（' + layers.length + ' 层已合成）' }],
       index: 0,
+      saveCtx: { path: App.state.filePath, page: pageNum, rect: union, text: '图片标注 · 第 ' + pageNum + ' 页' },
     });
     return;
   }
@@ -1561,13 +1570,24 @@ async function openImageLightbox(pageEl, clientX, clientY) {
     built.push({
       canvas: c,
       srcIndex: i,
+      rect: list[i],
       label: '第 ' + pageNum + ' 页 · 图 ' + (i + 1) + (list.length > 1 ? ' / ' + list.length : ''),
     });
   }
   if (!built.length) { toast('这一块的图片取不出来'); return; }
   if (seq !== lbOpenSeq || !document.body.classList.contains('tool-image')) return;
   const want = list.indexOf(hit);
-  Lightbox.open({ items: built, index: Math.max(0, built.findIndex((b) => b.srcIndex === want)) });
+  const start = Math.max(0, built.findIndex((b) => b.srcIndex === want));
+  const item = built[start] || {};
+  Lightbox.open({
+    items: built,
+    index: start,
+    // 图片的位置用当前这张的矩形（翻到别张时上下文不跟着变——存的是打开时那张）
+    saveCtx: {
+      path: App.state.filePath, page: pageNum, rect: item.rect || hit,
+      text: '图片标注 · 第 ' + pageNum + ' 页',
+    },
+  });
 }
 
 // 右键菜单「放大看这一块」：把点击处周围一块按高分辨率重渲染后放进灯箱。
@@ -1584,9 +1604,29 @@ async function openRegionLightbox(pageEl, clientX, clientY) {
   const region = regionAround(ux, uy, pageEl._unit);
   const c = await renderImageRegion(pdfPage, region);
   if (!c || seq !== lbOpenSeq) { if (!c) toast('这一块取不出来'); return; }
-  Lightbox.open({ items: [{ canvas: c, label: '第 ' + pageNum + ' 页 · 局部放大' }], index: 0 });
+  Lightbox.open({
+    items: [{ canvas: c, label: '第 ' + pageNum + ' 页 · 局部放大' }],
+    index: 0,
+    saveCtx: { path: App.state.filePath, page: pageNum, rect: region, text: '图片标注（局部放大）· 第 ' + pageNum + ' 页' },
+  });
 }
 App.openRegionLightbox = openRegionLightbox;
+
+// v9：图片标注落盘 —— 灯箱里的图片 + 它在 PDF 里的位置，存进库（可搜索 / 打标签 / 生成笔记）
+App.saveImageAnno = async function (canvas, ctx) {
+  if (!canvas || !ctx || !ctx.path) { toast('当前没有打开文档，存不了图片标注'); return; }
+  let dataUrl = '';
+  try { dataUrl = canvas.toDataURL('image/png'); } catch (_) { toast('截图失败'); return; }
+  const r = await window.pdfBridge.saveImageAnno({
+    path: ctx.path, page: ctx.page, dataUrl, rect: ctx.rect, text: ctx.text,
+  });
+  if (r && r.ok) {
+    toast('已存为图片标注，可在文献库「标注」里找到');
+    if (window.LibraryUI && window.LibraryUI.isOpen && window.LibraryUI.isOpen()) window.LibraryUI.loadAnnos && window.LibraryUI.loadAnnos(true);
+  } else {
+    toast('保存失败：' + ((r && r.error) || '未知错误'));
+  }
+};
 App.scrollToPage = scrollToPage;   // 探针/外部跳页用
 
 // ---------- 专注阅读模式（F11） ----------
@@ -1726,6 +1766,7 @@ async function saveAnnosNow() {
   try { await window.pdfBridge.saveAnnos(s.filePath, pages); } catch (_) {}
 }
 App.flushAnnos = saveAnnosNow;
+App.closeDocument = closeDocument;   // v9：探针/外部关闭文档（顺带停朗读）
 App.notifyAnnoChanged = function () {
   refreshAnnoPane();
   clearTimeout(App._annoSaveTimer);
@@ -1999,6 +2040,87 @@ function runSmoke(fileName) {
   }, 200);
 }
 
+// ---------- 朗读（v9，Web Speech API，只读当前页） ----------
+// 一次读完一页就停：长文档连续朗读会让「停」变得难用，也容易和系统语音抢资源。
+const speakState = { status: 'idle', page: 0 };
+
+function syncSpeakUi() {
+  const E = App.els || {};
+  if (E.speak) {
+    E.speak.classList.toggle('active', speakState.status !== 'idle');
+    E.speak.title = speakState.status === 'speaking' ? '暂停朗读'
+      : speakState.status === 'paused' ? '继续朗读' : '朗读当前页';
+  }
+  if (E.speakStop) E.speakStop.disabled = speakState.status === 'idle';
+}
+
+async function pageTextForSpeech(pdfPage) {
+  try {
+    const tc = await pdfPage.getTextContent();
+    const parts = [];
+    for (const it of tc.items) {
+      const s = String(it.str || '');
+      if (!s) continue;
+      parts.push(s);
+      if (!/\s$/.test(s)) parts.push(' ');
+    }
+    return parts.join('').replace(/\s+/g, ' ').trim();
+  } catch (_) { return ''; }
+}
+
+App.speakToggle = async function () {
+  if (!('speechSynthesis' in window)) { toast('当前环境不支持朗读'); return; }
+  if (speakState.status === 'speaking') {
+    window.speechSynthesis.pause();
+    speakState.status = 'paused';
+    syncSpeakUi();
+    return;
+  }
+  if (speakState.status === 'paused') {
+    window.speechSynthesis.resume();
+    speakState.status = 'speaking';
+    syncSpeakUi();
+    return;
+  }
+  const s = App.state;
+  if (!s.pdfDoc) { toast('先打开一个文档'); return; }
+  const pageNum = s.currentPage || 1;
+  const el = App.pageEl(pageNum);
+  const pdfPage = el && el._pdfPage;
+  if (!pdfPage) { toast('这一页还没渲染好'); return; }
+  const text = (await pageTextForSpeech(pdfPage)).slice(0, 6000);
+  if (!text) { toast('这一页没有可朗读的文字（可能是扫描件）'); return; }
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = /[\u4e00-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
+  u.rate = 1;
+  u.onend = () => { speakState.status = 'idle'; syncSpeakUi(); };
+  u.onerror = () => { speakState.status = 'idle'; syncSpeakUi(); };
+  try { window.speechSynthesis.cancel(); } catch (_) {}
+  window.speechSynthesis.speak(u);
+  speakState.status = 'speaking';
+  speakState.page = pageNum;
+  syncSpeakUi();
+  toast('开始朗读第 ' + pageNum + ' 页');
+};
+
+App.speakStop = function () {
+  if (!('speechSynthesis' in window)) return;
+  try { window.speechSynthesis.cancel(); } catch (_) {}
+  speakState.status = 'idle';
+  syncSpeakUi();
+};
+App.speakStatus = function () { return speakState.status; };
+
+// 打印当前文档：交给系统默认程序（Windows Start-Process -Verb Print / macOS·Linux lp）
+App.printCurrent = async function () {
+  const s = App.state;
+  if (!s.filePath) { toast('先打开一个文档'); return; }
+  if (!window.pdfBridge || !window.pdfBridge.printFile) { toast('当前环境不支持打印'); return; }
+  const r = await window.pdfBridge.printFile(s.filePath);
+  if (r && r.ok) toast('已交给系统打印');
+  else toast('打印失败：' + ((r && r.error) || '未知错误'));
+};
+
 // ---------- 事件绑定 ----------
 function bind() {
   const E = App.els = {
@@ -2008,7 +2130,13 @@ function bind() {
     status: $('status-text'), zoom: $('zoom-text'), hint: $('empty-hint'),
     viewer: $('viewer'), pages: $('pages'),
     save: $('btn-save'),
+    speak: $('btn-speak'), speakStop: $('btn-speak-stop'), print: $('btn-print'),
   };
+
+  // v9：朗读 / 停止 / 打印
+  if (E.speak) E.speak.addEventListener('click', () => App.speakToggle());
+  if (E.speakStop) E.speakStop.addEventListener('click', () => App.speakStop());
+  if (E.print) E.print.addEventListener('click', () => App.printCurrent());
 
   // 弹系统对话框选 PDF（工具栏「打开」、标签栏「＋」、Ctrl+O 都走这里）
   async function openViaDialog() {
@@ -2023,6 +2151,34 @@ function bind() {
     if (res.smoke) loadPdf(res.data, res.fileName, true, res);
     else openDocument(res, { newTab: true });
   });
+  // v9：库里按条目元数据重命名了附件文件，把打开的标签 / 当前会话的路径跟着换掉
+  if (window.pdfBridge.onFilesRenamed) {
+    window.pdfBridge.onFilesRenamed((info) => {
+      const changes = (info && info.changes) || [];
+      if (!changes.length) return;
+      const base = (p) => String(p || '').split(/[\\/]/).pop();
+      let touched = false;
+      for (const c of changes) {
+        for (const t of App.tabs) {
+          if (t.filePath === c.oldPath) {
+            t.filePath = c.newPath;
+            t.fileName = base(c.newPath);
+            touched = true;
+          }
+        }
+        if (App.state.filePath === c.oldPath) {
+          App.state.filePath = c.newPath;
+          App.state.fileName = base(c.newPath);
+          App.els.fileName.textContent = App.state.fileName;
+          touched = true;
+        }
+      }
+      if (touched) {
+        renderTabs();
+        toast('文件已按条目信息重命名');
+      }
+    });
+  }
   // v8：在文献库里改了标注文字/批注，主进程改完真身后通知阅读器重画
   if (window.pdfBridge.onAnnoReload) {
     window.pdfBridge.onAnnoReload((info) => {
@@ -2111,6 +2267,7 @@ function bind() {
       const k = e.key.toLowerCase();
       if (k === 'o') { openViaDialog(); e.preventDefault(); return; }
       if (k === 'p' && e.shiftKey) { exportCurrentPagePng(); e.preventDefault(); return; }
+      if (k === 'p') { App.printCurrent(); e.preventDefault(); return; }   // v9：打印当前文档
       if (k === 'i' && e.shiftKey) { window.pdfBridge.openDevTools && window.pdfBridge.openDevTools(); e.preventDefault(); return; }
     }
     // 工具快捷键：v 看图 / p 画笔 / h 荧光 / l 直线 / r 矩形 / a 箭头 / t 文字 / n 便签 / e 橡皮

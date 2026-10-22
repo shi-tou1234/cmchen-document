@@ -53,6 +53,16 @@
     </button>
     <span class="sep"></span>
     <input id="search-box" type="search" placeholder="搜索全文，回车" title="文档内全文搜索 (Enter)" />
+    <span class="sep"></span>
+    <button id="btn-speak" class="tbtn" title="朗读当前页（再点暂停 / 继续）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h3l5 4V5L7 9z"/><path d="M16 8.5a4.5 4.5 0 0 1 0 7"/><path d="M18.5 6a8 8 0 0 1 0 12"/></svg>
+    </button>
+    <button id="btn-speak-stop" class="tbtn" title="停止朗读" disabled>
+      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+    </button>
+    <button id="btn-print" class="tbtn" title="打印当前文档 (Ctrl+P)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="7" rx="1.5"/><path d="M7 16h10v4H7z"/></svg>
+    </button>
     <span class="grow"></span>
     <button id="file-name" class="filename" title="点击切换文档（当前标签 / 最近打开 / 文献库）">未打开文档</button>
   </div>
@@ -205,10 +215,13 @@
           </label>
         </div>
         <div class="lib-head-actions">
+          <button id="lib-undo" class="tbtn" title="撤销上一步库操作（Ctrl+Z）" disabled>↶</button>
+          <button id="lib-redo" class="tbtn" title="重做（Ctrl+Shift+Z / Ctrl+Y）" disabled>↷</button>
           <button id="lib-dup" class="tbtn" title="按 DOI / 标题+年份查重">查重</button>
           <button id="lib-import-refs" class="tbtn" title="导入 BibTeX / RIS 题录（不含 PDF）">导入题录</button>
           <button id="lib-export-refs" class="tbtn" title="导出 BibTeX / RIS">导出文献</button>
           <button id="lib-bib" class="tbtn" title="按当前筛选 / 选中条目生成参考文献表">参考文献</button>
+          <button id="lib-new-note" class="tbtn" title="新建一条独立笔记（不挂在某篇文献上）">＋ 笔记</button>
           <button id="lib-import" class="tbtn accent" title="添加 PDF / Word / PPT / Excel / Markdown 等文件">添加文档</button>
           <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
           <span class="sep"></span>
@@ -219,6 +232,7 @@
         <span id="lib-bulk-count"></span>
         <button id="lib-bulk-edit" class="tbtn">批量编辑</button>
         <button id="lib-bulk-bib" class="tbtn">参考文献表</button>
+        <button id="lib-bulk-rename" class="tbtn" title="按「作者 - 年份 - 标题」重命名选中的附件文件">重命名文件</button>
         <button id="lib-bulk-trash" class="tbtn danger">移入回收站</button>
         <span id="lib-anno-tools" hidden>
           <input id="lib-anno-tag-input" type="text" placeholder="给选中的标注加标签" />
@@ -275,18 +289,18 @@
         </div>
         <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
 
-        <div class="ld-sec">
+        <div class="ld-sec" data-ld-sec="annos">
           <div class="ld-sec-title">标注 <span class="ld-hint">这篇文献上的高亮 / 批注，可跳到原页编辑</span></div>
           <div id="ld-annos" class="ld-annos"></div>
         </div>
 
-        <div class="ld-sec">
+        <div class="ld-sec" data-ld-sec="notes">
           <div class="ld-sec-title">阅读笔记 <span class="ld-hint">一条文献可以写多条</span></div>
           <div id="ld-notes" class="ld-notes"></div>
           <button id="ld-note-add" class="ld-mini">＋ 新建一条笔记</button>
         </div>
 
-        <div class="ld-sec">
+        <div class="ld-sec" data-ld-sec="cite">
           <div class="ld-sec-title">引用 <span class="ld-hint">一键复制到剪贴板</span></div>
           <div class="ld-inline">
             <select id="ld-cite-style" title="引用样式">
@@ -309,7 +323,7 @@
           <div id="ld-citekey-status" class="ld-hint"></div>
         </div>
 
-        <div class="ld-sec">
+        <div class="ld-sec" data-ld-sec="relations">
           <div class="ld-sec-title">相关条目 <span class="ld-hint">双向关联，可从任意一端解除</span></div>
           <div id="ld-relations" class="ld-relations"></div>
           <div class="ld-inline">
@@ -358,6 +372,7 @@
     <button class="sel-btn" data-sel="copy" title="复制选中文字，自动附出处">复制</button>
     <button class="sel-btn" data-sel="quote" title="摘录到阅读笔记，并复制带出处的引文">摘录</button>
     <button class="sel-btn" data-sel="highlight">高亮</button>
+    <button class="sel-btn" data-sel="underline" title="在选中文字下面画线（和 Zotero 的下划线标注一致）">下划线</button>
     <button class="sel-btn" data-sel="comment">高亮 + 评论</button>
     <input id="sel-color" type="color" value="#ffd54f" title="高亮颜色" />
   </div>
@@ -547,6 +562,11 @@
           <textarea id="anno-edit-text" rows="4" placeholder="高亮 / 摘录的文字"></textarea></label>
         <label class="ld-row"><span class="ld-lbl">批注</span>
           <textarea id="anno-edit-comment" rows="3" placeholder="你的想法"></textarea></label>
+        <div class="ld-inline">
+          <span class="ld-lbl">颜色</span>
+          <input id="anno-edit-color" type="color" value="#ffd54f" title="标注颜色（高亮 / 下划线 / 手绘 / 矩形…）" />
+          <span class="ld-hint">只对颜色类标注生效，文字标注会保留原色</span>
+        </div>
         <div id="anno-edit-status" class="set-status"></div>
       </div>
       <footer class="modal-foot">
@@ -562,6 +582,7 @@
   <script src="pdfjs/pdf.min.js"></script>
   <script src="../creators.js"></script>
   <script src="../query.js"></script>
+  <script src="../markdown.js"></script>
   <script src="../cite.js"></script>
   <script src="../bib.js"></script>
   <script src="pdfimages.js"></script>

@@ -617,8 +617,14 @@ function importRefsFile(file) {
 
 async function importRefsViaDialog() {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-    title: '导入 BibTeX / RIS 题录',
-    filters: [{ name: 'BibTeX / RIS', extensions: ['bib', 'bibtex', 'ris', 'txt'] }],
+    title: '导入题录（BibTeX / RIS / EndNote / RefWorks / CSL-JSON）',
+    filters: [
+      { name: '题录文件', extensions: ['bib', 'bibtex', 'ris', 'enw', 'refworks', 'json', 'txt'] },
+      { name: 'BibTeX', extensions: ['bib', 'bibtex'] },
+      { name: 'RIS', extensions: ['ris'] },
+      { name: 'EndNote', extensions: ['enw'] },
+      { name: 'RefWorks', extensions: ['refworks', 'txt'] },
+    ],
     properties: ['openFile'],
   });
   if (canceled || !filePaths.length) return { ok: false, canceled: true };
@@ -667,6 +673,160 @@ ipcMain.handle('open-path', async (_e, info) => {
   const r = await openFromPath(p);
   return r && r.ok ? { ok: true } : { ok: false, error: (r && r.error) || '打开失败' };
 });
+// ---------- 按父条目元数据重命名附件（v9） ----------
+// 规则与 Zotero 的默认模板一致：作者 - 年份 - 标题，缺的字段跳过。
+// 改名的同时要跟着搬两样东西，否则会「文件改了、标注/索引全丢」：
+//   annotations/<sha1(旧路径)>.json → 新路径的 hash 文件（并更新里面的 path）
+//   fulltext/<sha1(旧路径)>.json    → 同上
+function safeFileBase(s) {
+  return String(s || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.]+|[\s.]+$/g, '')
+    .slice(0, 100)
+    .trim();
+}
+
+function renameBaseFor(it) {
+  const creators = Array.isArray(it.creators) ? it.creators : [];
+  const first = creators.find((c) => c && (c.creatorType === 'author' || !c.creatorType)) || creators[0];
+  const author = first && typeof first === 'object'
+    ? (first.lastName || first.firstName || '')
+    : String(first || '');
+  const parts = [safeFileBase(author), safeFileBase(it.year), safeFileBase(it.title)].filter(Boolean);
+  return parts.join(' - ') || safeFileBase(path.basename(it.attachment && it.attachment.path, path.extname(it.attachment.path || '')) || 'untitled');
+}
+
+function uniquePath(dir, base, ext) {
+  let target = path.join(dir, base + ext);
+  let i = 2;
+  while (fs.existsSync(target) && i < 200) {
+    target = path.join(dir, base + ' (' + i + ')' + ext);
+    i++;
+  }
+  return target;
+}
+
+// 一个文件改了名，它的标注文件与全文索引也跟着搬到新路径对应的文件
+function moveSidecar(oldPath, newPath) {
+  const moved = { anno: false, ft: false };
+  try {
+    const oldAnno = annoFileFor(oldPath);
+    if (fs.existsSync(oldAnno)) {
+      const obj = JSON.parse(fs.readFileSync(oldAnno, 'utf8'));
+      obj.path = newPath;
+      fs.writeFileSync(annoFileFor(newPath), JSON.stringify(obj));
+      try { fs.unlinkSync(oldAnno); } catch (_) {}
+      moved.anno = true;
+    }
+  } catch (_) {}
+  try {
+    const oldFt = fulltext.fileFor(oldPath);
+    if (fs.existsSync(oldFt)) {
+      const obj = JSON.parse(fs.readFileSync(oldFt, 'utf8'));
+      obj.path = newPath;
+      fs.writeFileSync(fulltext.fileFor(newPath), JSON.stringify(obj));
+      try { fs.unlinkSync(oldFt); } catch (_) {}
+      moved.ft = true;
+    }
+  } catch (_) {}
+  return moved;
+}
+
+ipcMain.handle('lib-rename-file', (_e, info) => {
+  const keys = Array.isArray(info && info.keys) ? info.keys : [];
+  const out = { ok: true, renamed: 0, skipped: 0, failed: 0, changes: [], errors: [] };
+  for (const key of keys) {
+    const it = library.findItem(key);
+    if (!it || it.deletedAt || !it.attachment || !it.attachment.path) { out.skipped++; continue; }
+    const oldPath = it.attachment.path;
+    if (!fs.existsSync(oldPath)) { out.skipped++; out.errors.push({ key, error: '文件不存在' }); continue; }
+    try {
+      const ext = path.extname(oldPath);
+      const base = renameBaseFor(it);
+      if (!base) { out.skipped++; continue; }
+      const dir = path.dirname(oldPath);
+      // 先看「按规则该叫什么」：已经就是这个名就跳过（不能进 uniquePath，
+      // 否则它会把自己当成冲突，改成 XX (2).pdf）
+      const want = path.join(dir, base + ext);
+      if (path.resolve(want) === path.resolve(oldPath)) { out.skipped++; continue; }
+      const target = uniquePath(dir, base, ext);
+      fs.renameSync(oldPath, target);
+      library.setAttachment(key, target);   // 只接受路径字符串（内部会自己算 name）
+      const side = moveSidecar(oldPath, target);
+      out.renamed++;
+      out.changes.push({ key, oldPath, newPath: target, anno: side.anno, ft: side.ft });
+    } catch (err) {
+      out.failed++;
+      out.errors.push({ key, error: String(err && err.message ? err.message : err) });
+    }
+  }
+  if (out.renamed && win) {
+    win.webContents.send('lib-changed');
+    win.webContents.send('files-renamed', { changes: out.changes });
+  }
+  return out;
+});
+
+// ---------- 撤销 / 重做（v9） ----------
+ipcMain.handle('lib-undo', () => {
+  const r = library.undo();
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return Object.assign(r, { info: library.undoInfo() });
+});
+ipcMain.handle('lib-redo', () => {
+  const r = library.redo();
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return Object.assign(r, { info: library.undoInfo() });
+});
+ipcMain.handle('lib-undo-info', () => library.undoInfo());
+
+// v9：打印当前文档 —— 交给系统默认程序（不自己拼打印任务，PDF 阅读器该尊重系统打印设置）
+ipcMain.handle('print-file', (_e, info) => {
+  const p = String((info && info.path) || '').trim();
+  if (!p) return { ok: false, error: '没有打开文档' };
+  if (!fs.existsSync(p)) return { ok: false, error: '文件不存在' };
+  // 测试钩子：只验证流程，不真的往打印机发任务
+  if (process.env.PDFREADER_PRINT_DRY === '1') return { ok: true, dry: true };
+  try {
+    const { spawn } = require('child_process');
+    if (process.platform === 'win32') {
+      // PowerShell 的 -Verb Print 会调默认程序的打印动词；路径里的单引号要翻倍转义
+      const safe = p.replace(/'/g, "''");
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        "Start-Process -FilePath '" + safe + "' -Verb Print"], { windowsHide: true, stdio: 'ignore' });
+      child.on('error', () => {});
+    } else {
+      const child = spawn('lp', [p], { stdio: 'ignore' });
+      child.on('error', () => {});
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
+// v9：笔记预览里的外链（只放行 http/https/mailto，别把 file:// 或 shell 命令放出去）
+ipcMain.handle('open-external', (_e, info) => {
+  const url = String((info && info.url) || '').trim();
+  if (!/^(https?:\/\/|mailto:)/i.test(url)) return { ok: false, error: '只支持网页链接与邮件地址' };
+  try { shell.openExternal(url); return { ok: true }; }
+  catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
+
+// v9：独立笔记条目（不挂文献，Zotero 的 standalone note）。正文就是 notes[0]。
+ipcMain.handle('lib-new-note', (_e, info) => {
+  const text = String((info && info.text) || '');
+  const title = String((info && info.title) || '').trim() || '未命名笔记';
+  const it = library.addItem({
+    itemType: 'note',
+    title,
+    notes: [{ title: '', text }],
+  });
+  if (win) win.webContents.send('lib-changed');
+  return { ok: true, item: it ? library.summary().items.find((x) => x.key === it.key) : null };
+});
+
 ipcMain.handle('lib-add-pdf', async (_e, info) => {
   const p = info && info.path;
   if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
@@ -1167,13 +1327,15 @@ ipcMain.handle('anno-load', (_e, info) => {
 // 把所有文档的标注汇总成一张表（标注条目化的第一步）。
 // 标注本体仍在 annotations/<hash>.json，这里只是读出来给文献库界面用。
 const ANNO_KIND = {
-  mark: '高亮', highlight: '高亮', comment: '批注', quote: '摘录',
-  pen: '手绘', rect: '矩形', arrow: '箭头', line: '直线', text: '文字', note: '便签', select: '选区',
+  mark: '高亮', highlight: '高亮', comment: '批注', quote: '摘录', underline: '下划线',
+  pen: '手绘', rect: '矩形', arrow: '箭头', line: '直线', text: '文字', note: '便签',
+  image: '图片', select: '选区',
 };
 function annoKindOf(shape) {
   if (!shape) return '标注';
   if (shape.kind === 'quote') return '摘录';
   if (shape.comment) return '批注';
+  if (shape.tool === 'mark' && shape.kind === 'underline') return '下划线';
   if (shape.tool === 'text' || shape.tool === 'note') return ANNO_KIND[shape.tool] || '标注';
   if (shape.tool && shape.tool !== 'select') return ANNO_KIND[shape.tool] || '标注';
   return shape.text ? '高亮' : '选区';
@@ -1259,6 +1421,47 @@ ipcMain.handle('anno-update', (_e, info) => {
   if (win) win.webContents.send('lib-changed');
   if (touched.path && win) win.webContents.send('anno-reload', { path: touched.path });
   return Object.assign({ ok: true }, r);
+});
+
+// v9：图片标注落盘 —— 灯箱里「存为标注」把这一块图片存进快照目录，
+// 并在标注文件对应页写入一条 tool:'image' 形状（位置 = 它在页面上的矩形）。
+ipcMain.handle('anno-save-image', (_e, info) => {
+  const filePath = String((info && info.path) || '').trim();
+  const dataUrl = String((info && info.dataUrl) || '');
+  const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!filePath) return { ok: false, error: '当前没有打开文档' };
+  if (!m) return { ok: false, error: '截图数据不合法' };
+  const rect = (info && info.rect) || {};
+  const x = Number(rect.x) || 0, y = Number(rect.y) || 0;
+  const w = Math.max(1, Number(rect.w) || 1), h = Math.max(1, Number(rect.h) || 1);
+  const page = Math.max(1, Math.floor(+((info && info.page) || 1)) || 1);
+  try {
+    const buf = Buffer.from(m[1], 'base64');
+    if (buf.length > 12 * 1024 * 1024) return { ok: false, error: '图片太大' };
+    const name = 'img-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex') + '.png';
+    fs.writeFileSync(path.join(snapshotsDir(), name), buf);
+    const rel = 'snapshots/' + name;
+    const file = annoFileFor(filePath);
+    let obj = { path: filePath, saved: Date.now(), pages: [] };
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (raw && Array.isArray(raw.pages)) obj = raw;
+    } catch (_) {}
+    let pg = obj.pages.find((p) => Number(p && p.page) === page);
+    if (!pg) { pg = { page, shapes: [] }; obj.pages.push(pg); }
+    if (!Array.isArray(pg.shapes)) pg.shapes = [];
+    const shape = {
+      id: genAnnoId(), tool: 'image', color: '#8a7f6a', width: 1,
+      image: rel, rects: [{ x, y, w, h }],
+      text: String((info && info.text) || ('图片标注 · 第 ' + page + ' 页')),
+      comment: '',
+    };
+    pg.shapes.push(shape);
+    obj.saved = Date.now();
+    fs.writeFileSync(file, JSON.stringify(obj));
+    if (win) win.webContents.send('anno-reload', { path: filePath });
+    return { ok: true, id: shape.id, image: rel };
+  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 });
 
 // ---------- 从标注生成笔记（v8 阶段二：带页面截图） ----------

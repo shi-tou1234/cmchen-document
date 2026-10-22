@@ -124,7 +124,8 @@ window.SelectionUI = (function () {
     }
     try { window.getSelection().removeAllRanges(); } catch (_) {}
     hideBar();
-    App.toast(comment ? '已高亮并保存评论' : (kind === 'quote' ? '已摘录' : '已高亮选中文字'));
+    const done = kind === 'quote' ? '已摘录' : kind === 'underline' ? '已加下划线' : '已高亮选中文字';
+    App.toast(comment ? '已高亮并保存评论' : done);
   }
 
   function openComment(initial, cb, opts) {
@@ -192,6 +193,7 @@ window.SelectionUI = (function () {
           App.copyWithSource(text, page);
         }
       } else if (action === 'highlight') commitMarks('');
+      else if (action === 'underline') commitMarks('', 'underline');
       else if (action === 'comment') {
         $('sel-bar').hidden = true;
         openComment('', (v) => commitMarks(v), { title: '高亮 + 评论', quote: text });

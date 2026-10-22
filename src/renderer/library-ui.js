@@ -25,6 +25,7 @@ window.LibraryUI = (function () {
     annos: [],            // 标注条目化 —— 汇总起来的标注
     annoTags: {},         // 标注 id → 标签
     annoLoaded: false,
+    notePreview: new Set(),   // v9：哪些笔记正处于 Markdown 预览态
     tagFilter: new Set(),   // v14：标签选择器（多选，命中任一即可）
     citeStyle: 'gbt7714',   // v14：引用样式
     citekeys: new Map(),    // v27：条目 key → 确定性 citekey
@@ -81,6 +82,7 @@ window.LibraryUI = (function () {
       } else if (!state.items.some((x) => x.key === k && !x.deletedAt)) state.selectedKeys.delete(k);
     }
     render();
+    syncUndoButtons();
   }
 
   // 标注本体在 userData/annotations/<hash>.json，这里一次性读回来
@@ -401,6 +403,13 @@ window.LibraryUI = (function () {
     if (it.creators && it.creators.length) meta.push(esc(creatorText(it.creators)));
     if (it.year) meta.push(esc(it.year));
     if (it.publication) meta.push(esc(it.publication));
+    // v9：独立笔记没有作者/年份，摘要就是正文前几十个字
+    const isNoteItem = it.itemType === 'note' && !it.attachment;
+    if (isNoteItem) {
+      const body = ((it.notes || [])[0] || {}).text || it.note || '';
+      const flat = String(body).replace(/\s+/g, ' ').trim();
+      if (flat) meta.push(esc(flat.length > 80 ? flat.slice(0, 80) + '…' : flat));
+    }
     const tags = (it.tags || []).map((t) => {
       const color = (state.tagColors && state.tagColors[t]) || '';
       return '<span class="lctag" data-tag-filter="' + esc(t) + '" title="按这个标签筛选">' +
@@ -416,7 +425,9 @@ window.LibraryUI = (function () {
     const openAttr = trashed ? '' : ' data-open="' + esc(it.key) + '"';
     // 2026-10-21 用户反馈：点条目名字应该进阅读，不该弹重命名（Zotero 也是这么做的：
     // 列表里单击=选中/打开，标题编辑在右侧详情面板）。重命名入口 = 详情面板的标题字段。
-    const titleAttr = trashed ? '' : ' title="单击选中，双击打开阅读"';
+    const titleAttr = trashed
+      ? ''
+      : (isNoteItem ? ' title="单击选中，双击编辑笔记"' : ' title="单击选中，双击打开阅读"');
     const tagAdd = trashed ? '' : '<span class="lc-addtag" data-addtag="' + esc(it.key) + '" title="加标签">＋</span>';
     const actions = trashed
       ? '<button data-detail="' + esc(it.key) + '">详情</button>' +
@@ -426,8 +437,9 @@ window.LibraryUI = (function () {
         '<button class="rm" data-trash="' + esc(it.key) + '">回收站</button>';
     const note = trashed
       ? '<div class="lcpath">在回收站中 · 磁盘文件未被删除</div>'
-      : (!it.hasFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
-    return '<div class="lib-card' + (selected ? ' selected' : '') + (picked ? ' picked' : '') + (cur ? ' current' : '') + (it.hasFile ? '' : ' missing') + '" data-key="' + esc(it.key) + '"' + openAttr +
+      : (!isNoteItem && !it.hasFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
+    return '<div class="lib-card' + (selected ? ' selected' : '') + (picked ? ' picked' : '') + (cur ? ' current' : '')
+      + (it.hasFile || isNoteItem ? '' : ' missing') + '" data-key="' + esc(it.key) + '"' + openAttr +
       (trashed ? '' : ' draggable="true"') + '>' +
       check +
       '<div class="lctitle"' + titleAttr + '>' + esc(it.title || '(无标题)') + '</div>' +
@@ -508,6 +520,7 @@ window.LibraryUI = (function () {
     $('anno-edit-src').innerHTML = '出处：' + annoEditSrc(a);
     $('anno-edit-text').value = a.text || '';
     $('anno-edit-comment').value = a.comment || '';
+    $('anno-edit-color').value = /^#[0-9a-f]{6}$/i.test(a.color || '') ? a.color : '#ffd54f';
     $('anno-edit-status').textContent = '';
     m.hidden = false;
     setTimeout(() => $('anno-edit-text').focus(), 30);
@@ -526,6 +539,8 @@ window.LibraryUI = (function () {
       text: String($('anno-edit-text').value || ''),
       comment: String($('anno-edit-comment').value || ''),
     };
+    const color = String($('anno-edit-color').value || '');
+    if (/^#[0-9a-f]{6}$/i.test(color)) patch.color = color;
     const r = await window.pdfBridge.updateAnno(a.id, patch);
     if (!r || !r.ok) {
       $('anno-edit-status').textContent = '保存失败：' + ((r && r.error) || '标注可能已被删除');
@@ -693,6 +708,8 @@ window.LibraryUI = (function () {
     if (el.bulkEdit) el.bulkEdit.hidden = anno;
     if (el.bulkBib) el.bulkBib.hidden = anno;
     if (el.bulkTrash) el.bulkTrash.hidden = anno;
+    const bulkRename = $('lib-bulk-rename');
+    if (bulkRename) bulkRename.hidden = anno;
     if (el.annoTools) el.annoTools.hidden = !anno;
   }
 
@@ -831,6 +848,61 @@ window.LibraryUI = (function () {
       }).join('');
   }
 
+  // ---------- 撤销 / 重做（v9） ----------
+  async function doUndo(isRedo) {
+    if (!L() || (isRedo ? !L().redo : !L().undo)) return;
+    let r = null;
+    try { r = await (isRedo ? L().redo() : L().undo()); } catch (err) { r = { ok: false, error: err && err.message }; }
+    await refresh();
+    if (!r || !r.ok) {
+      window.App && window.App.toast && window.App.toast((r && r.error) || (isRedo ? '没有可重做的操作' : '没有可撤销的操作'));
+    } else {
+      window.App && window.App.toast && window.App.toast((isRedo ? '已重做：' : '已撤销：') + (r.desc || ''));
+      // 撤销可能把当前选中的条目删掉了
+      if (state.selectedKey && !state.items.some((x) => x.key === state.selectedKey)) closeDetail();
+    }
+    syncUndoButtons();
+  }
+  function syncUndoButtons() {
+    if (!L() || !L().undoInfo) return;
+    L().undoInfo().then((info) => {
+      if (!info) return;
+      if (el.undo) {
+        el.undo.disabled = !info.canUndo;
+        el.undo.title = info.canUndo ? '撤销：' + info.undoDesc + '（Ctrl+Z）' : '没有可撤销的操作';
+      }
+      if (el.redo) {
+        el.redo.disabled = !info.canRedo;
+        el.redo.title = info.canRedo ? '重做：' + info.redoDesc + '（Ctrl+Shift+Z / Ctrl+Y）' : '没有可重做的操作';
+      }
+    }).catch(() => {});
+  }
+
+  // v9：独立笔记条目（Zotero 的 standalone note）—— 建一条 itemType:'note' 的条目，正文在 notes[0]
+  async function newNoteItem() {
+    if (!L() || !L().newNote) return;
+    const r = await L().newNote({});
+    if (!r || !r.ok || !r.item) {
+      window.App && window.App.toast && window.App.toast('新建笔记失败');
+      return;
+    }
+    state.scope = { type: 'all' };
+    state.tagFilter.clear();
+    state.query = '';
+    if (el.search) el.search.value = '';
+    await refresh();
+    state.selectedKey = r.item.key;
+    render();
+    openDetail(r.item.key);
+    // 直接落在正文上：新建笔记就该能立刻写
+    setTimeout(() => {
+      const it = selectedItem();
+      const box = el.ld.notes && el.ld.notes.querySelector('[data-note-field="text"]');
+      if (it && it.itemType === 'note' && box) box.focus();
+      else if (el.ld.title) el.ld.title.focus();
+    }, 60);
+  }
+
   // v23：阅读笔记列表（每条独立保存，不影响表单里没保存的其他字段）
   function renderNotes(it) {
     if (!el.ld.notes) return;
@@ -839,28 +911,65 @@ window.LibraryUI = (function () {
       el.ld.notes.innerHTML = '<div class="ld-hint">还没有笔记。读完一段写一条，之后能单独翻出来看。</div>';
       return;
     }
-    el.ld.notes.innerHTML = notes.map((n) => (
-      '<div class="ld-note" data-note-id="' + esc(n.id) + '">' +
+    el.ld.notes.innerHTML = notes.map((n) => {
+      // v9：正文存 Markdown，默认编辑态；点「预览」看渲染结果（图片 / 表格 / 链接 / 代码）
+      const md = (window.Md && n.text) ? window.Md.render(n.text) : '';
+      return '<div class="ld-note" data-note-id="' + esc(n.id) + '">' +
         '<input class="ld-note-title" data-note-field="title" value="' + esc(n.title) + '" placeholder="标题（可以留空）" />' +
+        '<div class="ld-note-bar">' +
+          (md ? '<button class="ld-mini" data-note-preview="1" title="在编辑与预览之间切换">预览</button>'
+              : '<span class="ld-hint">支持 Markdown：**粗体** · [链接](url) · ![](图片) · 表格 · 代码块</span>') +
+        '</div>' +
         (n.image
           ? '<img class="ld-note-img" data-note-img="' + esc(n.image) + '" alt="标注截图" title="从标注生成的页面截图" />'
           : '') +
-        '<textarea class="ld-note-text" data-note-field="text" rows="3" placeholder="这条笔记的内容…">' + esc(n.text) + '</textarea>' +
-        '<div class="ld-note-foot"><span class="ld-hint">失焦自动保存' + (n.image ? ' · 含标注截图' : '') + '</span>' +
+        '<textarea class="ld-note-text" data-note-field="text" rows="3" placeholder="这条笔记的内容…（Markdown：**粗体**、[链接](https://…)、![](snapshots/xx.png)、| 表格 |）">' + esc(n.text) + '</textarea>' +
+        (md ? '<div class="ld-note-md" hidden>' + md + '</div>' : '') +
+        '<div class="ld-note-foot"><span class="ld-hint">失焦自动保存' + (n.image ? ' · 含标注截图' : '') + ' · Markdown</span>' +
         '<button class="ld-mini ld-note-del" title="删除这条笔记">删除</button></div>' +
-      '</div>'
-    )).join('');
-    // 截图走 IPC 读 dataURL（数据目录里的 PNG，别让渲染层直接碰 file://）
-    for (const img of el.ld.notes.querySelectorAll('[data-note-img]')) {
-      const rel = img.dataset.noteImg;
+      '</div>';
+    }).join('');
+    // 截图与 Markdown 里的图片都走 IPC 读 dataURL（别让渲染层直接碰 file://）
+    for (const img of el.ld.notes.querySelectorAll('[data-note-img], [data-md-img]')) {
+      const rel = img.dataset.noteImg || img.dataset.mdImg;
       if (!rel || !window.pdfBridge || !window.pdfBridge.noteImage) continue;
       const token = rel;
       window.pdfBridge.noteImage(rel).then((r) => {
         if (!r || !r.ok || !img.isConnected) return;
-        if (img.dataset.noteImg !== token) return;   // 详情面板已经换了条目
+        if ((img.dataset.noteImg || img.dataset.mdImg) !== token) return;   // 详情面板已经换了条目
         img.src = r.dataUrl;
       }).catch(() => {});
     }
+    // 重建后保持原来处于预览态的笔记（失焦保存会触发重建）
+    for (const id of state.notePreview) {
+      const box = el.ld.notes.querySelector('[data-note-id="' + id + '"]');
+      const btn = box && box.querySelector('[data-note-preview]');
+      if (box && btn) toggleNotePreview(box, btn);
+    }
+  }
+
+  // 预览 / 编辑切换（就地切，不重建列表，免得丢掉正在编辑的其它内容）
+  function toggleNotePreview(noteEl, btn) {
+    const box = noteEl.querySelector('.ld-note-md');
+    const ta = noteEl.querySelector('.ld-note-text');
+    if (!box || !ta) return;
+    const toPreview = box.hidden;
+    // 切到预览前先把当前编辑内容同步进去（失焦保存是异步的，这里要能立刻看到）
+    if (toPreview && window.Md) {
+      const noteId = noteEl.dataset.noteId;
+      box.innerHTML = window.Md.render(ta.value);
+      for (const img of box.querySelectorAll('[data-md-img]')) {
+        const rel = img.dataset.mdImg;
+        if (!rel || !window.pdfBridge || !window.pdfBridge.noteImage) continue;
+        window.pdfBridge.noteImage(rel).then((r) => { if (r && r.ok && img.isConnected) img.src = r.dataUrl; }).catch(() => {});
+      }
+      if (noteId) state.notePreview.add(noteId);
+    } else if (!toPreview) {
+      state.notePreview.delete(noteEl.dataset.noteId);
+    }
+    box.hidden = !toPreview;
+    ta.hidden = toPreview;
+    if (btn) btn.textContent = toPreview ? '编辑' : '预览';
   }
 
   // 刷新条目数据但不重绘详情表单（免得把用户没保存的其它字段冲掉）
@@ -946,6 +1055,14 @@ window.LibraryUI = (function () {
     el.ld.doi.value = it.doi || '';
     el.ld.url.value = it.url || '';
     el.ld.abstract.value = it.abstract || '';
+    // v9：独立笔记条目只关心正文与标签，标注 / 引用 / 相关条目对她没有意义
+    const isNoteItem = it.itemType === 'note' && !it.attachment;
+    for (const sec of el.detail.querySelectorAll('[data-ld-sec]')) {
+      const name = sec.dataset.ldSec;
+      sec.hidden = isNoteItem && (name === 'annos' || name === 'cite' || name === 'relations');
+    }
+    el.ld.kind.textContent = isNoteItem ? '笔记' : '条目详情';
+    if (el.ld.noteAdd) el.ld.noteAdd.textContent = isNoteItem ? '＋ 继续写一条' : '＋ 新建一条笔记';
     renderDetailAnnos(it);
     renderNotes(it);
     state.detailTags = (it.tags || []).slice();
@@ -1107,6 +1224,8 @@ window.LibraryUI = (function () {
       '<div class="ld-attach-actions">' +
         '<button class="ld-mini" data-ld-reveal="1"' + (missing ? ' disabled' : '') + '>在文件夹中显示</button>' +
         '<button class="ld-mini" data-ld-relink="1"' + (trashed ? ' disabled' : '') + '>重新定位…</button>' +
+        '<button class="ld-mini" data-ld-rename="1"' + (trashed || missing ? ' disabled' : '')
+          + ' title="按「作者 - 年份 - 标题」重命名文件，标注与全文索引会一起跟着搬">按条目重命名</button>' +
       '</div>';
   }
 
@@ -1138,7 +1257,7 @@ window.LibraryUI = (function () {
   }
 
   // ---------- 动作 ----------
-  async function openItem(key, page) {
+  async function openItem(key, page, opts) {
     const res = await L().openItem(key, page);
     if (!res || !res.ok) {
       if (res && res.missingPath) { await refresh(); }
@@ -1147,6 +1266,38 @@ window.LibraryUI = (function () {
     }
     hide();
     if (typeof window.__libOpen === 'function') window.__libOpen(res);
+    // v9：从全文检索点进来时，顺手在页面上高亮关键词并跳到第一个命中
+    const q = opts && opts.highlight;
+    if (q) await highlightAfterOpen(res, q);
+  }
+
+  // 查询语法 → 适合页内搜索的正文词（页内搜索是纯子串，字段限定 / 排除词在这里没有意义）
+  function bodyTermOf(q) {
+    if (!window.Query) return String(q || '').trim();
+    try {
+      const ast = window.Query.parseQuery(q);
+      const tok = (ast.text || [])[0];
+      return tok ? tok.t : '';
+    } catch (_) { return String(q || '').trim(); }
+  }
+
+  async function highlightAfterOpen(res, q) {
+    const term = bodyTermOf(q);
+    if (!term) return;                       // 纯字段限定的查询没有正文词可高亮
+    const it = res && res.item;
+    const target = (it && it.attachment && it.attachment.path) || '';
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000) {
+      const s = window.App && window.App.state;
+      if (s && s.pdfDoc && (!target || s.filePath === target)) break;
+      await sleep(100);
+    }
+    const s = window.App && window.App.state;
+    if (!s || !s.pdfDoc) return;
+    try {
+      window.App.doSearch(term);
+      window.App.toast && window.App.toast('已在文档内高亮“' + term + '”');
+    } catch (_) {}
   }
 
   // 统一入库：对话框添加与拖入共用，dedupe 由 lib-add-pdf 处理。
@@ -1507,6 +1658,25 @@ window.LibraryUI = (function () {
     if (el.bulkModal) el.bulkModal.hidden = true;
     await refresh();
     window.App && window.App.toast && window.App.toast('批量修改已应用');
+  }
+
+  // v9：批量按「作者 - 年份 - 标题」重命名附件（标注与全文索引随迁，见 main.js）
+  async function bulkRenameFiles() {
+    const keys = [...state.selectedKeys].filter((k) => !k.startsWith(ANNO_PREFIX));
+    if (!keys.length) {
+      window.App && window.App.toast && window.App.toast('先选中要重命名的条目');
+      return;
+    }
+    const r = await L().renameFile(keys);
+    await refresh();
+    if (!r || !r.ok) {
+      window.App && window.App.toast && window.App.toast('重命名失败：' + ((r && r.errors && r.errors[0] && r.errors[0].error) || '未知错误'));
+      return;
+    }
+    const parts = ['已重命名 ' + (r.renamed || 0) + ' 个文件'];
+    if (r.skipped) parts.push('跳过 ' + r.skipped + ' 个（文件名已符合规则 / 没有附件）');
+    if (r.failed) parts.push('失败 ' + r.failed + ' 个');
+    window.App && window.App.toast && window.App.toast(parts.join('，'));
   }
 
   async function bulkTrash() {
@@ -1956,6 +2126,7 @@ window.LibraryUI = (function () {
       annoTools: $('lib-anno-tools'), annoTagInput: $('lib-anno-tag-input'),
       annoTagAdd: $('lib-anno-tag-add'), annoExport: $('lib-anno-export'), annoNote: $('lib-anno-note'),
       dup: $('lib-dup'), importRefs: $('lib-import-refs'), exportRefs: $('lib-export-refs'),
+      newNote: $('lib-new-note'), undo: $('lib-undo'), redo: $('lib-redo'),
       settingsBtn: $('lib-settings'),
       settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
       setAutoIndex: $('set-auto-index'), setInvertPages: $('set-invert-pages'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
@@ -1965,6 +2136,7 @@ window.LibraryUI = (function () {
       bulkYear: $('bulk-year'), bulkPublication: $('bulk-publication'),
       bulkAddTags: $('bulk-add-tags'), bulkRemoveTags: $('bulk-remove-tags'), bulkStatus: $('bulk-status'),
       detail: $('lib-detail'), ld: {
+        kind: $('ld-kind'),
         body: $('ld-body'),
         type: $('ld-type'), title: $('ld-title'), creators: $('ld-creators'), creatorAdd: $('ld-creator-add'), year: $('ld-year'),
         publication: $('ld-publication'), volume: $('ld-volume'), issue: $('ld-issue'), pages: $('ld-pages'),
@@ -2027,6 +2199,23 @@ window.LibraryUI = (function () {
         if (it) renderNotes(it);
       });
       el.ld.notes.addEventListener('click', async (e) => {
+        // v9：Markdown 预览切换 / 预览里的外链
+        const pv = e.target.closest('[data-note-preview]');
+        if (pv) {
+          const box = pv.closest('[data-note-id]');
+          if (box) toggleNotePreview(box, pv);
+          return;
+        }
+        const link = e.target.closest('[data-md-link]');
+        if (link) {
+          e.preventDefault();
+          const url = link.dataset.mdLink || '';
+          if (window.pdfBridge && window.pdfBridge.openExternal) {
+            const r = await window.pdfBridge.openExternal(url);
+            if (!r || !r.ok) window.App && window.App.toast && window.App.toast('打不开这个链接：' + ((r && r.error) || url));
+          }
+          return;
+        }
         const del = e.target.closest('.ld-note-del');
         if (!del) return;
         const box = del.closest('[data-note-id]');
@@ -2157,11 +2346,15 @@ window.LibraryUI = (function () {
     });
     if (el.ft) el.ft.addEventListener('click', (e) => {
       const row = e.target.closest('[data-ft-key]');
-      if (row) openItem(row.dataset.ftKey, +row.dataset.ftPage || 1);
+      // v9：点全文结果 → 打开到那一页，并把搜索词在页面上高亮出来
+      if (row) openItem(row.dataset.ftKey, +row.dataset.ftPage || 1, { highlight: state.query.trim() });
     });
     if (el.dup) el.dup.addEventListener('click', openDuplicates);
     if (el.importRefs) el.importRefs.addEventListener('click', importRefs);
     if (el.exportRefs) el.exportRefs.addEventListener('click', exportRefs);
+    if (el.newNote) el.newNote.addEventListener('click', newNoteItem);
+    if (el.undo) el.undo.addEventListener('click', () => doUndo(false));
+    if (el.redo) el.redo.addEventListener('click', () => doUndo(true));
     if (el.settingsBtn) el.settingsBtn.addEventListener('click', openSettings);
 
     // 参考文献表
@@ -2233,6 +2426,8 @@ window.LibraryUI = (function () {
       $('bulk-save').addEventListener('click', saveBulk);
       $('lib-bulk-edit').addEventListener('click', openBulk);
       $('lib-bulk-trash').addEventListener('click', bulkTrash);
+      const bulkRename = $('lib-bulk-rename');
+      if (bulkRename) bulkRename.addEventListener('click', bulkRenameFiles);
       $('lib-bulk-clear').addEventListener('click', () => { state.selectedKeys.clear(); renderGrid(); renderBulk(); });
       // 标注视图的批量动作
       if (el.annoTagAdd) el.annoTagAdd.addEventListener('click', tagSelectedAnnos);
@@ -2417,7 +2612,11 @@ window.LibraryUI = (function () {
     el.grid.addEventListener('dblclick', (e) => {
       if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.lc-check')) return;
       const card = e.target.closest('.lib-card[data-open]');
-      if (card) openItem(card.dataset.open);
+      if (!card) return;
+      const it = state.items.find((x) => x.key === card.dataset.open);
+      // v9：独立笔记没有附件，双击直接进详情写正文（不然会弹「条目没有附件」）
+      if (it && it.itemType === 'note' && !it.attachment) { openDetail(it.key); return; }
+      openItem(card.dataset.open);
     });
 
     // 右键菜单
@@ -2524,6 +2723,16 @@ window.LibraryUI = (function () {
       if (e.target.closest('[data-ld-reveal]')) {
         const r = await L().revealItem(it.key);
         if (!r || !r.ok) window.App && window.App.toast && window.App.toast('无法定位：' + ((r && r.error) || '未知错误'));
+      } else if (e.target.closest('[data-ld-rename]')) {
+        const r = await L().renameFile([it.key]);
+        if (r && r.renamed) {
+          await refresh();
+          el.ld.status.textContent = '已重命名：' + ((r.changes[0] || {}).newPath || '');
+        } else if (r && r.ok) {
+          el.ld.status.textContent = '文件名已经是这个规则了，不用改';
+        } else {
+          window.App && window.App.toast && window.App.toast('重命名失败：' + ((r && r.errors && r.errors[0] && r.errors[0].error) || '未知错误'));
+        }
       } else if (e.target.closest('[data-ld-relink]')) {
         const r = await L().relinkItem(it.key);
         if (r && r.ok) { await refresh(); el.ld.status.textContent = '附件已重新定位'; }
@@ -2554,6 +2763,15 @@ window.LibraryUI = (function () {
         || (el.bulkModal && !el.bulkModal.hidden)
         || (aeModal && !aeModal.hidden);
       if (!isOpen() && !modalOpen) return;
+      // v9：撤销 / 重做（输入框里让浏览器自己处理，别抢 Ctrl+Z）
+      if ((e.ctrlKey || e.metaKey) && !modalOpen && /^[zZyY]$/.test(e.key)) {
+        const t = e.target;
+        if (t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
+        e.preventDefault();
+        const isRedo = (e.key === 'y' || e.key === 'Y') || e.shiftKey;
+        doUndo(isRedo);
+        return;
+      }
       if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
         if (!isOpen()) return;
         e.preventDefault(); e.stopPropagation();
