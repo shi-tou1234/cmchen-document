@@ -209,6 +209,8 @@ NSIS 安装包默认装到当前用户目录（`%LOCALAPPDATA%\Programs\Trove`�
 | 单实例测试一跑就过 / 双开不拦 | `TEST_MODE` 把 `PDFREADER_HIDDEN` 也算进去了 |
 | 数据目录改名后找不到库 | userData 跟 `package.json` 的 `name` 走，不是 productName |
 | `git push` 连不上 github.com | 先重试；仍不行用 `git -c http.sslBackend=schannel push origin main` |
+| 双击安装包一闪就退，向导都没出来 | 直接重试；并发大文件 I/O / 杀软扫描时 NSIS 从 `%TEMP%\nsXXXX.tmp` 加载插件 DLL 会失败（事件查看器里是 `System.dll` 访问冲突 `0xc0000005`）。反复失败就先退掉正在跑的旧版，或直接用 portable |
+| 安装包"静默装成功"但装回了旧目录 | electron-builder 把上次的 `InstallLocation` 记在 `HKCU\Software\<GUID>`；换目录装前先删这个键，否则静默安装会沿用旧路径 |
 
 ## 发布清单
 
@@ -219,7 +221,13 @@ NSIS 安装包默认装到当前用户目录（`%LOCALAPPDATA%\Programs\Trove`�
 - [ ] 安装包静默安装 → 启动 → 卸载，快捷方式与安装目录清理干净
 - [ ] 更新 `CHANGELOG.md`（版本号在 `package.json`）
 - [ ] 更新 README / docs 里的版本号、测试数量与"已知边界"（功能变了边界也会变）
-- [ ] 推送 `main`
+- [ ] 推送 `main`（`git ls-remote origin main` 对一下本地 HEAD）
+- [ ] 打并推送 tag：`git tag -a v<版本> -m "Trove <版本>"` → `git push origin v<版本>`
+- [ ] 建 GitHub Release 并上传安装包（`gh` 不在 PATH，用完整路径）：
+      `C:\Users\24256\AppData\Local\Programs\gh-cli\bin\gh.exe release create v<版本> --repo shi-tou1234/cmchen-document --title "Trove <版本>" --notes-file <说明> "build\Trove-<版本>-portable.exe" "build\Trove-Setup-<版本>.exe"`
+- [ ] `gh release view v<版本> --json assets` 核对两个附件的 `size` 与本地字节数一致、`isDraft=false`、`isPrerelease=false`
+
+> 打 tag 后别忘 Release：只推代码和 tag 的话，仓库页面的 Releases 里仍然是旧版本（1.2.0 就是这么漏的）。
 
 ## 版本与分支
 
