@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const docconvert = require('./docconvert.js');
+const query = require('./query.js');
 
 const VERSION = 1;
 const MAX_CHARS_PER_PAGE = 200000;
@@ -193,11 +194,14 @@ function indexAll(items, opts) {
   });
 }
 
-function search(query) {
-  const raw = String(query || '').trim();
+function search(queryStr) {
+  const raw = String(queryStr || '').trim();
   if (!raw) return { ok: true, query: '', results: [], stats: stats() };
-  const terms = raw.toLowerCase().split(/\s+/).filter(Boolean);
-  const phrase = raw.toLowerCase();
+  const ast = query.parseQuery(raw);
+  const tokens = ast.text;
+  // 只有字段限定、没有正文词时，全文索引没有可搜的东西；由 main.js 的
+  // fulltextResults 走条目级字段过滤，这里直接返回空。
+  if (!tokens.length) return { ok: true, query: raw, results: [], stats: stats(), ast };
   const results = [];
   let files = [];
   try { files = fs.readdirSync(dirPath()).filter((f) => /^[a-f0-9]{24}\.json$/.test(f)); } catch (_) {}
@@ -212,24 +216,44 @@ function search(query) {
     } catch (_) { continue; }
     if (!entry || entry.error || !Array.isArray(entry.pages)) continue;
     for (const pg of entry.pages) {
-      const hay = String(pg.text || '').toLowerCase();
+      const orig = String(pg.text || '');
+      if (!orig) continue;
+      // fold 一次：小写 + 变音/引号折叠 + 空白归一，词与短语都在这上面匹配
+      const hay = query.fold(orig);
       if (!hay) continue;
-      let hit = true;
-      for (const term of terms) { if (hay.indexOf(term) < 0) { hit = false; break; } }
+      if (!query.matchNone(hay, ast.not)) continue;   // 排除词：任一命中即弃
+      // 评分：命中次数 × 词重（短语 ×3），再加密度加成（同样命中数，短页更相关；
+      // 最短按 60 字算，避免极短页权重爆炸）
+      let score = 0, totalHits = 0, hit = true;
+      for (const tok of tokens) {
+        const c = query.countToken(hay, tok.t);
+        if (!c) { hit = false; break; }
+        totalHits += c;
+        score += c * (tok.phrase ? 3 : 1);
+      }
       if (!hit) continue;
-      const at = hay.indexOf(terms[0]);
+      score += totalHits * 1000 / Math.max(60, hay.length);
+      // snippet 锚点：短语优先。位置要在原文上取（fold 会归并空白、长度可能变），
+      // 原文锚不上（查询带变音折叠等）才退回 fold 文本
+      const origLower = orig.toLowerCase();
+      let anchorTok = null;
+      for (const tok of tokens) { if (tok.phrase) { anchorTok = tok; break; } }
+      if (!anchorTok) anchorTok = tokens[0];
+      let at = origLower.indexOf(anchorTok.t);
+      let inHay = at < 0;
+      if (inHay) at = Math.max(0, query.firstHit(hay, tokens));
+      const atLen = anchorTok.t.length;
       const start = Math.max(0, at - 46);
-      const end = Math.min(hay.length, at + terms[0].length + 62);
-      let snippet = String(pg.text || '').slice(start, end).replace(/\s+/g, ' ').trim();
+      const end = Math.min((inHay ? hay : orig).length, at + atLen + 62);
+      let snippet = (inHay ? hay : orig).slice(start, end).replace(/\s+/g, ' ').trim();
       if (start > 0) snippet = '…' + snippet;
-      if (end < hay.length) snippet += '…';
-      let count = 0, idx = at;
-      while (idx >= 0 && count < 99) { count++; idx = hay.indexOf(terms[0], idx + terms[0].length); }
-      results.push({ path: entry.path, page: pg.page || 0, snippet, count, phrase: phrase.length > 1 });
+      if (end < (inHay ? hay : orig).length) snippet += '…';
+      results.push({ path: entry.path, page: pg.page || 0, snippet, count: totalHits, score, phrase: tokens.some((t) => t.phrase) });
     }
   }
-  results.sort((a, b) => (a.path.localeCompare(b.path)) || (a.page - b.page));
-  return { ok: true, query: raw, results, stats: stats() };
+  // 相关性优先（报告 3.2：原来按「文件路径+页码」排，命中最多的页反而排在后面）
+  results.sort((a, b) => (b.score - a.score) || (a.path.localeCompare(b.path)) || (a.page - b.page));
+  return { ok: true, query: raw, results, stats: stats(), ast };
 }
 
 function stats() {

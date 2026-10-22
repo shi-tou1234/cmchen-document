@@ -36,16 +36,16 @@ lib.init();
 lib.resetCache();
 
 let sum = lib.summary();
-ok('库版本升到 v5', sum.version === 5, 'version=' + sum.version);
+ok('库版本升到 v7', sum.version === 7, 'version=' + sum.version);
 const old1 = sum.items.find((x) => x.key === 'old1');
 ok('v3 的 note 字段搬成第一条笔记', !!(old1.notes && old1.notes.length === 1 && old1.notes[0].text === '这是旧库里的单条笔记'),
   JSON.stringify(old1.notes));
 ok('搬过来的笔记有 id', !!(old1.notes[0].id && old1.notes[0].id.length >= 4), JSON.stringify(old1.notes[0]));
 const old2 = sum.items.find((x) => x.key === 'old2');
 ok('没有 note 的条目笔记为空', Array.isArray(old2.notes) && old2.notes.length === 0, JSON.stringify(old2.notes));
-ok('迁移后落盘为 v5', (() => {
+ok('迁移后落盘为 v7', (() => {
   const raw = JSON.parse(fs.readFileSync(libFile, 'utf8'));
-  return raw.version === 5 && raw.items.find((x) => x.key === 'old1').notes.length === 1;
+  return raw.version === 7 && raw.items.find((x) => x.key === 'old1').notes.length === 1;
 })(), fs.readFileSync(libFile, 'utf8').slice(0, 80));
 ok('迁移前留了备份', (() => {
   const dir = path.join(tmp, 'backups');

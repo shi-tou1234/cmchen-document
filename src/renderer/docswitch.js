@@ -85,12 +85,13 @@ const DocSwitch = (function () {
         + '<button class="dsw-clear" data-dsw-clear-recent>清空</button></div>';
       html += recRows.map((r) => rowHtml({ kind: 'recent', id: r.path, name: r.name, sub: r.path, page: r.page || 0 })).join('');
     }
-    const libRows = (items.library || []).filter((x) => match(x.title) || match((x.creators || []).join(' ')));
+    const creators = (list) => (window.Creators ? window.Creators.displayList(list) : '');
+    const libRows = (items.library || []).filter((x) => match(x.title) || match(creators(x.creators)));
     if (libRows.length) {
       html += '<div class="dsw-sec">文献库</div>';
       html += libRows.slice(0, 60).map((x) => rowHtml({
         kind: 'lib', id: x.key, name: x.title || '(无标题)',
-        sub: (x.creators || []).join(', ') + (x.year ? ' · ' + x.year : ''),
+        sub: creators(x.creators) + (x.year ? ' · ' + x.year : ''),
       })).join('');
     }
     if (!html) html = '<div class="dsw-empty">没有匹配的文档</div>';

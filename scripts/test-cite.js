@@ -74,7 +74,8 @@ ok('APA 含刊名卷期页码', /计算机学报,\s*43\(2\),\s*100-110\./.test(s
 ok('APA DOI 用 https 形式', /https:\/\/doi\.org\/10\.1000\/a$/.test(s), s);
 
 s = Cite.apa({ ...journal, creators: ['A', 'B', 'C'] });
-ok('APA 三位以上作者用 et al.', s.indexOf('A, et al.') === 0, s);
+ok('APA 7 三位作者全列', s.indexOf('A, B, & C (2020).') === 0, s);
+ok('APA 超过 20 位才截断', Cite.apa({ ...journal, creators: Array.from({ length: 21 }, (_, i) => 'N' + i) }).indexOf('... N20') > 0);
 
 s = Cite.apa({ itemType: 'book', title: '书名', creators: ['王五'], year: '2018', publication: '某出版社' });
 ok('APA 图书含出版社', s.indexOf('某出版社.') > 0, s);
@@ -97,7 +98,8 @@ ok('样式表有 5 种', Cite.STYLES.length === 5, String(Cite.STYLES.length));
 s = Cite.chicago(journal);
 ok('Chicago 含年份与标题引号', s.indexOf('2020.') > 0 && s.indexOf('"深度学习综述."') > 0, s);
 ok('Chicago 含刊名卷期页码', /计算机学报 43 \(2\): 100-110\./.test(s), s);
-ok('Chicago 作者超 3 个用 et al.', Cite.chicago({ ...journal, creators: ['A', 'B', 'C', 'D'] }).indexOf('et al.') > 0);
+ok('Chicago 4 位以内全列', Cite.chicago({ ...journal, creators: ['A', 'B', 'C', 'D'] }).indexOf('et al.') < 0);
+ok('Chicago 超过 10 位用 et al.', Cite.chicago({ ...journal, creators: Array.from({ length: 12 }, (_, i) => 'N' + i) }).indexOf('et al.') > 0);
 
 s = Cite.ieee(journal);
 ok('IEEE 以 [1] 开头', s.indexOf('[1] ') === 0, s);

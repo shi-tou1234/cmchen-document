@@ -507,6 +507,18 @@ function closeDocument() {
   const rv = $('doc-view');
   if (rv) { rv.hidden = true; rv.innerHTML = ''; rv.style.zoom = ''; }
   document.body.classList.remove('has-doc', 'rich-doc');
+  // 侧栏三个面板是按文档缓存的，关文档必须一起清空——否则回到空白阅读页
+  // 还挂着上一篇的缩略图/目录/批注（refreshSidebar 没有 doc 会直接 return，清不到）。
+  const so = $('sb-outline'), st = $('sb-thumbs'), sa = $('sb-annos');
+  if (so) { so.innerHTML = ''; so._done = false; }
+  if (st) { st.innerHTML = ''; st._docId = null; }
+  if (thumbIO) { try { thumbIO.disconnect(); } catch (_) {} thumbIO = null; }
+  if (sa) {
+    const sr = $('sb-search-results');   // 搜索结果容器是 initSidebar 挂进去的，要保留
+    sa.innerHTML = '';
+    if (sr) { sr.hidden = true; sr.innerHTML = ''; sa.appendChild(sr); }
+  }
+  annoQuery = '';
   if (App.els.pageCount) App.els.pageCount.textContent = '/ 0';
   if (App.els.pageInput) { App.els.pageInput.value = '1'; App.els.pageInput.max = '1'; }
   if (App.els.fileName) App.els.fileName.textContent = '';
@@ -1587,7 +1599,7 @@ function sourceLine(page) {
   const s = App.state;
   const it = s.item;
   const title = (it && it.title) || s.fileName || '文档';
-  const authors = it && Array.isArray(it.creators) && it.creators.length ? it.creators.join(', ') : '';
+  const authors = it && window.Creators ? window.Creators.displayList(it.creators) : '';
   const year = it && it.year ? '，' + it.year : '';
   const pg = page ? '，第 ' + page + ' 页' : '';
   return '——' + (authors ? authors + '：' : '') + '《' + title + '》' + year + pg;
@@ -1952,8 +1964,8 @@ function bind() {
   if (window.DocSwitch) window.DocSwitch.init();
   if (window.LibraryUI) {
     window.LibraryUI.init();
-    const libBtn = $('btn-library');
-    if (libBtn) libBtn.addEventListener('click', () => window.LibraryUI.show());
+    // 工具栏「文献库」按钮的点击由 modeswitch.js 统一处理（切模式时先滑高亮块）
+    if (window.ModeSwitch) window.ModeSwitch.init();
     // 只有主应用窗口启动即进库；test-pen 等独立测试窗口不自动展开（也没有 lib-* IPC）
     if (window.pdfBridge.isApp) window.LibraryUI.show();
   }

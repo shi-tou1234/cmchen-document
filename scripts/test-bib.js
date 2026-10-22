@@ -1,6 +1,6 @@
 'use strict';
 /*
- * 参考文献表回归（v29）。纯 Node，不启 Electron。
+ * 参考文献表回归。纯 Node，不启 Electron。
  * 覆盖：编号 / 排序 / 同年 a-b 后缀 / Markdown 与纯文本 / 引用键 / 缺字段容错。
  * 运行：node scripts/test-bib.js
  */
@@ -32,7 +32,7 @@ const items = [journal, book, thesis];
 // ---------- GB/T：编号 + 保持传入顺序 ----------
 let r = Bib.build(items, { style: 'gbt7714', title: '参考文献' });
 ok('GB/T 默认按传入顺序', r.entries[0].startsWith('[1] 张三'), r.entries[0]);
-ok('第二条编号递增', r.entries[1].startsWith('[2] Brown, John'), r.entries[1]);
+ok('第二条编号递增', r.entries[1].startsWith('[2] BROWN J'), r.entries[1]);
 ok('count 等于条目数', r.count === 3, String(r.count));
 ok('numeric 标记为真', r.numeric === true);
 ok('默认排序为 entry', r.order === 'entry', r.order);
@@ -48,8 +48,8 @@ ok('标题已带 # 时不重复加', Bib.build(items, { style: 'gbt7714', markdo
 
 // ---------- APA：作者字母序 + 同年后缀 ----------
 r = Bib.build(items, { style: 'apa', title: '' });
-ok('APA 默认按作者字母序（Adams 在前）', /^Adams, Amy/.test(r.entries[0]), r.entries[0]);
-ok('APA 第二作者 Brown', /^Brown, John/.test(r.entries[1]), r.entries[1]);
+ok('APA 默认按作者字母序（Adams 在前）', /^Adams, A\./.test(r.entries[0]), r.entries[0]);
+ok('APA 第二作者 Brown', /^Brown, J\./.test(r.entries[1]), r.entries[1]);
 ok('APA 条目不带编号', !/^\[\d+\]/.test(r.entries[0]), r.entries[0]);
 ok('APA 默认排序为 author', r.order === 'author', r.order);
 ok('汉字作者按拼音排序（李在张前）', (() => {
@@ -90,7 +90,7 @@ ok('Markdown 引用键用反引号包住', r.entries[0].indexOf('`[@') > 0, r.en
 r = Bib.build(items, { style: 'apa', order: 'entry' });
 ok('作者-年份样式也能按条目顺序输出', /^张三/.test(r.entries[0]), r.entries[0]);
 r = Bib.build(items, { style: 'gbt7714', order: 'author' });
-ok('编号样式也能显式按作者排序', /^\[1\] Adams/.test(r.entries[0]), r.entries[0]);
+ok('编号样式也能显式按作者排序', /^\[1\] ADAMS A/.test(r.entries[0]), r.entries[0]);
 
 // ---------- 过滤 / 容错 ----------
 r = Bib.build([

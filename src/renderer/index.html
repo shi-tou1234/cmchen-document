@@ -220,6 +220,11 @@
         <button id="lib-bulk-edit" class="tbtn">批量编辑</button>
         <button id="lib-bulk-bib" class="tbtn">参考文献表</button>
         <button id="lib-bulk-trash" class="tbtn danger">移入回收站</button>
+        <span id="lib-anno-tools" hidden>
+          <input id="lib-anno-tag-input" type="text" placeholder="给选中的标注加标签" />
+          <button id="lib-anno-tag-add" class="tbtn">加标签</button>
+          <button id="lib-anno-export" class="tbtn">导出标注</button>
+        </span>
         <button id="lib-bulk-clear" class="tbtn">取消选择</button>
       </div>
       <div class="lib-columns" role="row">
@@ -245,7 +250,11 @@
       <div id="ld-body">
         <label class="ld-row"><span class="ld-lbl">类型</span><select id="ld-type"></select></label>
         <label class="ld-row"><span class="ld-lbl">标题</span><input id="ld-title" type="text" placeholder="条目标题" /></label>
-        <label class="ld-row"><span class="ld-lbl">作者</span><input id="ld-creators" type="text" placeholder="多作者用逗号分隔" /></label>
+        <div class="ld-row ld-creators-row">
+          <span class="ld-lbl">作者</span>
+          <div id="ld-creators" class="ld-creators"></div>
+          <button id="ld-creator-add" class="ld-mini" type="button" title="添加一位作者">＋ 添加作者</button>
+        </div>
         <div class="ld-grid2">
           <label class="ld-row"><span class="ld-lbl">年份</span><input id="ld-year" type="text" placeholder="2024" /></label>
           <label class="ld-row"><span class="ld-lbl">出版物</span><input id="ld-publication" type="text" placeholder="期刊 / 会议 / 出版社" /></label>
@@ -523,6 +532,8 @@
 
   <!-- PDF.js UMD 构建，暴露全局 pdfjsLib；worker 文件同目录 -->
   <script src="pdfjs/pdf.min.js"></script>
+  <script src="../creators.js"></script>
+  <script src="../query.js"></script>
   <script src="../cite.js"></script>
   <script src="../bib.js"></script>
   <script src="pdfimages.js"></script>
@@ -530,6 +541,7 @@
   <script src="docswitch.js"></script>
   <script src="annotations.js"></script>
   <script src="selection.js"></script>
+  <script src="modeswitch.js"></script>
   <script src="library-ui.js"></script>
   <script src="renderer.js"></script>
 </body>

@@ -1,15 +1,13 @@
 'use strict';
 /*
  * 引用格式化：把文献库条目排成能直接粘进论文的引用串。
- * 支持两种样式：
- *   gbt7714 —— GB/T 7714-2015（中文论文最常用）
- *   apa     —— APA 7th
+ * 支持 5 种样式：gbt7714 / apa / chicago / ieee / mla。
  *
  * 已知边界（写在这里以免被当成完整 CSL 实现）：
- *   - 作者是逗号分隔的纯字符串，没有「姓 / 名 / 角色」的结构化信息，
- *     所以 APA 不做 "Smith, J." 的姓名拆分，GB/T 也不区分个人作者与机构；
- *   - 没有引文数据库：页码定位符、语言本地化、样式自定义都做不了；
- *     要完整 CSL 能力得引 citeproc-js + 样式库，那是另一个量级的改动；
+ *   - 作者结构化（v6）后能做姓 / 名 / 角色拆分，APA 能出 "Smith, J."、
+ *     GB/T 能出 "SMITH J"；但没有引文数据库：页码定位符、语言本地化、
+ *     样式自定义都做不了，要完整 CSL 能力得引 citeproc-js + 样式库。
+ *   - 后缀（Jr. / III）没有单独字段，会并进名字里。
  *   - 出版地、机构、出版日期这些字段本项目的数据模型里没有，只能省略。
  *
  * 这个文件主进程与渲染进程都能用（UMD 风格）：
@@ -17,10 +15,11 @@
  *   浏览器： <script src="../cite.js"></script> → window.Cite
  */
 (function (root, factory) {
-  const api = factory();
+  const Creators = (root && root.Creators) || (typeof require === 'function' ? require('./creators.js') : null);
+  const api = factory(Creators);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.Cite = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Creators) {
   // GB/T 7714-2015 的文献类型标识码。
   // v27：补齐文献库 v5 的 37 类条目，避免新类型全被排成 [Z]。
   const TYPE_CODE = {
@@ -112,25 +111,101 @@
   ];
 
   const str = (v) => String(v == null ? '' : v).trim();
+  const CJK = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
 
+  // v6：作者一律按结构化对象处理（v5 的字符串会在 creators.js 里被拆好）
   function authorsOf(it) {
-    if (!it || !Array.isArray(it.creators)) return [];
-    return it.creators.map(str).filter(Boolean);
+    if (!it) return [];
+    return Creators.normalizeCreators(it.creators);
+  }
+
+  // 兼容老接口：摊平成字符串数组（界面展示用）
+  function authorNames(it) {
+    return Creators.strings(authorsOf(it));
+  }
+
+  // GB/T 7714：外文作者姓全大写、名用不带点的首字母（"SMITH J"）；中文名与机构名原样
+  function gbtName(c) {
+    const last = str(c.lastName), first = str(c.firstName);
+    if (!last) return first;
+    if (!first) return last;
+    if (CJK.test(last)) return last;
+    return last.toUpperCase() + ' ' + Creators.initials(first, false);
   }
 
   // GB/T 7714：作者超过 3 个只列前 3 个再加「等」
   function gbtAuthors(list) {
     if (!list.length) return '';
-    if (list.length > 3) return list.slice(0, 3).join(', ') + ', 等';
-    return list.join(', ');
+    const names = list.map(gbtName).filter(Boolean);
+    if (!names.length) return '';
+    if (names.length > 3) return names.slice(0, 3).join(', ') + ', 等';
+    return names.join(', ');
   }
 
-  // APA：3 个及以上用 et al.
+  // APA：姓在前 + 名字缩写（"Smith, J."）
+  function apaName(c) {
+    const last = str(c.lastName), first = str(c.firstName);
+    if (!last) return first;
+    if (!first) return last;
+    return last + ', ' + Creators.initials(first);
+  }
+
+  // APA 7：3 位以内全列，超过 20 位才截断
   function apaAuthors(list) {
     if (!list.length) return '';
-    if (list.length > 2) return list[0] + ', et al.';
-    if (list.length === 2) return list[0] + ', & ' + list[1];
-    return list[0];
+    const names = list.map(apaName).filter(Boolean);
+    if (!names.length) return '';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + ', & ' + names[1];
+    if (names.length <= 20) return names.slice(0, -1).join(', ') + ', & ' + names[names.length - 1];
+    return names.slice(0, 19).join(', ') + ', ... ' + names[names.length - 1];
+  }
+
+  // Chicago / MLA：第一位作者姓在前，其余按「名 姓」
+  function invertedName(c, first) {
+    const last = str(c.lastName), given = str(c.firstName);
+    if (!last) return given;
+    if (!given) return last;
+    return first ? last + ', ' + given : given + ' ' + last;
+  }
+
+  // Chicago 17：参考文献表里最多列 10 位，再多就前 7 位 + et al.
+  function chicagoAuthors(list) {
+    if (!list.length) return '';
+    const names = list.map((c, i) => invertedName(c, i === 0)).filter(Boolean);
+    if (!names.length) return '';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + ', and ' + names[1];
+    if (names.length <= 10) return names.slice(0, -1).join(', ') + ', and ' + names[names.length - 1];
+    return names.slice(0, 7).join(', ') + ', et al.';
+  }
+
+  // IEEE：名在前（首字母）+ 姓；超过 6 位作者用 et al.
+  function ieeeName(c) {
+    const last = str(c.lastName), first = str(c.firstName);
+    if (!last) return first;
+    if (!first) return last;
+    return Creators.initials(first) + ' ' + last;
+  }
+
+  function ieeeAuthors(list) {
+    if (!list.length) return '';
+    const names = list.map(ieeeName).filter(Boolean);
+    if (!names.length) return '';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + ' and ' + names[1];
+    if (names.length <= 6) return names.slice(0, -1).join(', ') + ', and ' + names[names.length - 1];
+    return names[0] + ' et al.';
+  }
+
+  // MLA 9：两位全列，三位以上用 et al.
+  function mlaAuthors(list) {
+    if (!list.length) return '';
+    const names = list.map((c, i) => invertedName(c, i === 0)).filter(Boolean);
+    if (!names.length) return '';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + ', and ' + names[1];
+    return names[0] + ', et al.';
   }
 
   function doiTail(it) {
@@ -323,8 +398,7 @@
     if (!it) return '';
     const t = str(it.title);
     if (!t) return '';
-    const list = authorsOf(it);
-    const a = list.length > 3 ? list.slice(0, 3).join(', ') + ', et al.' : list.join(' and ');
+    const a = chicagoAuthors(authorsOf(it));
     const y = str(it.year) || 'n.d.';
     const pub = str(it.publication);
     const vol = str(it.volume);
@@ -350,8 +424,7 @@
     if (!it) return '';
     const t = str(it.title);
     if (!t) return '';
-    const list = authorsOf(it);
-    const a = list.length ? list.join(', ') : '';
+    const a = ieeeAuthors(authorsOf(it));
     const pub = str(it.publication);
     const vol = str(it.volume);
     const iss = str(it.issue);
@@ -379,8 +452,7 @@
     if (!it) return '';
     const t = str(it.title);
     if (!t) return '';
-    const list = authorsOf(it);
-    const a = list.length > 2 ? list[0] + ', et al.' : (list.length === 2 ? list[0] + ', and ' + list[1] : (list[0] || ''));
+    const a = mlaAuthors(authorsOf(it));
     const pub = str(it.publication);
     const vol = str(it.volume);
     const iss = str(it.issue);
@@ -407,14 +479,6 @@
   // 中文作者没有拼音库时无法可靠转写，退化为 item+条目 key 前缀（仍然确定性、可读性差一点）。
   const TITLE_STOP = new Set(['the', 'a', 'an', 'on', 'of', 'for', 'and', 'to', 'in', 'with', 'from', 'by', 'at', 'as']);
 
-  function lastName(name) {
-    const s = str(name);
-    if (!s) return '';
-    if (s.includes(',')) return s.split(',')[0].trim();
-    const parts = s.split(/\s+/).filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : '';
-  }
-
   function slug(s, max) {
     return String(s == null ? '' : s)
       .normalize('NFKD')
@@ -435,7 +499,9 @@
   function citekey(it) {
     if (!it) return '';
     const authors = authorsOf(it);
-    let who = slug(lastName(authors[0] || ''));
+    const first = authors[0] || null;
+    // 结构化之后直接取姓，不用再从 "Brown, John" 里猜
+    let who = slug(first ? (first.lastName || first.firstName) : '');
     const year = (String(it.year || '').match(/\d{4}/) || [''])[0] || 'nd';
     if (!who) who = 'item' + slug(it.key || '', 4);
     const base = (who + year + titleWord(it.title)).slice(0, 40);
@@ -487,7 +553,7 @@
   }
 
   return {
-    format, gbt, apa, chicago, ieee, mla, authorsOf, styleLabel, typeLabel,
+    format, gbt, apa, chicago, ieee, mla, authorsOf, authorNames, styleLabel, typeLabel,
     citekey, citekeys, atCitation,
     STYLES, TYPE_CODE, TYPE_NAME,
   };

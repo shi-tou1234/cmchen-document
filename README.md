@@ -36,8 +36,9 @@
 - **多条阅读笔记**：一条文献可以挂任意多条笔记，各自有标题和正文（Zotero 的 item / child-item 模型）。
 - **标签与收藏集**：标签可重命名、合并、全局移除、设颜色；收藏集支持多级嵌套和颜色；还有保存搜索条件的**智能收藏集**。
 - **整理**：回收站与还原、查重合并、批量编辑、拖入收藏集、表头排序、Ctrl / Shift 多选、`↑` `↓` + `Enter` 打开。
+- **标注也是库里的东西**：侧栏「标注」把所有文档的批注汇成一张表，可搜索、可打标签、可批量导出成 Markdown 笔记（Zotero 的「标注 → 笔记」闭环）。
 - **导入导出**：BibTeX / RIS / CSL-JSON，导入时按 DOI 或"标准化标题 + 年份"去重；DOI / arXiv 元数据抓取。
-- **引用**：GB/T 7714-2015、APA 7、Chicago 17、IEEE、MLA 9 五种样式；确定性 citekey 与 `[@key]`；相关条目双向关联；按选中条目 / 当前列表 / 整库生成 Markdown 或纯文本参考文献表，可附 citekey。
+- **引用**：GB/T 7714-2015、APA 7、Chicago 17、IEEE、MLA 9 五种样式；作者结构化（姓 / 名 / 角色分开存，APA 能出 `Smith, J.`、GB/T 能出 `SMITH J`）；确定性 citekey 与 `[@key]`；相关条目双向关联；按选中条目 / 当前列表 / 整库生成 Markdown 或纯文本参考文献表，可附 citekey。
 
 ### 阅读
 
@@ -154,7 +155,7 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 
 | 内容 | 位置 |
 |---|---|
-| 文献库 | `<数据目录>\library.json`（数据层 v5） |
+| 文献库 | `<数据目录>\library.json`（数据层 v7） |
 | 标注 | `<userData>\annotations\<sha1(路径)>.json` |
 | 全文索引 | `<数据目录>\fulltext\<hash>.json`（可重建，不进备份） |
 | 设置 | `<userData>\settings.json` |
@@ -200,24 +201,26 @@ node scripts\test-packaged.js "build\Trove-1.1.0-portable.exe"
 
 ## 测试
 
-39 个 `test-*.js`，全部以非零退出码表示失败。跑之前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
+42 个 `test-*.js`，全部以非零退出码表示失败。跑之前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
 
-**纯 Node（10 个）**
+**纯 Node（12 个）**
 
 | 脚本 | 覆盖 |
 |---|---|
-| `test-library.js` | 数据层 v5：37 类条目 / fields / relations / 颜色 / CRUD / 回收站 / 迁移 / 查重合并 / 批量 / 持久化（82） |
+| `test-library.js` | 数据层 v7：37 类条目 / fields / relations / 颜色 / CRUD / 回收站 / 迁移 / 查重合并 / 批量 / 持久化（82） |
 | `test-fulltext.js` | 全文索引 / 搜索 / 新鲜度 / 容错（36） |
-| `test-formats.js` | BibTeX / RIS / CSL-JSON 解析与导出（77） |
+| `test-formats.js` | BibTeX / RIS / CSL-JSON 解析与导出（78） |
 | `test-settings.js` | 设置白名单 / BOM / 损坏自愈（22） |
 | `test-metadata.js` | DOI / arXiv 抓取，fake fetch（47） |
-| `test-cite.js` | 5 种引用样式 + 37 类标识 + citekey / `[@key]`（71） |
+| `test-cite.js` | 5 种引用样式 + 37 类标识 + citekey / `[@key]`（73） |
+| `test-creators.js` | 作者结构化：姓名拆分 / v5→v6 迁移 / 5 种样式拆分姓与名 / 姓氏排序 / 导入导出往返（44） |
+| `test-anno.js` | 标注标签：v6→v7 迁移 / 打标签 / 批量加标签 / 移除 / 落盘与重载（12） |
 | `test-bib.js` | 参考文献表：编号 / 作者排序 / 拼音 / 同年 a-b / Markdown / citekey（33） |
 | `test-docconvert.js` | 全格式转换 + sanitize + 图片内联（31） |
 | `test-export.js` | pdf-lib 导出管线 |
 | `test-usermigrate.js` | 改名搬家：只补缺 / 不覆盖 / 跳过 Singleton / 失败回退（19） |
 
-**真实 Electron（26 个）**
+**真实 Electron（27 个）**
 
 | 脚本 | 覆盖 |
 |---|---|
@@ -228,7 +231,7 @@ node scripts\test-packaged.js "build\Trove-1.1.0-portable.exe"
 | `test-tabs.js` | 多标签开 / 切 / 关，标注不丢（5） |
 | `test-ui-v11.js` | 全文检索 / 智能收藏集 / 批量 / 设置 / 备份（13） |
 | `test-ui-v12.js` | 查重 / 合并 / 详情 / 导入导出 IPC（11） |
-| `test-library-ui.js` | 库界面端到端：Zotero 交互 / citekey / 颜色 / 相关条目 / 排序 / 多选 / 参考文献表（68） |
+| `test-library-ui.js` | 库界面端到端：Zotero 交互 / citekey / 颜色 / 相关条目 / 排序 / 多选 / 参考文献表 / 结构化作者编辑（73） |
 | `test-export-highlight.js` | 真实选区 → 导出 → 重开，验证高亮烧进 PDF（7） |
 | `test-backup-restore.js` | 备份 / 恢复 / pre-restore 快照 / 旧备份兼容（20） |
 | `test-datadir.js` | 数据目录 move / merge / replace（19） |
@@ -266,7 +269,7 @@ electron.exe scripts/test-lazy-render.js  # 只滚 scrollTop，验证懒渲染�
 ## 已知边界
 
 - **没有同步 / 群组库 / 浏览器抓取器 / 完整 CSL**：多设备、协作、网页抓取、自动插入引用都做不到（CSL-JSON 只能换数据，不能渲染样式）。
-- **引用不是完整 CSL**：作者是逗号分隔的字符串，没有姓 / 名 / 角色结构；APA 不做姓名拆分，也没有引文数据库。参考文献表只做排序、编号和 Markdown 包装，不做完整 CSL 渲染。中文作者没有拼音库时，citekey 退化为 `item` + 条目 key 前缀。
+- **引用不是完整 CSL**：作者已结构化（姓 / 名 / 角色），但没有引文数据库，也不加载外部 .csl 样式库；页码定位符、语言本地化、样式自定义都做不了。参考文献表只做排序、编号和 Markdown 包装，不做完整 CSL 渲染。中文作者没有拼音库时，citekey 退化为 `item` + 条目 key 前缀。
 - **非 PDF 是"阅读版"而不是原样排版**：复杂分栏、文本框定位、动画、SmartArt、图表不会还原；旧 `.ppt` 不支持，`.doc` 只取纯文本。
 - **富文档没有 PDF 标注层**：画笔、荧光笔、便签、导出带标注副本只对 PDF 开放；富文档可以选中文字复制 / 摘录，摘录写进该条目的阅读笔记。
 - **安全优先会牺牲内容**：转换结果统一 sanitize，脚本、事件属性、远程图片会被剥离。需要联网的图片请先下载到本地。
@@ -285,11 +288,12 @@ pdf-reader/
 ├─ src/
 │  ├─ main.js            # 窗口 / IPC / 打开文档 / 备份恢复 / 单实例 / 数据目录
 │  ├─ preload.js         # contextBridge，渲染层唯一的 Node 入口
-│  ├─ library.js         # 数据层 v5（JSON + 原子写 + 迁移）
+│  ├─ library.js         # 数据层 v7（JSON + 原子写 + 迁移）
 │  ├─ fulltext.js        # 主进程全文索引
 │  ├─ docconvert.js      # 全格式 → 安全 HTML
 │  ├─ formats.js         # BibTeX / RIS / CSL-JSON
 │  ├─ cite.js            # 引用格式化 + citekey
+│  ├─ creators.js        # 作者结构化：姓 / 名 / 角色拆分与归一化
 │  ├─ bib.js             # 参考文献表：排序 / 编号 / Markdown
 │  ├─ metadata.js        # DOI / arXiv 抓取
 │  ├─ pdfmeta.js         # 读 PDF 自带 Title / Author
@@ -297,7 +301,8 @@ pdf-reader/
 │  ├─ usermigrate.js     # PDF Reader → Trove 数据搬家
 │  └─ renderer/          # index.html / styles.css / renderer.js / library-ui.js
 │                        # annotations.js / selection.js / lightbox.js / pdfimages.js / docswitch.js
-├─ scripts/              # 39 个回归脚本 + 探针 + 图标 / 样本工具
+│                        # modeswitch.js
+├─ scripts/              # 42 个回归脚本 + 探针 + 图标 / 样本工具
 ├─ assets/               # 样本 PDF、图标源图与多尺寸 PNG / ICO
 ├─ docs/                 # README 截图、架构与开发文档
 └─ build/                # electron-builder 产物（不进仓库）

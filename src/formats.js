@@ -5,6 +5,7 @@
  * 解析原则：坏条目跳过不抛错，能救的字段尽量救；绝不因为一条脏数据让整次导入失败。
  */
 const ITEM_TYPES = new Set(['journalArticle', 'conferencePaper', 'book', 'thesis', 'report', 'webpage', 'document']);
+const Creators = require('./creators.js');
 
 function s(v) { return v == null ? '' : String(v).replace(/\s+/g, ' ').trim(); }
 
@@ -130,14 +131,39 @@ function parseBibtex(text) {
   return records;
 }
 
-function splitAuthors(v) {
-  return String(v || '').split(/\s+and\s+/i)
-    .map((x) => cleanTex(x)).filter(Boolean)
-    .map((x) => {
-      // "Last, First" → "First Last"；"First Last" 原样
-      const parts = x.split(',').map((y) => y.trim()).filter(Boolean);
-      return parts.length === 2 ? (parts[1] + ' ' + parts[0]).trim() : x;
-    });
+// BibTeX 的多个作者用 " and " 分隔；大括号包住的名字内部不该被切开
+function splitBibNames(v) {
+  const text = String(v == null ? '' : v);
+  const out = [];
+  let depth = 0, cur = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') depth = Math.max(0, depth - 1);
+    if (depth === 0) {
+      const m = /^\s+and\s+/i.exec(text.slice(i));
+      if (m) {
+        if (cur.trim()) out.push(cur.trim());
+        cur = '';
+        i += m[0].length - 1;
+        continue;
+      }
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+// BibTeX 作者 → 结构化作者。{...} 是 BibTeX 的「原样显示」约定，多半是机构名。
+function splitAuthors(v, creatorType) {
+  return splitBibNames(v).map((x) => {
+    const literal = /^\{[\s\S]*\}$/.test(x);
+    const p = literal
+      ? { firstName: '', lastName: cleanTex(x.slice(1, -1)) }
+      : Creators.parseName(cleanTex(x));
+    return { firstName: p.firstName, lastName: p.lastName, creatorType: creatorType || 'author' };
+  }).filter((c) => c.firstName || c.lastName);
 }
 
 function yearOf(v) {
@@ -168,7 +194,11 @@ function bibToRecord(f, key, bibType) {
   return {
     itemType: ITEM_TYPES.has(type) ? type : 'document',
     title: cleanTex(fields.title || '') || key || '未命名文献',
-    creators: splitAuthors(fields.author || fields.editor || ''),
+    creators: [
+      ...splitAuthors(fields.author, 'author'),
+      ...splitAuthors(fields.editor, 'editor'),
+      ...splitAuthors(fields.translator, 'translator'),
+    ],
     year: yearOf(fields.year || fields.date || ''),
     publication,
     volume: cleanTex(fields.volume || ''),
@@ -208,13 +238,20 @@ function risToRecord(tags) {
   const type = RIS_TYPES[String(get('TY') || '').toUpperCase()] || 'document';
   const keywords = [];
   for (const v of getAll('KW')) for (const k of String(v).split(/[;,]/)) if (s(k)) keywords.push(s(k));
+  // RIS 的作者标签：AU 作者 / ED 编者 / TR 译者 / A2、A3 其它贡献者
+  const risNames = (names, type) => names.map((x) => {
+    const p = Creators.parseName(x);
+    return { firstName: p.firstName, lastName: p.lastName, creatorType: type };
+  }).filter((c) => c.firstName || c.lastName);
   return {
     itemType: type,
     title: get('TI', 'T1', 'CT') || '未命名文献',
-    creators: getAll('AU', 'A1').map((x) => {
-      const parts = x.split(',').map((y) => y.trim()).filter(Boolean);
-      return parts.length === 2 ? (parts[1] + ' ' + parts[0]) : x;
-    }),
+    creators: [
+      ...risNames(getAll('AU', 'A1'), 'author'),
+      ...risNames(getAll('ED'), 'editor'),
+      ...risNames(getAll('TR'), 'translator'),
+      ...risNames(getAll('A2', 'A3'), 'contributor'),
+    ],
     year: yearOf(get('PY', 'Y1', 'DA')),
     publication: get('JO', 'JF', 'T2', 'JA', 'PB'),
     volume: get('VL'),
@@ -279,14 +316,25 @@ function bibEscape(v) {
 }
 
 function makeKey(r, used) {
-  const first = (r.creators && r.creators[0]) || '';
-  const last = first.split(/\s+/).filter(Boolean).pop() || 'item';
+  const list = Creators.normalizeCreators(r.creators);
+  const first = list[0] || null;
+  const last = (first ? (first.lastName || first.firstName) : '').split(/\s+/).filter(Boolean).pop() || 'item';
   const titleWord = (r.title || 'x').split(/\s+/).find((x) => /[A-Za-z0-9]/.test(x)) || 'x';
   let base = (last + yearOf(r.year) + titleWord).replace(/[^A-Za-z0-9]/g, '').slice(0, 28) || 'item';
   let key = base, n = 1;
   while (used.has(key)) key = base + (++n);
   used.add(key);
   return key;
+}
+
+// BibTeX 作者写法：有名字的写 "Last, First"；整体一个字段的名字（机构名）用花括号包住
+function bibNames(list) {
+  return Creators.normalizeCreators(list).map((c) => {
+    const last = bibEscape(c.lastName), first = bibEscape(c.firstName);
+    if (!last) return '';
+    if (first) return last + ', ' + first;
+    return /\s/.test(c.lastName) ? '{' + last + '}' : last;
+  }).filter(Boolean).join(' and ');
 }
 
 function recordsToBibtex(records) {
@@ -296,8 +344,14 @@ function recordsToBibtex(records) {
     const type = BIB_TYPE[r.itemType] || 'misc';
     const fields = [];
     const add = (k, v) => { if (s(v)) fields.push('  ' + k + ' = {' + bibEscape(v) + '}'); };
+    // 作者字段自己带花括号（机构名要原样显示），不能再被 bibEscape 转义一次
+    const addRaw = (k, v) => { if (s(v)) fields.push('  ' + k + ' = {' + v + '}'); };
+    const ofType = (t) => Creators.normalizeCreators(r.creators).filter((c) => c.creatorType === t);
     add('title', r.title);
-    add('author', (r.creators || []).join(' and '));
+    addRaw('author', bibNames(ofType('author')));
+    addRaw('editor', bibNames(ofType('editor')));
+    addRaw('translator', bibNames(ofType('translator')));
+    addRaw('contributor', bibNames(ofType('contributor')));
     add('year', yearOf(r.year));
     if (r.itemType === 'journalArticle') add('journal', r.publication);
     else if (r.itemType === 'conferencePaper') add('booktitle', r.publication);
@@ -322,8 +376,13 @@ function recordsToRis(records) {
   for (const r of records || []) {
     out.push('TY  - ' + (RIS_TYPE[r.itemType] || 'GEN'));
     const add = (tag, v) => { if (s(v)) out.push(tag + '  - ' + s(v)); };
+    // RIS 的作者标签：AU 作者 / ED 编者 / TR 译者 / A2 其它贡献者
+    const RIS_TAG = { author: 'AU', editor: 'ED', translator: 'TR', contributor: 'A2' };
+    for (const c of Creators.normalizeCreators(r.creators)) {
+      const name = c.firstName ? (c.lastName + ', ' + c.firstName) : c.lastName;
+      add(RIS_TAG[c.creatorType] || 'AU', name);
+    }
     add('TI', r.title);
-    for (const a of (r.creators || [])) add('AU', a);
     add('PY', yearOf(r.year));
     add('JO', r.publication);
     add('VL', r.volume);
@@ -345,8 +404,8 @@ function recordsToRis(records) {
 
 // ---------- CSL-JSON（citeproc 的标准数据格式，Zotero 也能导出） ----------
 // 与 BibTeX/RIS 的区别：字段是结构化的（作者分 family/given、日期是 date-parts）。
-// 本项目的作者是逗号分隔的纯字符串，所以导出时用 CSL 允许的 {"literal": "..."} 形式，
-// 不假装有姓/名结构。
+// v6 起作者本身就是结构化的，这里直接对上：有名有姓的写 {family, given}，
+// 整体一个字段的名字（机构名、中文名）写 {literal}。
 const CSL_TYPE = {
   journalArticle: 'article-journal', conferencePaper: 'paper-conference', book: 'book',
   thesis: 'thesis', report: 'report', webpage: 'webpage', document: 'document',
@@ -370,14 +429,24 @@ function cslToRecord(o) {
     doi: s(o.DOI), url: s(o.URL), abstract: s(o.abstract), note: s(o.note),
     language: s(o.language), tags: [],
   };
-  const aus = Array.isArray(o.author) ? o.author : (o.author ? [o.author] : []);
-  for (const a of aus) {
-    if (!a || typeof a !== 'object') continue;
-    if (a.literal) { rec.creators.push(s(a.literal)); continue; }
-    const fam = s(a.family), giv = s(a.given);
-    const name = fam && giv ? (fam + ', ' + giv) : (fam || giv);
-    if (name) rec.creators.push(name);
-  }
+  // CSL-JSON 的作者本来就有 family / given 结构，v6 起直接对上，
+  // 不用再假装 {"literal": "整串姓名"}（Zotero / citeproc 读不懂就丢结构）
+  const pushCsl = (arr, type) => {
+    for (const a of (Array.isArray(arr) ? arr : (arr ? [arr] : []))) {
+      if (!a || typeof a !== 'object') continue;
+      if (a.literal) {
+        const lit = s(a.literal);
+        if (lit) rec.creators.push({ firstName: '', lastName: lit, creatorType: type });
+        continue;
+      }
+      const fam = s(a.family), giv = s(a.given);
+      if (fam || giv) rec.creators.push({ firstName: giv, lastName: fam, creatorType: type });
+    }
+  };
+  pushCsl(o.author, 'author');
+  pushCsl(o.editor, 'editor');
+  pushCsl(o.translator, 'translator');
+  pushCsl(o.contributor, 'contributor');
   const parts = o.issued && o.issued['date-parts'] && o.issued['date-parts'][0];
   if (parts && parts.length) rec.year = String(parts[0]);
   if (Array.isArray(o.keyword)) rec.tags = o.keyword.map(s).filter(Boolean);
@@ -394,7 +463,18 @@ function parseCslJson(text) {
 function recordsToCslJson(records) {
   const out = (records || []).map((r) => {
     const o = { id: r.key, type: CSL_TYPE[r.itemType] || 'document', title: s(r.title) };
-    if ((r.creators || []).length) o.author = r.creators.map((c) => ({ literal: c }));
+    const list = Creators.normalizeCreators(r.creators);
+    const cslName = (c) => (c.firstName
+      ? { family: c.lastName, given: c.firstName }
+      : { literal: c.lastName });
+    const authors = list.filter((c) => c.creatorType === 'author');
+    const editors = list.filter((c) => c.creatorType === 'editor');
+    const translators = list.filter((c) => c.creatorType === 'translator');
+    const others = list.filter((c) => c.creatorType === 'contributor');
+    if (authors.length) o.author = authors.map(cslName);
+    if (editors.length) o.editor = editors.map(cslName);
+    if (translators.length) o.translator = translators.map(cslName);
+    if (others.length) o.contributor = others.map(cslName);
     const y = yearOf(r.year);
     if (y) o.issued = { 'date-parts': [[Number(y) || y]] };
     if (s(r.publication)) o['container-title'] = s(r.publication);

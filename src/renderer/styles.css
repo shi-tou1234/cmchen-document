@@ -95,6 +95,8 @@ b, strong { font-weight: 600; }
   border-bottom: 1px solid var(--rule);
   user-select: none; flex: 0 0 auto; flex-wrap: wrap;
 }
+/* 视图切换控件贴着工具栏顶边，和文献库侧栏里的那份严格对齐 */
+#toolbar .mode-switch { align-self: flex-start; }
 #notetools { background: var(--surface-3); gap: 6px; }
 
 .tbtn {
@@ -117,23 +119,32 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
 .tbtn.danger:hover { background: var(--danger-soft); color: var(--danger); }
 
 /* ---------- 阅读 / 文献库 视图切换 ---------- */
+/* 两处控件（阅读器工具栏首位 / 文献库侧栏顶部）用同一套内边距，
+   落在窗口同一个位置；高亮药丸 .mode-thumb 跟着当前模式滑动。 */
 .mode-switch {
   display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto;
   padding: 2px; background: var(--surface-3);
   border: 1px solid var(--rule-2); border-radius: var(--r-2);
+  position: relative;
 }
 .mode-switch .mode-tab {
+  position: relative; z-index: 1;
   border: 0; background: transparent; color: var(--ink-3);
   font: inherit; font-size: 12px; line-height: 1.3;
   padding: 4px 10px; border-radius: var(--r); cursor: pointer;
-  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+  transition: color .16s ease, font-weight .16s ease;
 }
 .mode-switch .mode-tab:hover { color: var(--ink); }
-.mode-switch .mode-tab.active {
-  background: var(--surface); color: var(--ink); font-weight: 600;
-  box-shadow: 0 1px 2px rgba(40, 34, 24, .10), inset 0 0 0 1px var(--rule);
-}
+.mode-switch .mode-tab.active { color: var(--ink); font-weight: 600; }
 .mode-switch .mode-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* 白色药丸：切模式时滑过去（只动 transform，不触发整页重绘） */
+.mode-thumb {
+  position: absolute; top: 2px; left: 0; height: calc(100% - 4px);
+  background: var(--surface); border-radius: var(--r);
+  box-shadow: 0 1px 2px rgba(40, 34, 24, .10), inset 0 0 0 1px var(--rule);
+  transition: transform .14s cubic-bezier(.4, 0, .2, 1), width .14s cubic-bezier(.4, 0, .2, 1);
+  pointer-events: none;
+}
 /* 侧栏里的切换控件不撑满，和阅读器工具栏那个保持同宽同位 */
 #lib-side .mode-switch { align-self: flex-start; }
 
@@ -325,13 +336,21 @@ body.has-doc #empty-hint { display: none; }
 /* =========================================================
    文献库
    ========================================================= */
-#library { position: absolute; inset: 0; z-index: 80; display: flex; background: var(--paper); color: var(--ink); container-type: inline-size; }
+/* 文献库覆盖层：即时切换 + 一层很轻的合成层动画。
+   坑：Electron 的动画时间线在窗口被遮挡 / 隐藏时会停住（currentTime 卡在 0），
+   纯 CSS animation 会把元素永远钉在 opacity 0 —— 表现就是"界面闪一下就没了"。
+   所以动画用 Web Animations API 驱动，并且一定有一个兜底定时器把状态收尾。
+   早先那版还做整层 scale()，文字每帧重新栅格化，看着就是闪；现在只动 transform / opacity。 */
+#library {
+  position: absolute; inset: 0; z-index: 80; display: flex;
+  background: var(--paper); color: var(--ink); container-type: inline-size;
+}
 #library[hidden] { display: none; }
 
-/* 侧栏：像目录页 */
+/* 侧栏：像目录页。上内边距与工具栏一致，切换控件才能落在同一位置 */
 #lib-side {
   flex: 0 0 var(--side-w); display: flex; flex-direction: column; gap: 8px;
-  padding: 12px 10px; background: var(--surface-3);
+  padding: 6px 12px 12px; background: var(--surface-3);
   border-right: 1px solid var(--rule); overflow: auto;
 }
 #lib-search {
@@ -492,6 +511,17 @@ body.has-doc #empty-hint { display: none; }
 #ld-tag-input:disabled, #ld-tag-add:disabled { background: var(--surface-2); color: var(--ink-3); }
 .ld-grid2 { display: grid; grid-template-columns: 84px 1fr; gap: 8px; }
 .ld-grid3 { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 8px; }
+
+/* 作者行（v6）：姓 / 名 / 角色 一行一位 */
+.ld-creators-row { gap: 5px; }
+.ld-creators { display: flex; flex-direction: column; gap: 5px; }
+.ld-cr { display: grid; grid-template-columns: 1fr 1fr 82px 24px; gap: 5px; align-items: center; }
+.ld-cr input, .ld-cr select { min-width: 0; }
+.ld-cr-del {
+  border: 1px solid transparent; background: transparent; color: var(--ink-3);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 4px 0; border-radius: var(--r);
+}
+.ld-cr-del:hover { background: var(--danger-soft); color: var(--danger); }
 .ld-sec { border-top: 1px solid var(--rule); padding-top: 12px; margin-top: 4px; }
 .ld-sec-title {
   font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .11em; text-transform: uppercase;
@@ -1123,7 +1153,20 @@ body.rich-doc #doc-view ::selection { background: rgba(255, 213, 79, .55); }
 }
 body.theme-dark.invert-pages .doc-page { filter: invert(1) hue-rotate(180deg); }
 
-/* 参考文献表（v29） */
+/* ---------- 标注视图 ---------- */
+/* 标注不是条目，但复用同一套表格行：勾选 / 文字 / 出处 / 类型 / 标签 / 动作 */
+.lib-anno .lctitle { cursor: pointer; }
+.lib-anno .lctitle:hover { color: var(--accent-2); text-decoration: underline; }
+.lib-anno .lcmeta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#lib-anno-tools { display: inline-flex; align-items: center; gap: 5px; }
+#lib-anno-tools[hidden] { display: none; }
+#lib-anno-tag-input {
+  width: 130px; padding: 3px 7px; font-size: 11.5px; font-family: inherit;
+  color: var(--ink); background: var(--surface); border: 1px solid var(--rule-2); border-radius: var(--r); outline: none;
+}
+#lib-anno-tag-input:focus { border-color: var(--accent); }
+
+/* 参考文献表 */
 .bib-head { display: flex; align-items: center; gap: 8px; }
 .bib-preview {
   width: 100%; height: 34vh; min-height: 220px; resize: vertical;

@@ -6,7 +6,8 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 ┌──────────────────────────── 主进程 src/main.js ────────────────────────────┐
 │ 窗口 · IPC · 打开文档 · 备份恢复 · 数据目录 · 单实例 · 全文索引 · 格式转换  │
 │   library.js   fulltext.js   docconvert.js   settings.js   formats.js      │
-│   cite.js      bib.js        metadata.js   pdfmeta.js     usermigrate.js  │
+│   cite.js      bib.js        creators.js     metadata.js   pdfmeta.js      │
+│   usermigrate.js
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     │ preload.js / contextBridge
                                     │ window.pdfBridge.*  (invoke / send / on)
@@ -35,16 +36,17 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 
 ## 数据模型
 
-### 库 `library.json`（v5）
+### 库 `library.json`（v7）
 
 ```js
 {
-  version: 5,
+  version: 7,
   tagColors: { "标签": "#rrggbb" },
+  annoTags: { "<标注 id>": ["标签"] },    // 标注的标签（标注本体在 annotations/）
   collections: [{ id, name, parentId, color }],
   searches:    [{ id, name, query }],          // 智能收藏集：保存的搜索条件
   items: [{
-    key, itemType, title, creators: [string], year, publication,
+    key, itemType, title, creators: [creator], year, publication,
     volume, issue, pages, doi, url, abstract, note, language,
     tags: [string], collectionIds: [string],
     fields: { publisher, place, isbn, ... },    // 按条目类型的补充字段
@@ -54,10 +56,15 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
     page, created, updated, deletedAt
   }]
 }
+
+// creator = { firstName, lastName, creatorType }
+// creatorType: author | editor | translator | contributor
 ```
 
 - **37 类条目**：`ITEM_TYPES` 在 `library.js` 里，label 同时供 UI 和引用格式化使用，不重复维护。
-- **迁移**：读到低版本先写 `backups/library-pre-vN-*.json` 快照，再逐级补字段。v3 → v4 把单个 `note` 变成 `notes[0]`；v4 → v5 增加 `fields` / `relations` / 颜色。
+- **作者结构化（v6）**：`creators` 是 `{firstName, lastName, creatorType}` 数组，中文名与机构名只填 `lastName`。
+  拆分规则集中在 `creators.js`：逗号在前（`Smith, John`）、空格在后（`John Smith`）、含汉字不拆、`{...}` 当机构名。
+- **迁移**：读到低版本先写 `backups/library-pre-vN-*.json` 快照，再逐级补字段。v3 → v4 把单个 `note` 变成 `notes[0]`；v4 → v5 增加 `fields` / `relations` / 颜色；v5 → v6 把字符串作者拆成结构化作者；v6 → v7 增加 `annoTags`（标注标签）。
 - **写盘**：先写临时文件再 `rename`，避免半截 JSON。读坏文件时留 `.corrupt-*` 备份并回退到空库，不让应用起不来。
 - **删除**：`deletedAt > 0` 即回收站；所有删除入口只改索引，绝不 `unlink` 附件。
 
@@ -77,6 +84,8 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 - `.anno`：画笔、图形、文字、便签（在文字上面）。
 
 标注按文件路径哈希存盘。移动 / 重命名文件后哈希变了，旧标注不会自动跟随——这是"按路径引用"的代价，库里的"附件重定位"只改条目路径，不迁移旧标注。
+
+这些标注现在在文献库里有第二个入口：侧栏「标注」把 `annotations/*.json` 里的批注汇总成一张表（`anno-list` IPC），可以搜索、打标签（标签存在 `library.json` 的 `annoTags` 里）、批量导出成 Markdown 笔记。标注本体仍然跟着文件走，库这边只保存用户加的标签。
 
 ### 设置与窗口状态
 
@@ -130,7 +139,8 @@ PDF 每页一个 `.page` 容器，里面是 `canvas` + `.textlayer` + `.hl-layer
 
 ## 引用与参考文献表
 
-- `cite.js` 只格式化**单条**：5 种样式、37 类标识、citekey。
+- `creators.js` 管**作者结构**：`{firstName, lastName, creatorType}` 的归一化、姓名拆分（逗号在前 / 空格在后 / 中文不拆 / 花括号=机构名）、缩写与显示名。主进程与渲染进程共用同一份。
+- `cite.js` 只格式化**单条**：5 种样式、37 类标识、citekey。姓与名分开之后，GB/T 能出 `SMITH J`、APA 能出 `Smith, J.`、IEEE 能出 `J. Smith`。
 - `bib.js` 负责**一批**：按样式决定默认排序（编号制保持传入顺序，作者-年份制按姓氏），同作者同年补 a / b，编号制重新编号，最后包成 Markdown 或纯文本。
 - citekey 由渲染层传入整库分配的 Map，避免只选部分条目时出现不同的 `-2` 后缀。
 - 保存走通用 `save-text` IPC：渲染层拼好文本，主进程只弹系统对话框 + 原子写，不再读一遍库。

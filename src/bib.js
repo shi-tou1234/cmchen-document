@@ -64,19 +64,11 @@
     return isNumeric(style) ? 'entry' : 'author';
   }
 
-  // 「Smith, John」取 Smith；「John Smith」取 Smith；中文名原样返回。
-  function lastName(name) {
-    const s = str(name);
-    if (!s) return '';
-    if (s.includes(',')) return s.split(',')[0].trim();
-    const parts = s.split(/\s+/).filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : '';
-  }
-
+  // v6：作者已结构化，直接取姓（v5 的字符串作者由 creators.js 拆好再进来）
   function creatorKey(it) {
     const list = Cite.authorsOf(it);
     if (!list.length) return '';
-    return list.map(lastName).join(' ');
+    return list.map((c) => (c.lastName || c.firstName || '')).join(' ');
   }
 
   // 无作者时用标题排序，避免整批无作者条目全挤在一起。

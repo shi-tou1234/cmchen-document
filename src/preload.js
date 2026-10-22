@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   isApp: process.argv.includes('--pdfreader-app'),
   // 主动请求主进程弹出打开对话框，返回 { ok, kind, fileName, filePath, startPage, data|pages }
   openPdfDialog: () => ipcRenderer.invoke('open-pdf-dialog'),
-  // v29：只选文档路径（可多选），不读取/转换内容；库界面「添加文档」用
+  // 只选文档路径（可多选），不读取/转换内容；库界面「添加文档」用
   pickDocuments: () => ipcRenderer.invoke('pick-documents'),
   // 订阅来自菜单「打开 PDF」/最近文件/命令行 的打开事件
   onPdfOpened: (cb) => {
@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   // 标注自动保存 / 恢复（按文件路径）
   saveAnnos: (path, pages) => ipcRenderer.invoke('anno-save', { path, pages }),
   loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path }),
+  // 标注条目化 —— 汇总所有文档的标注 + 给标注打标签
+  listAnnotations: () => ipcRenderer.invoke('anno-list'),
+  setAnnoTags: (id, tags) => ipcRenderer.invoke('anno-set-tags', { id, tags }),
+  addAnnoTags: (ids, tags) => ipcRenderer.invoke('anno-add-tags', { ids, tags }),
+  removeAnnoTag: (id, tag) => ipcRenderer.invoke('anno-remove-tag', { id, tag }),
   // 批注导出为纯文本笔记
   exportNote: (info) => ipcRenderer.invoke('export-note', info),
   // 菜单命令：专注阅读模式 / 导出当前页图片（主进程菜单触发）
@@ -42,7 +47,7 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   exportPagePng: (info) => ipcRenderer.invoke('export-page-png', info),
   // v21：把所有文档的批注汇总成一份 Markdown（outPath 可选，给了就不弹对话框）
   exportAllNotes: (outPath) => ipcRenderer.invoke('export-all-notes', { outPath }),
-  // v29：通用「保存文本」对话框（参考文献表用；Markdown / 纯文本）
+  // 通用「保存文本」对话框（参考文献表用；Markdown / 纯文本）
   saveText: (info) => ipcRenderer.invoke('save-text', info),
   // v26：去掉原生菜单栏（文件/视图/系统）后，这几件事改从界面发起
   clearRecent: () => ipcRenderer.invoke('clear-recent'),

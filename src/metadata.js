@@ -6,6 +6,7 @@
 const DOI_RE = /10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i;
 const ARXIV_NEW_RE = /(?:arxiv[:.\s/]*)?(\d{4}\.\d{4,5})(?:v\d+)?/i;
 const ARXIV_OLD_RE = /(?:arxiv[:.\s/]*)?([a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?/i;
+const Creators = require('./creators.js');
 
 function decodeXml(t) {
   return String(t == null ? '' : t)
@@ -41,10 +42,14 @@ const CROSSREF_TYPE = {
 
 function crossrefToMeta(msg) {
   if (!msg) return null;
+  // Crossref 本来就给 given / family，直接落成结构化作者
   const authors = (msg.author || []).map((a) => {
     const g = String(a.given || '').trim(), f = String(a.family || '').trim();
-    if (g && f) return g + ' ' + f;
-    return f || g || String(a.name || '').trim();
+    if (g || f) return { firstName: g, lastName: f, creatorType: 'author' };
+    const name = String(a.name || '').trim();
+    if (!name) return null;
+    const p = Creators.parseName(name);
+    return { firstName: p.firstName, lastName: p.lastName, creatorType: 'author' };
   }).filter(Boolean);
   const issued = (msg.issued && msg.issued['date-parts'] && msg.issued['date-parts'][0])
     || (msg['published-print'] && msg['published-print']['date-parts'] && msg['published-print']['date-parts'][0])
@@ -86,7 +91,11 @@ function arxivEntry(xml) {
     while ((m = re.exec(e))) out.push(flat(m[1]));
     return out;
   };
-  const authors = all('name');
+  // arXiv 的 <name> 是 "Last, First" 写法
+  const authors = all('name').map((n) => {
+    const p = Creators.parseName(n);
+    return { firstName: p.firstName, lastName: p.lastName, creatorType: 'author' };
+  }).filter((c) => c.firstName || c.lastName);
   const id = one('id');
   const doi = one('arxiv:doi');
   const journal = one('arxiv:journal_ref');

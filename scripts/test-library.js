@@ -30,7 +30,7 @@ process.env.PDFREADER_LIBRARY = storeFile;
 lib.resetCache();
 let sum = lib.summary();
 ok('空库无条目/集合', sum.items.length === 0 && sum.collections.length === 0);
-ok('库版本为 v5', sum.version === 5, 'version=' + sum.version);
+ok('库版本为 v7', sum.version === 7, 'version=' + sum.version);
 ok('summary 带条目类型表', Array.isArray(sum.itemTypes) && sum.itemTypes.some((t) => t.id === 'journalArticle'));
 
 // 拖入 PDF → 建条目，标题从文件名猜（去下划线、去数字前缀）
@@ -217,7 +217,8 @@ ok('查重组带条目摘要', dup[0] && dup[0].items.length === 3 && dup[0].ite
 const merged = lib.mergeItems(B.key, [A.key, E.key]);
 ok('mergeItems 返回保留项', !!merged && merged.key === B.key, JSON.stringify(merged && merged.key));
 ok('合并补齐 DOI/出版物', merged.doi === '10.1000/dup' && merged.publication === 'Nature', JSON.stringify([merged.doi, merged.publication]));
-ok('合并作者/标签/收藏集', merged.creators.includes('Ada Lovelace') && merged.tags.includes('ML') && merged.collectionIds.includes(colX.id), JSON.stringify([merged.creators, merged.tags, merged.collectionIds]));
+const hasCreator = (list, last, first) => list.some((c) => c.lastName === last && c.firstName === first);
+ok('合并作者/标签/收藏集', hasCreator(merged.creators, 'Lovelace', 'Ada') && merged.tags.includes('ML') && merged.collectionIds.includes(colX.id), JSON.stringify([merged.creators, merged.tags, merged.collectionIds]));
 ok('合并带过页码', merged.page === 5, String(merged.page));
 ok('被合并条目已从索引移除', !lib.findItem(A.key) && !lib.findItem(E.key));
 ok('合并后原 PDF 都还在', fs.existsSync(pdfA) && fs.existsSync(pdfB));
@@ -251,7 +252,9 @@ let imp = lib.importItems([
 ok('导入只加 1 条', imp.added === 1 && imp.skipped === 3, JSON.stringify(imp));
 ok('导入后条目数 +1', lib.summary().items.length === beforeImport + 1);
 const imported = lib.findItem(imp.keys[0]);
-ok('导入字段完整', imported.title === 'Imported One' && imported.year === '2021' && imported.creators[0] === 'X Y' && imported.itemType === 'journalArticle', JSON.stringify(imported));
+ok('导入字段完整', imported.title === 'Imported One' && imported.year === '2021'
+  && imported.creators[0].lastName === 'Y' && imported.creators[0].firstName === 'X'
+  && imported.itemType === 'journalArticle', JSON.stringify(imported));
 ok('导入 DOI 去前缀', imported.doi === '10.1000/imp', imported.doi);
 imp = lib.importItems([{ title: 'Imported One', year: '2021' }], { skipDuplicates: false });
 ok('关闭去重后可重复导入', imp.added === 1 && imp.skipped === 0, JSON.stringify(imp));

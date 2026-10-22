@@ -10,6 +10,8 @@ const metadata = require('./metadata.js');
 const pdfmeta = require('./pdfmeta.js');
 const docconvert = require('./docconvert.js');
 const Cite = require('./cite.js');
+const Creators = require('./creators.js');
+const query = require('./query.js');
 
 let win = null;
 
@@ -650,9 +652,14 @@ ipcMain.handle('lib-add-pdf', async (_e, info) => {
   const ext = docconvert.extOf(p);
   try { meta = ext === 'pdf' ? await pdfmeta.readMeta(p) : await docconvert.readZipCoreMeta(p); } catch (_) { meta = {}; }
   const title = o.title || pdfmeta.usableTitle(meta.title);
-  const creators = Array.isArray(o.creators) && o.creators.length
+  // PDF 元数据里的作者常写成 "A and B" / "A; B"，拆成多个作者再结构化
+  const rawCreators = Array.isArray(o.creators) && o.creators.length
     ? o.creators
     : (pdfmeta.usableAuthor(meta.author) ? [meta.author] : []);
+  const creatorList = (rawCreators.length === 1 && typeof rawCreators[0] === 'string')
+    ? rawCreators[0].split(/\s+and\s+|;|；/).map((x) => x.trim()).filter(Boolean)
+    : rawCreators;
+  const creators = Creators.normalizeCreators(creatorList);
   const item = library.addPdf(p, Object.assign({}, o, {
     title: title || undefined,
     creators,
@@ -776,15 +783,21 @@ function makeSnippet(text, q, width) {
   const s = String(text || '').replace(/\s+/g, ' ').trim();
   const n = width || 96;
   if (!s) return '';
-  const i = s.toLowerCase().indexOf(String(q || '').toLowerCase());
+  // q 可以是 ast（query.js 解析结果）或普通字符串；锚点短语优先
+  let needle = String(q || '');
+  if (q && q.text) {
+    const tok = q.text.find((t) => t.phrase) || q.text[0];
+    needle = tok ? tok.t : '';
+  }
+  const i = s.toLowerCase().indexOf(String(needle).toLowerCase());
   if (i < 0) return s.slice(0, n) + (s.length > n ? '…' : '');
   const from = Math.max(0, i - Math.floor(n / 3));
   const to = Math.min(s.length, from + n);
   return (from > 0 ? '…' : '') + s.slice(from, to) + (to < s.length ? '…' : '');
 }
 
-function annotationResults(q) {
-  const ql = String(q || '').toLowerCase();
+function annotationResults(q, ast) {
+  const A = ast || query.parseQuery(q);
   const out = [];
   for (const entry of readAnnotationBundle()) {
     const data = entry && entry.data;
@@ -795,11 +808,13 @@ function annotationResults(q) {
     for (const pg of (data.pages || [])) {
       for (const sh of (pg && pg.shapes) || []) {
         const text = [sh.text, sh.comment].filter(Boolean).join(' ').trim();
-        if (!text || !text.toLowerCase().includes(ql)) continue;
+        if (!text) continue;
+        const hay = query.fold(text);
+        if (!query.matchTokens(hay, A.text)) continue;   // 短语/排除都在这
         out.push({
           key: it.key, title: it.title || '(无标题)', page: pg.page || 1,
           type: 'annotation', label: sh.comment ? '批注' : '摘录',
-          snippet: makeSnippet(sh.comment || sh.text, q), path: p,
+          snippet: makeSnippet(text, A), path: p,
         });
       }
     }
@@ -807,31 +822,54 @@ function annotationResults(q) {
   return out;
 }
 
-function noteResults(q) {
-  const ql = String(q || '').toLowerCase();
+function noteResults(q, ast) {
+  const A = ast || query.parseQuery(q);
   const out = [];
   for (const it of library.summary().items) {
     if (it.deletedAt) continue;
     for (const n of it.notes || []) {
       const hay = [n.title, n.text].filter(Boolean).join(' ');
-      if (!hay || !hay.toLowerCase().includes(ql)) continue;
+      if (!hay) continue;
+      if (!query.matchTokens(query.fold(hay), A.text)) continue;
       out.push({
         key: it.key, title: it.title || '(无标题)', page: it.page || 1,
         type: 'note', label: '笔记', noteId: n.id,
-        snippet: makeSnippet(hay, q), path: (it.attachment && it.attachment.path) || '',
+        snippet: makeSnippet(hay, A), path: (it.attachment && it.attachment.path) || '',
       });
     }
   }
   return out;
 }
 
-function fulltextResults(query) {
-  const hit = fulltext.search(query);
+function fulltextResults(queryRaw) {
+  const ast = query.parseQuery(queryRaw);
+  const hit = fulltext.search(queryRaw);
   const out = [];
   const seen = new Set();
+  // 带字段限定（title:/author:/tag:…）时，正文命中还要过一遍条目字段；
+  // 只有字段限定、没有正文词时，直接按条目级字段过滤出结果。
+  const hasFields = Object.keys(ast.fields || {}).length > 0;
+  const filterItem = (it) => query.matchFieldsNot(it, ast);
+  if (hasFields && !ast.text.length) {
+    for (const it of library.summary().items) {
+      if (it.deletedAt) continue;
+      if (!query.matchFieldsNot(it, ast)) continue;
+      const id = 'it:' + it.key;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        key: it.key, title: it.title || '(无标题)', page: it.page || 1,
+        type: 'item', label: '条目',
+        snippet: makeSnippet(query.itemHaystack(it), ast), path: (it.attachment && it.attachment.path) || '',
+      });
+      if (out.length >= 120) break;
+    }
+    return { ok: true, query: ast.raw, results: out, stats: hit.stats };
+  }
   for (const r of hit.results) {
     const it = library.findItemByPath(r.path);
     if (!it || it.deletedAt) continue;
+    if (hasFields && !filterItem(it)) continue;
     const id = 'ft:' + it.key + ':' + r.page;
     if (seen.has(id)) continue;
     seen.add(id);
@@ -842,8 +880,10 @@ function fulltextResults(query) {
     });
     if (out.length >= 120) break;
   }
-  if (out.length < 120 && String(query || '').trim()) {
-    for (const r of annotationResults(query)) {
+  if (out.length < 120 && String(queryRaw || '').trim()) {
+    for (const r of annotationResults(queryRaw, ast)) {
+      const it = library.findItemByPath(r.path);
+      if (hasFields && (!it || !query.matchFieldsNot(it, ast))) continue;
       const id = 'an:' + r.key + ':' + r.page + ':' + r.snippet;
       if (seen.has(id)) continue;
       seen.add(id);
@@ -851,8 +891,10 @@ function fulltextResults(query) {
       if (out.length >= 120) break;
     }
   }
-  if (out.length < 120 && String(query || '').trim()) {
-    for (const r of noteResults(query)) {
+  if (out.length < 120 && String(queryRaw || '').trim()) {
+    for (const r of noteResults(queryRaw, ast)) {
+      const it = library.findItemByPath(r.path);
+      if (hasFields && (!it || !query.matchFieldsNot(it, ast))) continue;
       const id = 'nt:' + r.key + ':' + r.noteId;
       if (seen.has(id)) continue;
       seen.add(id);
@@ -860,7 +902,7 @@ function fulltextResults(query) {
       if (out.length >= 120) break;
     }
   }
-  return { ok: true, query: hit.query, results: out, stats: hit.stats };
+  return { ok: true, query: ast.raw, results: out, stats: hit.stats };
 }
 ipcMain.handle('lib-search-full', (_e, info) => fulltextResults(info && info.query));
 ipcMain.handle('lib-ft-status', () => {
@@ -902,7 +944,7 @@ ipcMain.handle('lib-export-refs', (_e, info) => {
   if (info && info.outPath) return exportRefsTo(info.outPath);
   return exportRefsViaDialog();
 });
-// v29：渲染层已经拼好的文本（目前是参考文献表）落盘。
+// 渲染层已经拼好的文本（目前是参考文献表）落盘。
 // 文件对话框留在主进程，渲染层只传 text / format / 建议文件名。
 ipcMain.handle('save-text', async (_e, info) => {
   if (!info || typeof info.text !== 'string' || !info.text.trim()) {
@@ -1007,6 +1049,71 @@ ipcMain.handle('anno-load', (_e, info) => {
     const obj = JSON.parse(fs.readFileSync(annoFileFor(info.path), 'utf8'));
     return Array.isArray(obj.pages) ? obj.pages : [];
   } catch (_) { return []; }
+});
+
+// 把所有文档的标注汇总成一张表（标注条目化的第一步）。
+// 标注本体仍在 annotations/<hash>.json，这里只是读出来给文献库界面用。
+const ANNO_KIND = {
+  mark: '高亮', highlight: '高亮', comment: '批注', quote: '摘录',
+  pen: '手绘', rect: '矩形', arrow: '箭头', line: '直线', text: '文字', note: '便签', select: '选区',
+};
+function annoKindOf(shape) {
+  if (!shape) return '标注';
+  if (shape.kind === 'quote') return '摘录';
+  if (shape.comment) return '批注';
+  if (shape.tool === 'text' || shape.tool === 'note') return ANNO_KIND[shape.tool] || '标注';
+  if (shape.tool && shape.tool !== 'select') return ANNO_KIND[shape.tool] || '标注';
+  return shape.text ? '高亮' : '选区';
+}
+
+function listAllAnnotations() {
+  const out = [];
+  let dir = '';
+  try { dir = annoDir(); } catch (_) { return out; }
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f)); } catch (_) { return out; }
+  for (const f of files) {
+    let obj = null;
+    try { obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+    const pages = (obj && Array.isArray(obj.pages)) ? obj.pages : [];
+    const filePath = String((obj && obj.path) || '');
+    for (const pg of pages) {
+      const shapes = (pg && Array.isArray(pg.shapes)) ? pg.shapes : [];
+      shapes.forEach((sh, i) => {
+        if (!sh) return;
+        const text = String(sh.text || '').trim();
+        const comment = String(sh.comment || '').trim();
+        if (!text && !comment) return;   // 纯涂鸦没有文字，先不进列表
+        out.push({
+          id: f.replace(/\.json$/i, '') + ':' + (pg.page || 0) + ':' + i,
+          path: filePath,
+          fileName: filePath ? path.basename(filePath) : f,
+          page: Number(pg.page) || 0,
+          saved: Number(obj && obj.saved) || 0,
+          tool: String(sh.tool || ''),
+          color: String(sh.color || ''),
+          text, comment,
+          kind: annoKindOf(sh),
+        });
+      });
+    }
+  }
+  out.sort((a, b) => (a.fileName === b.fileName ? a.page - b.page : a.fileName.localeCompare(b.fileName)));
+  return out;
+}
+
+ipcMain.handle('anno-list', () => listAllAnnotations());
+ipcMain.handle('anno-set-tags', (_e, info) => {
+  if (!info || !info.id) return { ok: false, error: '标注 id 为空' };
+  return library.setAnnoTags(info.id, info.tags);
+});
+ipcMain.handle('anno-add-tags', (_e, info) => {
+  if (!info) return { ok: false, updated: 0 };
+  return library.addAnnoTags(info.ids, info.tags);
+});
+ipcMain.handle('anno-remove-tag', (_e, info) => {
+  if (!info) return { ok: false };
+  return library.removeAnnoTag(info.id, info.tag);
 });
 // 导出批注为笔记
 // fmt: txt（默认，纯文本）/ md（Markdown）/ csv（表格）

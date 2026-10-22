@@ -57,7 +57,11 @@ function jsonFetch(obj, status) {
   ok('Crossref 抓取成功', doiRes.ok === true, JSON.stringify(doiRes).slice(0, 200));
   const m = doiRes.metadata || {};
   ok('Crossref 标题', m.title === 'A Study of PDF Reading', m.title);
-  ok('Crossref 作者映射', JSON.stringify(m.creators) === JSON.stringify(['Ada Lovelace', 'Turing', 'Anonymous Group']), JSON.stringify(m.creators));
+  ok('Crossref 作者映射', JSON.stringify(m.creators) === JSON.stringify([
+    { firstName: 'Ada', lastName: 'Lovelace', creatorType: 'author' },
+    { firstName: '', lastName: 'Turing', creatorType: 'author' },
+    { firstName: 'Anonymous', lastName: 'Group', creatorType: 'author' },
+  ]), JSON.stringify(m.creators));
   ok('Crossref 年份', m.year === '2021', m.year);
   ok('Crossref 期刊', m.publication === 'Journal of Documents', m.publication);
   ok('Crossref 卷期页', m.volume === '3' && m.issue === '2' && m.pages === '1-9', JSON.stringify([m.volume, m.issue, m.pages]));
@@ -126,7 +130,10 @@ function jsonFetch(obj, status) {
   ok('arXiv 抓取成功', axRes.ok === true, JSON.stringify(axRes).slice(0, 200));
   const am = axRes.metadata || {};
   ok('arXiv 标题', am.title === 'Deep PDF Reading', am.title);
-  ok('arXiv 作者', JSON.stringify(am.creators) === JSON.stringify(['Ada Lovelace', 'Alan Turing']), JSON.stringify(am.creators));
+  ok('arXiv 作者', JSON.stringify(am.creators) === JSON.stringify([
+    { firstName: 'Ada', lastName: 'Lovelace', creatorType: 'author' },
+    { firstName: 'Alan', lastName: 'Turing', creatorType: 'author' },
+  ]), JSON.stringify(am.creators));
   ok('arXiv 年份取 published', am.year === '2021', am.year);
   ok('arXiv DOI', am.doi === '10.1000/ax', am.doi);
   ok('arXiv 有 journal_ref 时作为出版物', am.publication === 'Journal of arXiv', am.publication);

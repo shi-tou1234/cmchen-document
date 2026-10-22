@@ -58,7 +58,11 @@ ok('解析出 4 条记录', r.records.length === 4, 'n=' + r.records.length);
 
 const a = r.records[0];
 ok('标题去除内层花括号', a.title === 'Neural Networks for PDF Reading', a.title);
-ok('三作者且 Last, First 归一', JSON.stringify(a.creators) === JSON.stringify(['John Smith', 'Jane Doe', 'ACME Research Group']), JSON.stringify(a.creators));
+ok('三作者且 Last, First 归一', JSON.stringify(a.creators) === JSON.stringify([
+  { firstName: 'John', lastName: 'Smith', creatorType: 'author' },
+  { firstName: 'Jane', lastName: 'Doe', creatorType: 'author' },
+  { firstName: '', lastName: 'ACME Research Group', creatorType: 'author' },
+]), JSON.stringify(a.creators));
 ok('年份', a.year === '2020', a.year);
 ok('期刊名', a.publication === 'Journal of Testing', a.publication);
 ok('卷/期', a.volume === '12' && a.issue === '3', a.volume + '/' + a.issue);
@@ -78,7 +82,7 @@ ok('中文页码区间', b.pages === '100-110', b.pages);
 
 const c = r.records[2];
 ok('phdthesis → thesis', c.itemType === 'thesis', c.itemType);
-ok('中文字段不丢', c.title === '学位论文标题' && c.creators[0] === '王五' && c.publication === '测试大学', JSON.stringify([c.title, c.creators, c.publication]));
+ok('中文字段不丢', c.title === '学位论文标题' && c.creators[0].lastName === '王五' && c.creators[0].firstName === '' && c.publication === '测试大学', JSON.stringify([c.title, c.creators, c.publication]));
 ok('学位论文 school 作为出版物', c.publication === '测试大学');
 
 ok('缺标题条目用 key 兜底', r.records[3].title === 'broken_no_title', r.records[3].title);
@@ -88,7 +92,7 @@ const exported = formats.recordsToBibtex(r.records);
 ok('导出含 @article', /@article\{/.test(exported));
 ok('导出含 @inproceedings', /@inproceedings\{/.test(exported));
 ok('导出含 @phdthesis', /@phdthesis\{/.test(exported));
-ok('作者用 and 拼接', /author = \{John Smith and Jane Doe and ACME Research Group\}/.test(exported), exported.slice(0, 300));
+ok('作者用 and 拼接', /author = \{Smith, John and Doe, Jane and \{ACME Research Group\}\}/.test(exported), exported.slice(0, 300));
 
 const again = formats.parseBibtex(exported);
 ok('导出后重新解析条数一致', again.length === 4, 'n=' + again.length);
@@ -136,7 +140,10 @@ ok('按扩展名识别 RIS', rr.format === 'ris', rr.format);
 ok('RIS 解析出 2 条记录', rr.records.length === 2, 'n=' + rr.records.length);
 const ra = rr.records[0];
 ok('RIS 中文标题', ra.title === '一篇中文论文', ra.title);
-ok('RIS 多作者 Last, First 归一', JSON.stringify(ra.creators) === JSON.stringify(['三 张', '李四']), JSON.stringify(ra.creators));
+ok('RIS 多作者 Last, First 归一', JSON.stringify(ra.creators) === JSON.stringify([
+  { firstName: '三', lastName: '张', creatorType: 'author' },
+  { firstName: '', lastName: '李四', creatorType: 'author' },
+]), JSON.stringify(ra.creators));
 ok('RIS 年份', ra.year === '2021', ra.year);
 ok('RIS 期刊', ra.publication === '测试学报', ra.publication);
 ok('RIS 卷期', ra.volume === '5' && ra.issue === '2');
@@ -192,8 +199,8 @@ const cslRecs = formats.parseCslJson(cslText);
 ok('CSL-JSON 解析出条目', cslRecs.length === 1, 'n=' + cslRecs.length);
 ok('CSL-JSON 类型映射', cslRecs[0].itemType === 'journalArticle', cslRecs[0].itemType);
 ok('CSL-JSON 标题', cslRecs[0].title === 'Neural Networks for PDF Reading', cslRecs[0].title);
-ok('CSL-JSON 作者 family+given 合并', cslRecs[0].creators[0] === 'Smith, John', JSON.stringify(cslRecs[0].creators));
-ok('CSL-JSON 作者 literal 原样', cslRecs[0].creators[1] === 'ACME Research Group', JSON.stringify(cslRecs[0].creators));
+ok('CSL-JSON 作者 family+given 合结构', cslRecs[0].creators[0].lastName === 'Smith' && cslRecs[0].creators[0].firstName === 'John', JSON.stringify(cslRecs[0].creators));
+ok('CSL-JSON 作者 literal 原样', cslRecs[0].creators[1].lastName === 'ACME Research Group' && cslRecs[0].creators[1].firstName === '', JSON.stringify(cslRecs[0].creators));
 ok('CSL-JSON 日期取年', cslRecs[0].year === '2020', cslRecs[0].year);
 ok('CSL-JSON 容器名→出版物', cslRecs[0].publication === 'Journal of Testing', cslRecs[0].publication);
 ok('CSL-JSON 卷期页码', cslRecs[0].volume === '12' && cslRecs[0].issue === '3' && cslRecs[0].pages === '45-67');
@@ -203,7 +210,8 @@ const cslOut = formats.recordsToCslJson(cslRecs);
 const cslBack = JSON.parse(cslOut);
 ok('CSL-JSON 导出是数组', Array.isArray(cslBack) && cslBack.length === 1);
 ok('CSL-JSON 导出 type', cslBack[0].type === 'article-journal', cslBack[0].type);
-ok('CSL-JSON 导出用 literal 作者', !!(cslBack[0].author && cslBack[0].author[0].literal), JSON.stringify(cslBack[0].author));
+ok('CSL-JSON 导出用 family+given 作者', !!(cslBack[0].author && cslBack[0].author[0].family === 'Smith' && cslBack[0].author[0].given === 'John'), JSON.stringify(cslBack[0].author));
+ok('CSL-JSON 导出机构名用 literal', !!(cslBack[0].author && cslBack[0].author[1].literal === 'ACME Research Group'), JSON.stringify(cslBack[0].author));
 ok('CSL-JSON 导出 date-parts', JSON.stringify(cslBack[0].issued) === '{"date-parts":[[2020]]}', JSON.stringify(cslBack[0].issued));
 ok('CSL-JSON 往返标题一致', cslBack[0].title === cslRecs[0].title);
 let cslThrew = false;

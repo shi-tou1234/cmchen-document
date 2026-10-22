@@ -1,29 +1,34 @@
 'use strict';
 /*
- * 本地文献库 v5（继续对齐 Zotero 的数据模型，零原生依赖）。
+ * 本地文献库 v6（继续对齐 Zotero 的数据模型，零原生依赖）。
  * 存储：userData/library.json（测试可用 env PDFREADER_LIBRARY 覆盖路径，互不污染）。
- * 数据形状（v5）：
+ * 数据形状（v6）：
  *   { version, tagColors:{[tag]:#rrggbb},
  *     collections:[{id,name,parentId,color}], searches:[{id,name,query}], items:[{
- *       key, itemType, title, creators:[str], year, publication, volume, issue,
- *       pages, doi, url, abstract, note, language, tags:[str], collectionIds:[str],
+ *       key, itemType, title, creators:[{firstName,lastName,creatorType}], year, publication,
+ *       volume, issue, pages, doi, url, abstract, note, language, tags:[str], collectionIds:[str],
  *       fields:{publisher,place,isbn,...}, relations:[key], notes:[{id,title,text}],
  *       attachment:{path,name}, page, created, updated, deletedAt
  *   }] }
+ *
+ * 相对 v5 的变化：
+ *   - creators 从字符串数组变成结构化对象（姓 / 名 / 角色），见 creators.js；
+ *     旧库读进来时自动拆分升级，原文件先备份，不需要手工处理。
  *
  * 相对 v4 的变化：
  *   - 条目类型从 12 类扩到 30+ 类；新增按类型的通用 fields 对象。
  *   - 收藏集支持颜色，标签支持全局颜色映射 tagColors。
  *   - 新增相关条目 relations（双向），供“相关条目”面板使用。
  *
- * 兼容策略：读到低版本数据时先自动备份原始文件，再迁移到 v5；旧文件无需手工处理。
+ * 兼容策略：读到低版本数据时先自动备份原始文件，再迁移到当前版本；旧文件无需手工处理。
  * 原则：附件只“引用”磁盘路径，永不删改用户的文件；写盘原子 + 读盘损坏自愈。
  */
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const Creators = require('./creators.js');
 
-const VERSION = 5;
+const VERSION = 7;
 const BACKUP_KEEP = 10;
 
 // v5：补齐 Zotero 常用的条目类型（30+），让导入 BibTeX/RIS/CSL-JSON 时不至于全被压成「文档」。
@@ -99,7 +104,21 @@ function init(userDataDir) {
 function filePath() { return FILE || init(null); }
 
 function emptyStore() {
-  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {} };
+  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {} };
+}
+
+// 标注的标签：{ "<annoId>": ["方法", "待读"] }。
+// 标注本体仍存在 userData/annotations/<hash>.json（跟着文件走），这里只存用户加的标签。
+function normalizeAnnoTags(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of Object.keys(src)) {
+    const id = str(k);
+    if (!id) continue;
+    const tags = strList(src[k]).filter((t) => t.length <= 40).slice(0, 20);
+    if (tags.length) out[id] = tags;
+  }
+  return out;
 }
 
 // 标签颜色是全局映射（标签本身仍是字符串，不把每条标签都对象化，兼容旧数据）。
@@ -229,6 +248,7 @@ function normalize(o) {
     s.collections = normalizeCollections(o.collections);
     s.searches = normalizeSearches(o.searches);
     s.tagColors = normalizeTagColors(o.tagColors);
+    s.annoTags = normalizeAnnoTags(o.annoTags);
     if (Array.isArray(o.items)) s.items = o.items.filter((it) => it && it.key).map(migrateItem);
   }
   return s;
@@ -262,7 +282,8 @@ function migrateItem(it) {
   }
   // DOI 统一成裸标识符（去掉 https://doi.org/ 与 doi: 前缀），查重/导出才不会出现两种写法
   x.doi = normDoi(src.doi);
-  x.creators = strList(src.creators);
+  // v6：作者结构化。v5 的字符串数组在这里顺手拆成 {firstName,lastName,creatorType}
+  x.creators = Creators.normalizeCreators(src.creators);
   x.tags = strList(src.tags);
   x.fields = normalizeFields(src.fields);
   x.relations = normalizeRelations(src.relations).filter((k) => k !== x.key);
@@ -403,7 +424,7 @@ function updateItem(key, patch) {
   if ('doi' in patch) it.doi = normDoi(patch.doi);
   if ('itemType' in patch) it.itemType = ITEM_TYPE_IDS.has(patch.itemType) ? patch.itemType : 'document';
   if ('fields' in patch) it.fields = normalizeFields(Object.assign({}, it.fields, patch.fields));
-  if ('creators' in patch) it.creators = strList(patch.creators);
+  if ('creators' in patch) it.creators = Creators.normalizeCreators(patch.creators);
   if ('tags' in patch) it.tags = strList(patch.tags);
   if ('relations' in patch) it.relations = normalizeRelations(patch.relations).filter((k) => k !== it.key);
   if ('collectionIds' in patch) it.collectionIds = validCollectionIds(patch.collectionIds);
@@ -684,7 +705,7 @@ function publicItem(it, collIds) {
     id: n.id, title: n.title, text: n.text, created: n.created || 0, updated: n.updated || 0,
   }));
   return {
-    key: it.key, itemType: it.itemType, title: it.title, creators: it.creators.slice(),
+    key: it.key, itemType: it.itemType, title: it.title, creators: Creators.normalizeCreators(it.creators),
     year: it.year, publication: it.publication, volume: it.volume, issue: it.issue,
     pages: it.pages, doi: it.doi, url: it.url, abstract: it.abstract,
     fields: Object.assign({}, it.fields || {}),
@@ -709,6 +730,7 @@ function summary() {
     collections: s.collections.slice(),
     searches: s.searches.slice(),
     tagColors: Object.assign({}, s.tagColors || {}),
+    annoTags: Object.assign({}, s.annoTags || {}),
     items: s.items.map((it) => publicItem(it, collIds)),
     trashCount: s.items.filter((x) => x.deletedAt).length,
   };
@@ -792,7 +814,7 @@ function bulkUpdate(keys, patch) {
     if ('doi' in p) it.doi = normDoi(p.doi);
     if ('itemType' in p) it.itemType = ITEM_TYPE_IDS.has(p.itemType) ? p.itemType : it.itemType;
     if ('fields' in p) it.fields = normalizeFields(Object.assign({}, it.fields, p.fields));
-    if ('creators' in p) it.creators = strList(p.creators);
+    if ('creators' in p) it.creators = Creators.normalizeCreators(p.creators);
     if ('tags' in p) it.tags = strList(p.tags);
     if (Array.isArray(p.addTags)) for (const t of strList(p.addTags)) if (!it.tags.includes(t)) it.tags.push(t);
     if (Array.isArray(p.removeTags)) it.tags = it.tags.filter((t) => !p.removeTags.includes(t));
@@ -900,7 +922,16 @@ function mergeItems(keepKey, otherKeys) {
       keep.fields = keep.fields || {};
       for (const k of FIELD_KEYS) if (!keep.fields[k] && other.fields[k]) keep.fields[k] = other.fields[k];
     }
-    for (const c of other.creators) if (!keep.creators.includes(c)) keep.creators.push(c);
+    // 作者按「姓+名+角色」去重：结构化之后不能拿对象引用比（includes 比的是同一性）
+    const keepCreators = Creators.normalizeCreators(keep.creators);
+    const keepCreatorKeys = new Set(keepCreators.map((c) => Creators.creatorKey(c)));
+    for (const c of Creators.normalizeCreators(other.creators)) {
+      const ck = Creators.creatorKey(c);
+      if (keepCreatorKeys.has(ck)) continue;
+      keepCreatorKeys.add(ck);
+      keepCreators.push(c);
+    }
+    keep.creators = keepCreators;
     for (const t of other.tags) if (!keep.tags.includes(t)) keep.tags.push(t);
     for (const id of other.collectionIds) if (!keep.collectionIds.includes(id)) keep.collectionIds.push(id);
     for (const n of other.notes || []) {
@@ -962,6 +993,49 @@ function importItems(records, opts) {
   return { added, skipped, keys };
 }
 
+// ---------- 标注标签（v7） ----------
+// 标注本体在 annotations/<hash>.json（跟着文件走），这里只存用户给标注打的标签。
+function setAnnoTags(id, tags) {
+  const key = str(id);
+  if (!key) return { ok: false, error: '标注 id 为空' };
+  const s = load();
+  const list = strList(tags).filter((t) => t.length <= 40).slice(0, 20);
+  if (list.length) s.annoTags[key] = list;
+  else delete s.annoTags[key];
+  save();
+  return { ok: true, id: key, tags: list };
+}
+
+function addAnnoTags(ids, tags) {
+  const set = Array.isArray(ids) ? ids : [];
+  const add = strList(tags).filter((t) => t.length <= 40).slice(0, 20);
+  if (!set.length || !add.length) return { ok: false, updated: 0 };
+  const s = load();
+  let n = 0;
+  for (const raw of set) {
+    const key = str(raw);
+    if (!key) continue;
+    const cur = strList(s.annoTags[key]);
+    let changed = false;
+    for (const t of add) if (!cur.includes(t)) { cur.push(t); changed = true; }
+    if (changed) { s.annoTags[key] = cur.slice(0, 20); n++; }
+  }
+  if (n) save();
+  return { ok: true, updated: n };
+}
+
+function removeAnnoTag(id, tag) {
+  const key = str(id), t = str(tag);
+  const s = load();
+  const cur = strList(s.annoTags[key]);
+  const next = cur.filter((x) => x !== t);
+  if (next.length !== cur.length) {
+    if (next.length) s.annoTags[key] = next; else delete s.annoTags[key];
+    save();
+  }
+  return { ok: true, id: key, tags: next };
+}
+
 module.exports = {
   init, filePath, load, save, summary,
   addPdf, addItem, updateItem, removeItem,
@@ -972,6 +1046,7 @@ module.exports = {
   addNote, updateNote, removeNote,
   addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment,
   addSearch, removeSearch,
+  setAnnoTags, addAnnoTags, removeAnnoTag,
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,
   exportStore, replaceStore, mergeStore, backupNow,
   guessTitleFromPath, ITEM_TYPES,

@@ -141,6 +141,41 @@ module.exports = `(async () => {
     JSON.stringify(a1.collectionIds));
   push('卡片收藏集 chip 变 2 个', $$('[data-key="itA"] .lccoll').length === 2);
 
+  // v6：作者结构化 —— 详情面板按「姓 / 名 / 角色」分行编辑
+  const crRows = $$('#ld-creators .ld-cr');
+  push('作者渲染成结构化行', crRows.length === 1, 'rows=' + crRows.length);
+  const crLast = crRows[0] && crRows[0].querySelector('.ld-cr-last');
+  const crFirst = crRows[0] && crRows[0].querySelector('.ld-cr-first');
+  const crType = crRows[0] && crRows[0].querySelector('.ld-cr-type');
+  push('作者行有姓 / 名 / 角色三格', !!(crLast && crFirst && crType), crLast ? 'ok' : 'missing');
+  push('旧库的作者已拆出姓', crLast && crLast.value === '张三' && crFirst && crFirst.value === '',
+    (crLast ? crLast.value : '') + '/' + (crFirst ? crFirst.value : ''));
+  // 加一位作者：填姓 / 名 / 角色
+  $('#ld-creator-add').click();
+  await sleep(80);
+  const newRow = $$('#ld-creators .ld-cr')[1];
+  if (newRow) {
+    const l = newRow.querySelector('.ld-cr-last');
+    const f = newRow.querySelector('.ld-cr-first');
+    l.value = 'Brown';
+    f.value = 'John';
+    newRow.querySelector('.ld-cr-type').value = 'author';
+    // 模拟真人在打字：引用预览靠 input 事件刷新
+    l.dispatchEvent(new Event('input', { bubbles: true }));
+    f.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  await sleep(80);
+  const citeNow = ($('#ld-cite-preview') || {}).textContent || '';
+  push('引用预览用结构化姓名', citeNow.indexOf('BROWN J') > 0, citeNow.slice(0, 80));
+  $('#ld-save').click();
+  await sleep(400);
+  const sumCr = await pdfBridge.lib.summary();
+  const aCr = sumCr.items.find((x) => x.key === 'itA');
+  push('保存后作者是结构化对象', !!(aCr.creators && aCr.creators.length === 2
+    && aCr.creators[0].lastName === '张三' && aCr.creators[1].lastName === 'Brown'
+    && aCr.creators[1].firstName === 'John' && aCr.creators[1].creatorType === 'author'),
+    JSON.stringify(aCr.creators));
+
   // 回收站：卡片移入 → 列表消失；回收站里还原
   $('[data-trash="itB"]').click();
   await waitFor(() => cards() === 1, 4000);
@@ -242,7 +277,7 @@ module.exports = `(async () => {
     push('v27 交互块未抛错', false, step + ': ' + (e && e.message ? e.message : e));
   }
 
-  // ---------- v29：参考文献表 ----------
+  // ---------- 参考文献表 ----------
   step = 'bib';
   try {
     $('[data-scope="all"]').click();
@@ -292,7 +327,7 @@ module.exports = `(async () => {
     $('#lib-bulk-clear').click();
     await sleep(40);
   } catch (e) {
-    push('v29 参考文献块未抛错', false, step + ': ' + (e && e.message ? e.message : e));
+    push('参考文献块未抛错', false, step + ': ' + (e && e.message ? e.message : e));
   }
 
   // 回到全部条目 → 点卡片进阅读（回归：覆盖层 → 阅读器钩子没被 v10 改坏）
@@ -319,6 +354,17 @@ module.exports = `(async () => {
   push('进阅读后覆盖层收起', post.libraryHidden);
   push('阅读器加载到 3 页', post.pageNums === 3, 'pages=' + post.pageNums);
   push('页面 canvas 已建', post.canvas);
+
+  // 视图切换的过渡：点「文献库」后动画必须真的在跑。
+  // 早先兜底逻辑误判"时间线停住"，把动画一步跳完 —— 效果就是完全没有过渡。
+  const libEl = document.getElementById('library');
+  const libTab = document.querySelector('#toolbar .mode-switch [data-mode="library"]');
+  if (libTab) libTab.click();
+  const anims = libEl.getAnimations ? libEl.getAnimations().length : 0;
+  push('切到文献库时过渡动画在跑', anims > 0, 'anims=' + anims);
+  push('切到文献库后覆盖层可见', !libEl.hidden, '');
+  await sleep(400);
+  push('过渡结束后覆盖层完全可见', getComputedStyle(libEl).opacity === '1', getComputedStyle(libEl).opacity);
 
   return { checks, pre, dPre, post };
 })()`;

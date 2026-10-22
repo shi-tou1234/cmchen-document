@@ -9,12 +9,22 @@
 window.LibraryUI = (function () {
   const L = () => (window.pdfBridge && window.pdfBridge.lib) || null;
   const $ = (id) => document.getElementById(id);
+  // v6：作者是结构化的。展示一律走 creators.js，别处不再自己拼字符串
+  const creatorText = (list, sep) => (window.Creators ? window.Creators.displayList(list, sep) : '');
+  const creatorSortKey = (list) => {
+    if (!window.Creators) return '';
+    const rows = window.Creators.normalizeCreators(list);
+    return rows.length ? (rows[0].lastName || rows[0].firstName) : '';
+  };
   let el = {};
   let state = {
     collections: [], searches: [], items: [], itemTypes: [], tagColors: {},
     scope: { type: 'all' }, query: '', sort: 'added', sortDir: '',
     selectedKey: null, detailTags: [], flash: '',
     selectedKeys: new Set(),
+    annos: [],            // 标注条目化 —— 汇总起来的标注
+    annoTags: {},         // 标注 id → 标签
+    annoLoaded: false,
     tagFilter: new Set(),   // v14：标签选择器（多选，命中任一即可）
     citeStyle: 'gbt7714',   // v14：引用样式
     citekeys: new Map(),    // v27：条目 key → 确定性 citekey
@@ -34,10 +44,14 @@ window.LibraryUI = (function () {
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
   const typeLabel = (id) => {
+    if (id === 'annotation') return '标注';
     const t = state.itemTypes.find((x) => x.id === id);
     return t ? t.label : '文档';
   };
   const isTrash = () => state.scope.type === 'trash';
+  // 标注视图。标注不是条目，是「附在文件上的批注」汇总成的列表
+  const isAnnoScope = () => state.scope.type === 'annotations';
+  const ANNO_PREFIX = 'anno:';
 
   async function refresh() {
     if (!L()) return;
@@ -55,29 +69,89 @@ window.LibraryUI = (function () {
     state.items = s.items || [];
     state.itemTypes = s.itemTypes || [];
     state.tagColors = s.tagColors || {};
+    state.annoTags = s.annoTags || {};
     state.citekeys = (window.Cite && window.Cite.citekeys) ? window.Cite.citekeys(state.items) : new Map();
     if (state.selectedKey && !state.items.some((x) => x.key === state.selectedKey)) state.selectedKey = null;
-    for (const k of [...state.selectedKeys]) if (!state.items.some((x) => x.key === k && !x.deletedAt)) state.selectedKeys.delete(k);
+    for (const k of [...state.selectedKeys]) {
+      if (k.startsWith(ANNO_PREFIX)) {
+        if (!state.annos.some((a) => ANNO_PREFIX + a.id === k)) state.selectedKeys.delete(k);
+      } else if (!state.items.some((x) => x.key === k && !x.deletedAt)) state.selectedKeys.delete(k);
+    }
     render();
+  }
+
+  // 标注本体在 userData/annotations/<hash>.json，这里一次性读回来
+  async function loadAnnos(force) {
+    if (state.annoLoaded && !force) return;
+    state.annoLoaded = true;
+    const B = window.pdfBridge;
+    if (!B || !B.listAnnotations) { state.annos = []; return; }
+    try {
+      const list = await B.listAnnotations();
+      state.annos = Array.isArray(list) ? list : [];
+    } catch (err) {
+      console.warn('[library] annotations unavailable:', err && err.message ? err.message : err);
+      state.annos = [];
+    }
   }
 
   // ---------- 过滤 / 排序 ----------
   function itemCollections(it) { return it.collectionIds || []; }
+  // 检索补强（2026-10-22）：支持 "短语"、-排除、title:/author:/tag: 等字段限定，
+  // 变音折叠（cafe 命中 café）；解析与匹配都在 query.js（window.Query）。
+  let lastQ = null, lastAst = null;
+  function queryAst(q) {
+    if (lastQ !== q) { lastQ = q; lastAst = window.Query ? window.Query.parseQuery(q) : null; }
+    return lastAst;
+  }
   function matchesQuery(it, q) {
     if (!q) return true;
-    const hay = [
-      it.title, (it.creators || []).join(' '), it.year, it.publication,
-      it.volume, it.issue, it.pages, it.doi, it.url, it.abstract, it.note, it.language,
-      (it.tags || []).join(' '), (it.attachment && it.attachment.name) || '',
-    ].join(' ').toLowerCase();
-    return hay.includes(q);
+    const ast = queryAst(q);
+    if (!ast) {
+      const hay = window.Query ? window.Query.itemHaystack(it) : String(it.title || '').toLowerCase();
+      return hay.indexOf(q.toLowerCase()) >= 0;
+    }
+    return window.Query.matchLibraryItem(it, ast);
   }
 
   function scopeSearch() {
     return state.scope.type === 'search' ? state.searches.find((x) => x.id === state.scope.id) || null : null;
   }
 
+  // 标注 → 临时「条目」：标题是标注文字，来源是文献名，标签来自 annoTags
+  function annoItem(a) {
+    const id = a.id;
+    return {
+      key: ANNO_PREFIX + id,
+      itemType: 'annotation',
+      title: a.text || a.comment || '（无文字标注）',
+      creators: [],
+      year: '',
+      publication: a.fileName || '',
+      abstract: a.fileName || '',
+      tags: (state.annoTags && state.annoTags[id]) ? state.annoTags[id].slice() : [],
+      collectionIds: [],
+      page: a.page || 0,
+      created: a.saved || 0,
+      updated: a.saved || 0,
+      deletedAt: 0,
+      hasFile: true,
+      _anno: a,
+    };
+  }
+  function annoOf(item) {
+    return (item && item._anno) ? item._anno : null;
+  }
+
   function visibleItems() {
+    // 标注视图里「条目」是临时拼出来的标注，搜索/排序/多选全部复用同一套逻辑
+    if (isAnnoScope()) {
+      let list = state.annos.map(annoItem);
+      if (state.tagFilter.size) list = list.filter((x) => (x.tags || []).some((t) => state.tagFilter.has(t)));
+      const q = state.query.trim().toLowerCase();
+      if (q) list = list.filter((x) => matchesQuery(x, q));
+      return sortItems(list);
+    }
     let list = state.items.filter((x) => (isTrash() ? !!x.deletedAt : !x.deletedAt));
     if (state.scope.type === 'uncollected') list = list.filter((x) => !itemCollections(x).length);
     else if (state.scope.type === 'coll') list = list.filter((x) => itemCollections(x).includes(state.scope.id));
@@ -99,7 +173,7 @@ window.LibraryUI = (function () {
     const dir = state.sortDir || (['added', 'modified', 'year'].includes(field) ? 'desc' : 'asc');
     let cmp;
     if (field === 'title') cmp = byTitle;
-    else if (field === 'creator') cmp = (a, b) => first(a.creators).localeCompare(first(b.creators), 'zh-Hans-CN', { sensitivity: 'base' }) || byTitle(a, b);
+    else if (field === 'creator') cmp = (a, b) => creatorSortKey(a.creators).localeCompare(creatorSortKey(b.creators), 'zh-Hans-CN', { sensitivity: 'base' }) || byTitle(a, b);
     else if (field === 'type') cmp = (a, b) => typeLabel(a.itemType).localeCompare(typeLabel(b.itemType), 'zh-Hans-CN') || byTitle(a, b);
     else if (field === 'collection') cmp = (a, b) => firstCollName(a).localeCompare(firstCollName(b), 'zh-Hans-CN') || byTitle(a, b);
     else if (field === 'tag') cmp = (a, b) => first(a.tags).localeCompare(first(b.tags), 'zh-Hans-CN') || byTitle(a, b);
@@ -236,6 +310,8 @@ window.LibraryUI = (function () {
     }
     html += '<div class="lib-side-sep"></div>';
     html += collRow('trash', '回收站', trash, isTrash());
+    // 标注也是库里的一类东西（汇总所有文档的批注）
+    html += collRow('annotations', '标注', state.annos.length, isAnnoScope());
     el.collections.innerHTML = html;
     // 选中某个收藏集时，“新建”落到它的子级（数据层早已支持 parentId，v10 补上入口）
     el.newColl.textContent = state.scope.type === 'coll' ? '＋ 新建子收藏集' : '＋ 新建收藏集';
@@ -276,11 +352,13 @@ window.LibraryUI = (function () {
       state.scope.type === 'all' ? '全部条目' :
       state.scope.type === 'uncollected' ? '未分类' :
       state.scope.type === 'trash' ? '回收站' :
+      state.scope.type === 'annotations' ? '标注' :
       state.scope.type === 'search' ? ('智能收藏集：' + (saved ? saved.name : '')) :
       collName(state.scope.id);
-    el.count.textContent = list.length + ' 条';
+    el.count.textContent = isAnnoScope() ? (list.length + ' 条标注') : (list.length + ' 条');
     el.empty.hidden = list.length !== 0;
     el.empty.textContent = isTrash() ? '回收站是空的。'
+      : isAnnoScope() ? '还没有标注。在文档里选中文字做高亮 / 批注，或加一条便签，这里就会出现。'
       : (state.query.trim() || saved) ? '没有匹配的条目。'
       : '还没有条目。点右上角「添加文档」，或把 PDF / Word / PPT / Excel / Markdown 等文件拖进来。';
     if (el.selectAll) {
@@ -289,6 +367,9 @@ window.LibraryUI = (function () {
       el.selectAll.indeterminate = checked > 0 && checked < list.length;
       el.selectAll.disabled = isTrash() || !list.length;
     }
+    // 标注视图不是条目表格，列头和搜索提示都换一套
+    if (el.columns) el.columns.hidden = isAnnoScope();
+    if (el.search) el.search.placeholder = isAnnoScope() ? '搜索标注文字…' : '搜索标题 / 作者 / 全文…（"短语" · -排除 · title: 字段）';
     const keepTop = el.grid.scrollTop;
     el.grid.innerHTML = list.map((it) => cardHtml(it)).join('');
     el.grid.scrollTop = keepTop;
@@ -297,6 +378,8 @@ window.LibraryUI = (function () {
   // 条目渲染成「学术表格」的一行：标题 / 作者·年份·来源 / 类型 / 收藏集 / 标签 / 操作
   // 类名保持不变（lib-card / lctitle / lctype / lcprog / lccoll…），探针与事件委托都依赖它们。
   function cardHtml(it) {
+    // 标注是「附在文件上的批注」，不是条目：单独一套行样式 + 打开/标签两个动作
+    if (it.itemType === 'annotation') return annoCardHtml(it);
     const trashed = !!it.deletedAt;
     const selected = it.key === state.selectedKey;
     const picked = state.selectedKeys.has(it.key);
@@ -305,7 +388,7 @@ window.LibraryUI = (function () {
       && it.attachment.path && it.attachment.path === App.state.filePath);
     const check = trashed ? '' : '<label class="lc-check" title="选择条目"><input type="checkbox" data-select-key="' + esc(it.key) + '"' + (picked ? ' checked' : '') + ' /></label>';
     const meta = [];
-    if (it.creators && it.creators.length) meta.push(esc(it.creators.join(', ')));
+    if (it.creators && it.creators.length) meta.push(esc(creatorText(it.creators)));
     if (it.year) meta.push(esc(it.year));
     if (it.publication) meta.push(esc(it.publication));
     const tags = (it.tags || []).map((t) => {
@@ -347,11 +430,117 @@ window.LibraryUI = (function () {
     '</div>';
   }
 
+  // 标注一行：勾选 / 标注文字 / 出处（文献名 · 页码 · 类型）/ 标签 / 打开
+  function annoCardHtml(it) {
+    const a = annoOf(it) || {};
+    const picked = state.selectedKeys.has(it.key);
+    const tags = (it.tags || []).map((t) => {
+      const color = (state.tagColors && state.tagColors[t]) || '';
+      return '<span class="lctag" data-tag-filter="' + esc(t) + '" title="按这个标签筛选">' +
+        (color ? '<span class="tcolor" style="background:' + esc(color) + '"></span>' : '') + esc(t) +
+        '<span class="tagdel" data-rmtag="' + esc(it.key) + '" data-tag="' + esc(t) + '" title="移除标签">×</span></span>';
+    }).join('');
+    const src = esc(a.fileName || '') + (a.page ? ' · 第 ' + a.page + ' 页' : '') + ' · ' + esc(a.kind || '标注');
+    return '<div class="lib-card lib-anno' + (picked ? ' picked' : '') + '" data-key="' + esc(it.key) + '">' +
+      '<label class="lc-check" title="选择标注"><input type="checkbox" data-select-key="' + esc(it.key) + '"' + (picked ? ' checked' : '') + ' /></label>' +
+      '<div class="lctitle" data-anno-open="' + esc(it.key) + '" title="打开到这一页">' + esc(it.title) + '</div>' +
+      '<div class="lcmeta">' + src + '</div>' +
+      '<div class="lcmeta2"><span class="lctype">标注</span>' + (a.comment ? '<span class="lcprog">有批注</span>' : '') + '</div>' +
+      '<div class="lccolls"></div>' +
+      '<div class="lctags">' + tags + '<span class="lc-addtag" data-addtag="' + esc(it.key) + '" title="加标签">＋</span></div>' +
+      '<div class="lcbar"><button data-anno-open="' + esc(it.key) + '">打开</button></div>' +
+      '</div>';
+  }
+
+  // ---------- 标注 ----------
+  // 打开一条标注 = 打开它所在的文件并跳到那一页
+  async function openAnno(key) {
+    const it = visibleItems().find((x) => x.key === key);
+    const a = annoOf(it);
+    if (!a) return;
+    const parent = state.items.find((x) => x.attachment && x.attachment.path === a.path);
+    if (parent) {
+      const res = await L().openItem(parent.key, a.page);
+      if (!res || !res.ok) {
+        window.App && window.App.toast && window.App.toast('打开失败：' + ((res && res.error) || '未知错误'));
+        return;
+      }
+      hide();
+      if (typeof window.__libOpen === 'function') window.__libOpen(res);
+      return;
+    }
+    // 不在文献库里的文件：直接按路径打开
+    if (window.pdfBridge && window.pdfBridge.openPath) {
+      hide();
+      window.pdfBridge.openPath(a.path);
+    }
+  }
+
+  // 选中的标注 → Markdown（Zotero 的「标注 → 笔记」闭环）
+  function selectedAnnos() {
+    return state.annos.filter((a) => state.selectedKeys.has(ANNO_PREFIX + a.id));
+  }
+
+  function annoMarkdown(list) {
+    const lines = [];
+    for (const a of list) {
+      const body = (a.text || a.comment || '').trim();
+      if (!body) continue;
+      const src = (a.fileName || '') + (a.page ? ' · 第 ' + a.page + ' 页' : '');
+      lines.push('> ' + body.replace(/\n+/g, '\n> '));
+      lines.push('> —— ' + src);
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  async function exportAnnos() {
+    const list = selectedAnnos();
+    if (!list.length) return;
+    const text = annoMarkdown(list);
+    if (!text.trim()) {
+      window.App && window.App.toast && window.App.toast('选中的标注没有文字');
+      return;
+    }
+    if (!window.pdfBridge || !window.pdfBridge.saveText) return;
+    const res = await window.pdfBridge.saveText({
+      text,
+      format: 'markdown',
+      defaultName: 'Trove-标注-' + new Date().toISOString().slice(0, 10),
+    });
+    if (res && res.ok) {
+      window.App && window.App.toast && window.App.toast('已导出 ' + list.length + ' 条标注');
+      if (el.annoStatus) el.annoStatus.textContent = '已保存：' + res.path;
+    } else if (res && !res.canceled) {
+      window.App && window.App.toast && window.App.toast('导出失败：' + (res.error || '未知错误'));
+    }
+  }
+
+  async function tagSelectedAnnos() {
+    const ids = selectedAnnos().map((a) => a.id);
+    const raw = el.annoTagInput ? el.annoTagInput.value.trim() : '';
+    const tags = raw.split(/[,，;；]/).map((x) => x.trim()).filter(Boolean);
+    if (!ids.length || !tags.length) {
+      window.App && window.App.toast && window.App.toast('先选标注，再写标签');
+      return;
+    }
+    const r = await window.pdfBridge.addAnnoTags(ids, tags);
+    if (el.annoTagInput) el.annoTagInput.value = '';
+    await refresh();
+    window.App && window.App.toast && window.App.toast('已给 ' + (r.updated || 0) + ' 条标注加上标签');
+  }
+
   function renderBulk() {
     if (!el.bulk) return;
     const n = state.selectedKeys.size;
     el.bulk.hidden = n === 0 || isTrash();
     if (el.bulkCount) el.bulkCount.textContent = '已选 ' + n + ' 项';
+    // 标注视图用另一套批量动作（加标签 / 导出标注）
+    const anno = isAnnoScope();
+    if (el.bulkEdit) el.bulkEdit.hidden = anno;
+    if (el.bulkBib) el.bulkBib.hidden = anno;
+    if (el.bulkTrash) el.bulkTrash.hidden = anno;
+    if (el.annoTools) el.annoTools.hidden = !anno;
   }
 
   // ---------- 库级全文检索结果 ----------
@@ -380,7 +569,7 @@ window.LibraryUI = (function () {
       return;
     }
     el.ft.innerHTML = '<div class="lib-ft-head"><span class="lib-ft-title">全文检索：“' + esc(q) + '” · ' + list.length + ' 处命中</span>' +
-      '<span class="ld-hint">全文 / 摘录 / 批注 / 笔记合并搜索，点击跳到对应页</span></div>' +
+      '<span class="ld-hint">全文 / 摘录 / 批注 / 笔记合并搜索，按相关性排序；支持 "短语"、-排除、title: 等字段限定</span></div>' +
       list.map((r) => {
         const kind = r.type || 'fulltext';
         const label = r.label || (kind === 'note' ? '笔记' : kind === 'annotation' ? '批注' : '全文');
@@ -485,6 +674,63 @@ window.LibraryUI = (function () {
     } catch (_) {}
   }
 
+  // ---------- 作者行（v6：姓 / 名 / 角色 分开填） ----------
+  function creatorRow(c) {
+    const row = document.createElement('div');
+    row.className = 'ld-cr';
+    const last = document.createElement('input');
+    last.type = 'text'; last.className = 'ld-cr-last'; last.placeholder = '姓';
+    last.value = c.lastName || '';
+    const first = document.createElement('input');
+    first.type = 'text'; first.className = 'ld-cr-first'; first.placeholder = '名';
+    first.value = c.firstName || '';
+    const type = document.createElement('select');
+    type.className = 'ld-cr-type';
+    for (const t of (window.Creators ? window.Creators.CREATOR_TYPES : [{ id: 'author', label: '作者' }])) {
+      const opt = document.createElement('option');
+      opt.value = t.id; opt.textContent = t.label;
+      if (t.id === c.creatorType) opt.selected = true;
+      type.appendChild(opt);
+    }
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'ld-cr-del'; del.textContent = '✕';
+    del.title = '删掉这位作者';
+    del.addEventListener('click', () => { row.remove(); });
+    row.appendChild(last); row.appendChild(first); row.appendChild(type); row.appendChild(del);
+    return row;
+  }
+
+  function renderCreators(list) {
+    const box = el.ld.creators;
+    if (!box) return;
+    box.innerHTML = '';
+    const rows = window.Creators ? window.Creators.normalizeCreators(list) : [];
+    if (!rows.length) {
+      const hint = document.createElement('div');
+      hint.className = 'ld-hint';
+      hint.textContent = '还没有作者，点下面「添加作者」';
+      box.appendChild(hint);
+      return;
+    }
+    for (const c of rows) box.appendChild(creatorRow(c));
+  }
+
+  // 从行里读回作者（姓/名/角色），顺手归一化去重
+  function readCreators() {
+    const box = el.ld.creators;
+    if (!box) return [];
+    const out = [];
+    for (const row of box.querySelectorAll('.ld-cr')) {
+      const last = (row.querySelector('.ld-cr-last') || {}).value || '';
+      const first = (row.querySelector('.ld-cr-first') || {}).value || '';
+      const type = (row.querySelector('.ld-cr-type') || {}).value || 'author';
+      const one = { lastName: last.trim(), firstName: first.trim(), creatorType: type };
+      if (!one.lastName && !one.firstName) continue;
+      out.push(one);
+    }
+    return window.Creators ? window.Creators.normalizeCreators(out) : out;
+  }
+
   function renderDetail() {
     const it = selectedItem();
     if (!it) { el.detail.hidden = true; return; }
@@ -494,7 +740,7 @@ window.LibraryUI = (function () {
 
     el.ld.type.value = it.itemType || 'document';
     el.ld.title.value = it.title || '';
-    el.ld.creators.value = (it.creators || []).join(', ');
+    renderCreators(it.creators);
     el.ld.year.value = it.year || '';
     el.ld.publication.value = it.publication || '';
     el.ld.volume.value = it.volume || '';
@@ -512,9 +758,11 @@ window.LibraryUI = (function () {
     renderCitekey(it, trashed);
     renderRelations(it, trashed);
 
-    const fields = [el.ld.type, el.ld.title, el.ld.creators, el.ld.year, el.ld.publication,
+    const fields = [el.ld.type, el.ld.title, el.ld.year, el.ld.publication,
       el.ld.volume, el.ld.issue, el.ld.pages, el.ld.doi, el.ld.url, el.ld.abstract];
     for (const f of fields) f.disabled = trashed;
+    if (el.ld.creators) el.ld.creators.querySelectorAll('input, select, button').forEach((n) => { n.disabled = trashed; });
+    if (el.ld.creatorAdd) el.ld.creatorAdd.disabled = trashed;
     if (el.ld.notes) el.ld.notes.querySelectorAll('input, textarea, button').forEach((n) => { n.disabled = trashed; });
     if (el.ld.noteAdd) el.ld.noteAdd.disabled = trashed;
     el.ld.tagInput.disabled = trashed;
@@ -672,7 +920,7 @@ window.LibraryUI = (function () {
     const collectionIds = Array.from(el.ld.colls.querySelectorAll('input[type="checkbox"]:checked')).map((x) => x.value);
     return {
       itemType: val('type'), title: val('title'),
-      creators: val('creators').split(/[,，;；]/).map((x) => x.trim()).filter(Boolean),
+      creators: readCreators(),
       year: val('year'), publication: val('publication'),
       volume: val('volume'), issue: val('issue'), pages: val('pages'),
       doi: val('doi'), url: val('url'), abstract: val('abstract'),
@@ -954,7 +1202,8 @@ window.LibraryUI = (function () {
     const m = r.metadata || {};
     const set = (id, v) => { if (el.ld[id] && v != null && String(v) !== '') el.ld[id].value = v; };
     set('title', m.title);
-    set('creators', (m.creators || []).join(', '));
+    // 作者是结构化的，直接重画行（不能往 div 里塞 .value）
+    if (m.creators && m.creators.length) renderCreators(m.creators);
     set('year', m.year);
     set('publication', m.publication);
     set('volume', m.volume);
@@ -1089,7 +1338,7 @@ window.LibraryUI = (function () {
     else if (r && !r.canceled) window.App && window.App.toast && window.App.toast('导出失败：' + (r.error || '未知错误'));
   }
 
-  // ---------- 参考文献表（v29） ----------
+  // ---------- 参考文献表 ----------
   // 只在渲染层拼装：条目数据已经在 state 里，不需要主进程再读一次库。
   // 范围三种：当前列表（含搜索/收藏集/标签筛选与当前排序）/ 选中条目 / 整库。
   function bibStyleId() {
@@ -1498,12 +1747,16 @@ window.LibraryUI = (function () {
     el = {
       root: $('library'), search: $('lib-search'), collections: $('lib-collections'),
       searches: $('lib-searches'), saveSearch: $('lib-save-search'),
-      back: $('lib-back'),
+      back: $('lib-back'),   // 「阅读」分段（点击由 modeswitch.js 处理）
       tagList: $('lib-tags'),
       newColl: $('lib-new-coll'), scopeTitle: $('lib-scope-title'), count: $('lib-count'),
       import: $('lib-import'), grid: $('lib-grid'), empty: $('lib-empty'),
       sort: $('lib-sort'), emptyTrash: $('lib-empty-trash'),
       ft: $('lib-ft'), bulk: $('lib-bulk'), bulkCount: $('lib-bulk-count'), selectAll: $('lib-select-all'),
+      columns: document.querySelector('#lib-main .lib-columns'),
+      bulkEdit: $('lib-bulk-edit'), bulkBib: $('lib-bulk-bib'), bulkTrash: $('lib-bulk-trash'),
+      annoTools: $('lib-anno-tools'), annoTagInput: $('lib-anno-tag-input'),
+      annoTagAdd: $('lib-anno-tag-add'), annoExport: $('lib-anno-export'),
       dup: $('lib-dup'), importRefs: $('lib-import-refs'), exportRefs: $('lib-export-refs'),
       settingsBtn: $('lib-settings'),
       settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
@@ -1515,7 +1768,7 @@ window.LibraryUI = (function () {
       bulkAddTags: $('bulk-add-tags'), bulkRemoveTags: $('bulk-remove-tags'), bulkStatus: $('bulk-status'),
       detail: $('lib-detail'), ld: {
         body: $('ld-body'),
-        type: $('ld-type'), title: $('ld-title'), creators: $('ld-creators'), year: $('ld-year'),
+        type: $('ld-type'), title: $('ld-title'), creators: $('ld-creators'), creatorAdd: $('ld-creator-add'), year: $('ld-year'),
         publication: $('ld-publication'), volume: $('ld-volume'), issue: $('ld-issue'), pages: $('ld-pages'),
         doi: $('ld-doi'), url: $('ld-url'), abstract: $('ld-abstract'),
         notes: $('ld-notes'), noteAdd: $('ld-note-add'),
@@ -1642,9 +1895,20 @@ window.LibraryUI = (function () {
         if (it) renderCite(it, false);
       });
     }
-    // 「返回阅读」：覆盖层是 absolute/inset:0，会盖住工具栏和标签栏，
-    // 没有这个按钮就没有应用内的退路（空库时尤其明显）。
-    if (el.back) el.back.addEventListener('click', () => hide());
+    // 「添加作者」：加一行空的（姓、名、角色），填完再保存
+    if (el.ld.creatorAdd) {
+      el.ld.creatorAdd.addEventListener('click', () => {
+        const box = el.ld.creators;
+        if (!box) return;
+        const hint = box.querySelector('.ld-hint');
+        if (hint) hint.remove();
+        const row = creatorRow({ lastName: '', firstName: '', creatorType: 'author' });
+        box.appendChild(row);
+        const input = row.querySelector('.ld-cr-last');
+        if (input) input.focus();
+      });
+    }
+    // 「返回阅读」由 modeswitch.js 统一处理（切模式时高亮块先滑过去，再收起库）
     el.sort.addEventListener('change', () => {
       state.sort = el.sort.value;
       state.sortDir = '';
@@ -1701,7 +1965,7 @@ window.LibraryUI = (function () {
     if (el.exportRefs) el.exportRefs.addEventListener('click', exportRefs);
     if (el.settingsBtn) el.settingsBtn.addEventListener('click', openSettings);
 
-    // 参考文献表（v29）
+    // 参考文献表
     if (el.bib && el.bib.modal) {
       el.bib.close.addEventListener('click', closeBib);
       el.bib.close2.addEventListener('click', closeBib);
@@ -1771,6 +2035,14 @@ window.LibraryUI = (function () {
       $('lib-bulk-edit').addEventListener('click', openBulk);
       $('lib-bulk-trash').addEventListener('click', bulkTrash);
       $('lib-bulk-clear').addEventListener('click', () => { state.selectedKeys.clear(); renderGrid(); renderBulk(); });
+      // 标注视图的批量动作
+      if (el.annoTagAdd) el.annoTagAdd.addEventListener('click', tagSelectedAnnos);
+      if (el.annoExport) el.annoExport.addEventListener('click', exportAnnos);
+      if (el.annoTagInput) {
+        el.annoTagInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); tagSelectedAnnos(); }
+        });
+      }
     }
 
     // 详情：DOI/arXiv 抓取
@@ -1801,6 +2073,11 @@ window.LibraryUI = (function () {
         const t = b.dataset.scope;
         resetEmptyArm();
         state.scope = t === 'coll' ? { type: 'coll', id: b.dataset.id } : { type: t };
+        if (t === 'annotations') {
+          // 标注本体在磁盘上，进这个视图时重新读一遍
+          loadAnnos(true).then(() => render());
+          return;
+        }
         render();
       }
     });
@@ -1884,12 +2161,37 @@ window.LibraryUI = (function () {
         return;
       }
       const rmTag = e.target.closest('[data-rmtag]');
-      if (rmTag) { await L().removeTag(rmTag.dataset.rmtag, rmTag.dataset.tag); await refresh(); return; }
+      if (rmTag) {
+        // 标注的标签存在 annoTags 里，不走条目的 tags
+        if (rmTag.dataset.rmtag.startsWith(ANNO_PREFIX)) {
+          const id = rmTag.dataset.rmtag.slice(ANNO_PREFIX.length);
+          await window.pdfBridge.removeAnnoTag(id, rmTag.dataset.tag);
+          await refresh();
+          return;
+        }
+        await L().removeTag(rmTag.dataset.rmtag, rmTag.dataset.tag);
+        await refresh();
+        return;
+      }
       // v14：点卡片上的标签 = 按这个标签筛选（别顺手把 PDF 打开了）
       const tagFilter = e.target.closest('[data-tag-filter]');
       if (tagFilter) { e.stopPropagation(); toggleTagFilter(tagFilter.dataset.tagFilter); return; }
       const addTag = e.target.closest('[data-addtag]');
-      if (addTag) { inlineInput(addTag, '', async (tag) => { await L().addTag(addTag.dataset.addtag, tag); await refresh(); }); return; }
+      if (addTag) {
+        inlineInput(addTag, '', async (tag) => {
+          if (addTag.dataset.addtag.startsWith(ANNO_PREFIX)) {
+            const id = addTag.dataset.addtag.slice(ANNO_PREFIX.length);
+            await window.pdfBridge.setAnnoTags(id, ((state.annoTags && state.annoTags[id]) || []).concat([tag]));
+          } else {
+            await L().addTag(addTag.dataset.addtag, tag);
+          }
+          await refresh();
+        });
+        return;
+      }
+      // 点标注 = 打开到那一页
+      const annoOpen = e.target.closest('[data-anno-open]');
+      if (annoOpen) { openAnno(annoOpen.dataset.annoOpen); return; }
       // 2026-10-21：点标题不再重命名（和整行一样进阅读）；重命名走详情面板标题字段
       if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.lc-check')) return;
       const card = e.target.closest('.lib-card');
@@ -1907,6 +2209,7 @@ window.LibraryUI = (function () {
     el.grid.addEventListener('contextmenu', (e) => {
       const card = e.target.closest('.lib-card[data-key]');
       if (!card) return;
+      if (card.dataset.key.startsWith(ANNO_PREFIX)) return;   // 标注没有条目菜单
       e.preventDefault();
       if (!card.classList.contains('selected')) selectCard(card.dataset.key, {});
       showCardMenu(e.clientX, e.clientY, card.dataset.key);
@@ -2050,8 +2353,76 @@ window.LibraryUI = (function () {
     el.ld.status.textContent = '标签待保存';
   }
 
+  // 覆盖层进出场：用 Web Animations API 驱动，只动 transform / opacity（合成器搬运，不重绘）。
+  // 关键是有兜底：Electron 窗口被遮挡时动画时间线会停住，纯 CSS animation 会把元素钉死在
+  // opacity 0（界面看起来就是"闪一下没了"）。这里无论时间线停没停，到点都强制收尾。
+  let layerAnim = null;
+  let layerAnimTimer = null;
+  let layerSeq = 0;          // 淡出 / 淡入的序号，用来作废过期的收尾回调
+  let leaving = false;       // 正在淡出
+  const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function animateLayer(dir, done) {
+    if (!el.root) { if (done) done(); return; }
+    if (layerAnimTimer) { clearTimeout(layerAnimTimer); layerAnimTimer = null; }
+    // 先记下当前实际透明度再取消旧动画：连续两次 hide()（点条目 + loadPdf 收尾）
+    // 或淡出途中反向切换时，新动画从现状出发才不会跳一帧
+    const prevOp = parseFloat(getComputedStyle(el.root).opacity) || 1;
+    if (layerAnim) { try { layerAnim.cancel(); } catch (_) {} layerAnim = null; }
+    if (REDUCED_MOTION) { if (done) done(); return; }
+    // 库已经收起来了就别再演一遍（loadPdf 末尾的 hide() 常落在淡出完成之后）
+    if (dir === 'leave' && el.root.hidden) { if (done) done(); return; }
+    const dur = dir === 'leave' ? 160 : 200;
+    const frames = dir === 'leave'
+      ? [{ opacity: prevOp, transform: 'none' }, { opacity: 0, transform: 'translate3d(0, 8px, 0)' }]
+      : [{ opacity: 0, transform: 'translate3d(0, 12px, 0)' }, { opacity: 1, transform: 'none' }];
+    try {
+      layerAnim = el.root.animate(frames, {
+        duration: dur,
+        easing: dir === 'leave' ? 'ease' : 'cubic-bezier(.2,.7,.3,1)',
+        // 必须 fill:'forwards'：播完停在最后一帧。用 'none' 的话动画一结束
+        // opacity 立刻弹回 CSS 的 1——整层闪回来一瞬，等兜底定时器才真正藏起来，
+        // 用户看到的就是「切过去了又抽回来，过一会儿才跳走」。
+        fill: 'forwards',
+      });
+      // 兜底：时间线真停住了（窗口被遮挡）就直接落到最终状态。
+      // 判断要看**时间线**有没有走，不能看动画自己的 currentTime ——
+      // 动画刚开始那一帧 currentTime 本来就是 0，拿它判断会把动画立刻跳完（等于没有过渡）。
+      const anim = layerAnim;
+      const t0 = (document.timeline && document.timeline.currentTime) || 0;
+      requestAnimationFrame(() => {
+        const t1 = (document.timeline && document.timeline.currentTime) || 0;
+        if (anim.playState === 'running' && t1 === t0) {
+          try { anim.finish(); } catch (_) {}
+        }
+      });
+    } catch (_) { layerAnim = null; }
+    // 兜底收尾：时间线停了也保证到达最终状态，不会把界面留在半透明
+    layerAnimTimer = setTimeout(() => {
+      layerAnimTimer = null;
+      const anim = layerAnim;
+      layerAnim = null;
+      if (anim) {
+        try { if (anim.playState === 'running') anim.finish(); } catch (_) {}
+      }
+      if (done) done();
+      // 收尾后松开 fill 效果：leave 时 root 已 hidden、enter 时终态就是 CSS 态，都不会闪
+      if (anim) { try { anim.cancel(); } catch (_) {} }
+    }, dur + 60);
+  }
+
   function show() {
-    el.root.hidden = false;
+    layerSeq++;            // 作废待执行的隐藏（淡出途中又点回来）
+    leaving = false;
+    if (el.root) {
+      // 先把高亮块摆回上一个模式，等库露出来时它再滑到「文献库」——只动药丸，不动整页
+      if (window.ModeSwitch) window.ModeSwitch.set('read');
+      el.root.hidden = false;
+      animateLayer('enter');
+    }
+    if (window.ModeSwitch) window.ModeSwitch.sync();
+    // 侧栏「标注」入口要显示条数，开库时顺手读一次标注
+    loadAnnos().then(() => { if (el.root && !el.root.hidden) render(); });
     refresh().then(() => {
       // 回到文献库时停在上次的位置（长列表里重新找很烦）
       if (state.listScroll) el.grid.scrollTop = state.listScroll;
@@ -2062,14 +2433,29 @@ window.LibraryUI = (function () {
   // 收起库时记住列表滚动位置
   function hide() {
     if (el.grid) state.listScroll = el.grid.scrollTop;
-    if (el.root) el.root.hidden = true;
+    const seq = ++layerSeq;
+    leaving = true;
+    if (el.root) {
+      animateLayer('leave', () => {
+        if (seq !== layerSeq) return;   // 淡出途中又点回来了
+        if (el.root) el.root.hidden = true;
+        leaving = false;
+        // 收起完成后视图才真正是「阅读」，此刻再同步一次兜底
+        if (window.ModeSwitch) window.ModeSwitch.sync();
+      });
+    }
+    // 立刻把高亮块跟到「阅读」，不等淡出——原来这里调 sync()，但淡出途中
+    // root 还可见，sync() 会误判回「文献库」，药丸就不跟人了：从库里打开
+    // 文档后工具栏还亮着「文献库」，点「阅读」自然像没反应。
+    if (window.ModeSwitch) window.ModeSwitch.set('read');
     closeSettings();
     if (el.dupModal) el.dupModal.hidden = true;
     if (el.bib && el.bib.modal) el.bib.modal.hidden = true;
     if (el.bulkModal) el.bulkModal.hidden = true;
     closeDetail();
   }
-  function isOpen() { return el.root && !el.root.hidden; }
+  // 淡出中算「已经关了」：这 140ms 里后台不该再拦键盘
+  function isOpen() { return !!(el.root && !el.root.hidden && !leaving); }
 
   function init() {
     if (inited) return; inited = true;
@@ -2091,5 +2477,6 @@ window.LibraryUI = (function () {
     loadSettings().then(() => refresh());
   }
 
-  return { init, show, hide, refresh, isOpen, openDetail, closeDetail, openSettings };
+  // annoMarkdown 暴露出来：回归脚本要能直接验「标注 → 笔记」的排版
+  return { init, show, hide, refresh, isOpen, openDetail, closeDetail, openSettings, annoMarkdown, loadAnnos };
 })();
