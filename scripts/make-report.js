@@ -117,16 +117,16 @@ const HTML = `<!DOCTYPE html>
   <tr>
     <td><b>抓取</b></td>
     <td>DOI / arXiv 元数据；无 PDF 全文抓取</td>
-    <td>无变化（本轮未动）</td>
-    <td class="c"><span class="tag gap">仍缺</span></td>
+    <td>arXiv 直链 / Unpaywall 开放获取 / doi.org 兜底三路抓 PDF 全文，校验魔数后会挂到条目上</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺快照 / 批量</td>
   </tr>
 </table>
 
 <h2>二、对齐度重新评估</h2>
 
 <div class="kpi">
-  <div><b>42% → 72%</b><span>加权总对齐度（按使用频次加权）</span></div>
-  <div><b>9 → 2</b><span>原报告「差距项」剩余未做</span></div>
+  <div><b>42% → 75%</b><span>加权总对齐度（按使用频次加权）</span></div>
+  <div><b>9 → 1</b><span>原报告「差距项」剩余未做</span></div>
   <div><b>520+</b><span>自动化断言（本轮新增 74 项）</span></div>
 </div>
 
@@ -138,16 +138,16 @@ const HTML = `<!DOCTYPE html>
   <tr><td>组织</td><td class="c">80%</td><td class="c ok">92%</td><td>重命名随迁、撤销重做；差标签层级与大库虚拟滚动</td></tr>
   <tr><td>引用</td><td class="c">50%</td><td class="c part">55%</td><td>仅 5 种硬编码样式；CSL 引擎仍是最大写作缺口</td></tr>
   <tr><td>阅读器</td><td class="c">60%</td><td class="c ok">78%</td><td>朗读、打印补齐；差旋转、分屏、reflow</td></tr>
-  <tr><td>抓取</td><td class="c">10%</td><td class="c gap">15%</td><td>仍只有元数据抓取，没有 PDF 全文 / 快照 / 批量</td></tr>
+  <tr><td>抓取</td><td class="c">10%</td><td class="c ok">45%</td><td>arXiv / Unpaywall / doi.org 三路抓全文已通；差网页快照与批量</td></tr>
   <tr><td>导入导出</td><td class="c">55%</td><td class="c ok">75%</td><td>四种题录格式；导出仍以 Markdown / 纯文本为主</td></tr>
 </table>
 
 <h2>三、仍然缺失什么（按影响排序）</h2>
 
-<h3>1. 抓取（差距最大，10% → 15%）</h3>
+<h3>1. 抓取（本轮进展最大，10% → 45%）</h3>
 <ul>
-  <li><b>从 URL / DOI 抓 PDF 全文</b>：现在只抓元数据（题目 / 作者 / 年份），拿不到正文；这是「入库一步到位」最缺的一环。</li>
-  <li>网页快照（保存引用页面，防止链接失效）；批量抓取 / 自动下载 PDF。</li>
+  <li><b>arXiv / Unpaywall / doi.org 三路抓全文已通</b>（详情里新增「抓 PDF 全文」按钮）：开放获取的论文现在能一步入库，下载后校验 %PDF- 魔数，付费墙网页不会冒充成功。</li>
+  <li><b>网页快照</b>（保存引用页面防链接失效）；<b>批量抓取</b>（选中一批条目一次下载）；<b>非开放获取全文</b>（需要机构代理或手动拖入）。</li>
 </ul>
 
 <h3>2. 引用（写作闭环的关键缺口）</h3>

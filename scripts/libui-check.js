@@ -115,18 +115,18 @@ module.exports = `(async () => {
   // v23：笔记改成多条，先新建一条写点内容（失焦自动保存）
   $('#ld-note-add').click();
   await sleep(300);
-  const nb = document.querySelector('#ld-notes .ld-note-text');
+  const nb = document.querySelector('#ld-notes .ld-note-rich');   // v9：笔记正文改成富文本
   if (nb) {
-    nb.value = '未保存的笔记';
-    nb.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(250);
+    nb.innerHTML = '<p>未保存的笔记</p>';
+    nb.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    await sleep(1100);
   }
-  push('能新建一条阅读笔记', !!(nb && nb.value), nb ? nb.value : 'null');
+  push('能新建一条阅读笔记', !!(nb && /未保存的笔记/.test(nb.innerHTML)), nb ? nb.innerHTML : 'null');
   $('#ld-tag-input').value = '新标签';
   $('#ld-tag-add').click();
   await sleep(60);
-  const nb2 = document.querySelector('#ld-notes .ld-note-text');
-  push('加标签不冲掉未保存的笔记草稿', !!nb2 && nb2.value === '未保存的笔记', nb2 ? nb2.value : 'null');
+  const nb2 = document.querySelector('#ld-notes .ld-note-rich');
+  push('加标签不冲掉已保存的笔记内容', !!nb2 && /未保存的笔记/.test(nb2.innerHTML), nb2 ? nb2.innerHTML : 'null');
   const col2 = $('#ld-colls input[value="col2"]'); col2.checked = true;
   $('#ld-save').click();
   await waitFor(() => firstTitle() === 'Alpha 改' || $$('#lib-grid .lib-card .lctitle').some((x) => x.textContent.trim() === 'Alpha 改'), 4000);

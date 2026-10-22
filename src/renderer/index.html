@@ -285,6 +285,7 @@
         </div>
         <div id="ld-fetch-row" class="ld-fetch-row">
           <button id="ld-fetch" class="ld-mini">从 DOI / arXiv 抓取元数据</button>
+          <button id="ld-fetch-pdf" class="ld-mini" title="按 arXiv / Unpaywall / doi.org 依次尝试下载开放获取的 PDF 全文">抓 PDF 全文</button>
           <span id="ld-fetch-status" class="ld-hint"></span>
         </div>
         <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
@@ -364,6 +365,94 @@
     </aside>
   </div>
 
+  <!-- 独立笔记的全屏编辑器：双击笔记条目进入，占满阅读区（像打开一份文档一样）。
+       v9.6：正文改 Markdown（博客后台同款工具栏 + 实时预览），
+       工具栏整体移植自 D:/项目/博客站点 的 PostToolbar.astro（按钮组替代下拉，点击直接插入语法） -->
+  <div id="note-view" hidden>
+    <header id="nv-bar">
+      <button id="nv-back" class="tbtn" title="保存并返回文献库（Esc）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        <span>文献库</span>
+      </button>
+      <span class="sep"></span>
+      <input id="nv-title" type="text" placeholder="未命名笔记" title="笔记标题（改完自动保存）" />
+      <span id="nv-status" class="ld-hint"></span>
+      <span class="grow"></span>
+      <button id="nv-preview-toggle" class="tbtn" title="显示 / 隐藏实时预览" aria-pressed="true">预览</button>
+      <button id="nv-save" class="tbtn" title="保存（Ctrl+S）">保存</button>
+    </header>
+
+    <!-- Markdown 工具栏（移植自博客 PostToolbar：data-action 由 insertMdSnippet 处理） -->
+    <div id="nv-toolbar" class="post-toolbar" role="toolbar" aria-label="Markdown 编辑工具栏">
+      <button type="button" class="toolbar-btn" data-action="bold" title="粗体 (Ctrl+B)"><strong>B</strong></button>
+      <button type="button" class="toolbar-btn" data-action="italic" title="斜体 (Ctrl+I)"><em>I</em></button>
+      <button type="button" class="toolbar-btn" data-action="strike" title="删除线"><s>S</s></button>
+      <span class="toolbar-sep"></span>
+      <button type="button" class="toolbar-btn" data-action="heading-2" title="二级标题">H2</button>
+      <button type="button" class="toolbar-btn" data-action="heading-3" title="三级标题">H3</button>
+      <span class="toolbar-sep"></span>
+      <button type="button" class="toolbar-btn" data-action="link" title="链接">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1M8 13h8v-2H8v2m9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
+      </button>
+      <span class="toolbar-sep"></span>
+      <button type="button" class="toolbar-btn" data-action="code-inline" title="行内代码"><code style="font-size:0.8em">{ }</code></button>
+      <button type="button" class="toolbar-btn" data-action="code-block" title="代码块">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+      </button>
+      <span class="toolbar-sep"></span>
+      <button type="button" class="toolbar-btn" data-action="formula-inline" title="行内公式"><span style="font-family:serif">ƒ</span></button>
+      <button type="button" class="toolbar-btn" data-action="formula-block" title="块级公式"><span style="font-family:serif;font-size:1.1em">∑</span></button>
+      <button type="button" class="toolbar-btn" data-action="derivation" title="插入推导容器"><span style="font-family:serif;font-size:0.85em">推导</span></button>
+      <span class="toolbar-sep"></span>
+      <button type="button" class="toolbar-btn" data-action="underline" title="下划线 ++文本++"><u>U</u></button>
+      <button type="button" class="toolbar-btn" data-action="spoiler" title="模糊/剧透 !!文本!!（悬停或点击显示）"><span style="font-size:0.78em">模糊</span></button>
+      <button type="button" class="toolbar-btn" data-action="rainbow" title="彩虹文字 ==文本==">
+        <span style="font-size:0.78em;background:linear-gradient(90deg,#ef5350,#7e57c2,#2196f3,#43a047);-webkit-background-clip:text;background-clip:text;color:transparent">彩虹</span>
+      </button>
+      <button type="button" class="toolbar-btn" data-action="ruby" title="拼音注音 {汉字}(hàn|zì)"><span style="font-size:0.78em">拼音</span></button>
+      <button type="button" class="toolbar-btn" data-action="footnote" title="脚注 [^N]（文末自动生成定义）"><span style="font-size:0.78em">脚注</span></button>
+      <button type="button" class="toolbar-btn" data-action="quote-card" title="引用卡片 :::quote"><span style="font-size:0.78em">引卡</span></button>
+      <button type="button" class="toolbar-btn" data-action="music-card" title="音乐卡片 ::music{id}"><span style="font-size:0.78em">音乐</span></button>
+      <button type="button" class="toolbar-btn" data-action="github-card" title="GitHub 卡片 ::github{repo}"><span style="font-size:0.78em">GH</span></button>
+      <span class="toolbar-sep"></span>
+      <button type="button" class="toolbar-btn" data-action="ul" title="无序列表">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+      </button>
+      <button type="button" class="toolbar-btn" data-action="ol" title="有序列表">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M2 17h2v.5H3v1h1v.5H2v1h3v-4H2v1zm1-9h1V4H2v1h1v3zm-1 3h1.8L2 13.1v.9h3v-1H3.2L5 10.9V10H2v1zm5-6v2h14V5H7zm0 14h14v-2H7v2zm0-6h14v-2H7v2z"/></svg>
+      </button>
+      <button type="button" class="toolbar-btn" data-action="task" title="任务列表 - [ ]"><span style="font-size:0.78em">任务</span></button>
+      <button type="button" class="toolbar-btn" data-action="blockquote" title="引用">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg>
+      </button>
+      <button type="button" class="toolbar-btn" data-action="tip" title="提示框 :::tip">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-6h2v6zm0-8h-2V7h2v4z"/></svg>
+      </button>
+      <button type="button" class="toolbar-btn" data-action="tip-note" title="提示框 :::note"><span style="font-size:0.78em;color:#757575">注意</span></button>
+      <button type="button" class="toolbar-btn" data-action="tip-important" title="提示框 :::important"><span style="font-size:0.78em;color:#4cb3d4">重要</span></button>
+      <button type="button" class="toolbar-btn" data-action="tip-warning" title="提示框 :::warning"><span style="font-size:0.78em;color:#e6a700">警告</span></button>
+      <button type="button" class="toolbar-btn" data-action="tip-caution" title="提示框 :::caution"><span style="font-size:0.78em;color:#e13238">危险</span></button>
+      <button type="button" class="toolbar-btn" data-action="tip-title" title="自定义标题提示框 :::tip[标题]"><span style="font-size:0.78em;color:#009400">提示[…]</span></button>
+      <button type="button" class="toolbar-btn" data-action="table" title="表格">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 4v4h6V8H5m8 0v4h6V8h-6m-8 6v4h6v-4H5m8 0v4h6v-4h-6z"/></svg>
+      </button>
+      <button type="button" class="toolbar-btn" data-action="hr" title="分隔线">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 13H5v-2h14v2z"/></svg>
+      </button>
+    </div>
+
+    <!-- 左：Markdown 源码；右：实时预览（博客后台三栏里的「编辑器 + 实时预览」两栏） -->
+    <div id="nv-split">
+      <textarea id="nv-md" class="post-content-textarea" spellcheck="false"
+        placeholder="在这里写笔记内容（Markdown）…&#10;&#10;工具栏一键插入语法；右边实时预览。"></textarea>
+      <div id="nv-preview-wrap">
+        <div id="nv-preview-head"><span class="nv-ph-title">实时预览</span>
+          <span id="nv-preview-status" class="ld-hint">Markdown · 公式按源码显示</span></div>
+        <div id="nv-preview" class="md-body markdown-content"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 文字批注输入框（绝对定位到页面点击处） -->
   <textarea id="text-editor" rows="1" spellcheck="false" placeholder="Enter 完成 · Esc 取消" hidden></textarea>
 
@@ -411,6 +500,9 @@
         </div>
         <label class="set-check"><input id="set-auto-index" type="checkbox" /> 启动时自动建立全文索引</label>
         <label class="set-check"><input id="set-invert-pages" type="checkbox" /> 深色模式下把页面反色（夜读护眼）</label>
+        <label class="ld-row"><span class="ld-lbl">抓取联系邮箱</span>
+          <input id="set-fetch-email" type="text" placeholder="可选；填了才能用 Unpaywall 找开放获取全文" />
+        </label>
 
         <div class="set-sec">
           <div class="set-title">存储位置 <span class="ld-hint">library.json 与全文索引所在目录</span></div>
@@ -583,6 +675,7 @@
   <script src="../creators.js"></script>
   <script src="../query.js"></script>
   <script src="../markdown.js"></script>
+  <script src="../richtext.js"></script>
   <script src="../cite.js"></script>
   <script src="../bib.js"></script>
   <script src="pdfimages.js"></script>

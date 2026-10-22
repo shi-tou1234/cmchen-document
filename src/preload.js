@@ -126,6 +126,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     openDataDir: () => ipcRenderer.invoke('lib-open-data-dir'),
     // v12：元数据 / 文献格式 / 查重 / 批量 / 智能收藏集
     fetchMetadata: (identifier) => ipcRenderer.invoke('lib-fetch-metadata', { identifier }),
+    // v9：抓 PDF 全文
+    fetchPdf: (key, url) => ipcRenderer.invoke('lib-fetch-pdf', { key, url }),
     // 同时兼容 importRefs(text, name) 与 importRefs({ text, name })；
     // 无参调用表示“弹系统文件对话框”，由主进程判断。
     importRefs: (text, name) => ipcRenderer.invoke('lib-import-refs',

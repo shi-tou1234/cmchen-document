@@ -16,6 +16,7 @@ const DEFAULTS = {
   hintSeen: false,        // v19：首次上手提示是否已经看过
   invertPages: false,     // v20：深色模式下把页面反色（护眼）
   viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
+  fetchEmail: '',        // v9：抓 PDF 全文时给 Unpaywall 的联系邮箱（留空则跳过 Unpaywall）
 };
 
 const SORTS = new Set(['added', 'modified', 'title', 'year']);
@@ -51,6 +52,11 @@ function sanitize(raw) {
   if (typeof src.hintSeen === 'boolean') out.hintSeen = src.hintSeen;
   if (typeof src.invertPages === 'boolean') out.invertPages = src.invertPages;
   if (src.viewMode === 'page' || src.viewMode === 'scroll') out.viewMode = src.viewMode;
+  if (typeof src.fetchEmail === 'string') {
+    const e = src.fetchEmail.trim();
+    // 只要像邮箱就行，别把奇怪的东西存进去
+    out.fetchEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) ? e.slice(0, 120) : '';
+  }
   return out;
 }
 

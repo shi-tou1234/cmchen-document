@@ -1,13 +1,19 @@
 'use strict';
 /*
- * 笔记用的轻量 Markdown 渲染（v9，报告「笔记」缺口：纯文本 → 富文本预览）。
+ * 笔记用的轻量 Markdown 渲染（v9.6：语法与样式整体对齐用户博客的后台编辑器）。
  *
- * 为什么自己写而不引库：项目约定零前端框架 / 零额外依赖，而笔记只需要
- * 标题、粗斜体、链接、图片、列表、引用、代码块、表格这一小撮语法；
+ * 为什么自己写而不引库：项目约定零前端框架 / 零额外依赖；
  * 关键要求是**先转义再拼标签**，绝不把用户文本当 HTML 插进 DOM。
  *
- * 公式：项目里没有数学排版引擎，$...$ / $$...$$ 按等宽原样显示（保留 LaTeX 源码），
- * 需要排版时把公式贴到外部工具。这一点在预览区有提示，不假装支持。
+ * v9.6 新增（对齐博客 D:/项目/博客站点 的 markdown.css / PostToolbar）：
+ *   :::tip / :::note / :::important / :::warning / :::caution / :::tip[自定义标题]
+ *   :::derivation（推导容器）、:::quote（引用卡片，支持 <right>/<left> 对齐与「—— 出处」）
+ *   ++下划线++   !!剧透(模糊)!!   ==彩虹文字==   {汉字}(hàn|zì) 拼音   [^1] 脚注
+ *   ::music{id="网易云ID"}   ::github{repo="用户/仓库"}
+ *   - [ ] / - [x] 任务列表
+ *   fromHtml()：旧富文本笔记（html）一次性转成 Markdown，迁移用。
+ *
+ * 公式：项目里没有数学排版引擎，$...$ / $$...$$ 按等宽原样显示（保留 LaTeX 源码）。
  *
  * UMD：Node 里 require 可测，浏览器里挂 window.Md。
  */
@@ -19,6 +25,11 @@
 
   const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ESC[c]); }
+  function decode(s) {
+    return String(s == null ? '' : s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+  }
 
   // 只在明确的白名单协议下生成可点链接，其它（javascript:、file: 等）当纯文本
   function safeHref(raw) {
@@ -46,7 +57,7 @@
 
   function inline(s) {
     let out = esc(s);
-    // 行内代码先抽出来，别让里面的 * _ 被当成强调
+    // 行内代码先抽出来，别让里面的 * _ ~ + = ! 被当成强调
     const codes = [];
     out = out.replace(/`([^`\n]+)`/g, (_, c) => {
       codes.push('<code>' + c + '</code>');
@@ -70,6 +81,15 @@
     out = out.replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     out = out.replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>');
     out = out.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    // ===== 博客扩展语法（++下划线 / !!剧透 / ==彩虹 / 拼音 / 脚注）=====
+    out = out.replace(/\+\+([^+\n]+)\+\+/g, '<span class="underline-text">$1</span>');
+    out = out.replace(/!!([^!\n]+)!!/g, '<span class="spoiler" data-spoiler title="点击显示">$1</span>');
+    out = out.replace(/==([^=\n]+)==/g, '<span class="rainbow-text">$1</span>');
+    out = out.replace(/\{([^{}\n]+)\}\(([^()\n]+)\)/g, (_, zi, yin) => {
+      const rt = yin.split('|').join(' ');
+      return '<ruby>' + zi + '<rt>' + rt + '</rt></ruby>';
+    });
+    out = out.replace(/\[\^(\d+)\]/g, '<sup class="md-fnref" data-fnjump="fn-$1">$1</sup>');
     out = out.replace(/\u0001(\d+)\u0001/g, (_, i) => codes[+i] || '');
     out = out.replace(/\u0002(\d+)\u0002/g, (_, i) => maths[+i] || '');
     return out;
@@ -100,9 +120,82 @@
     return { html: '<table class="md-table"><thead><tr>' + th + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>', next: i };
   }
 
+  // :::类型[标题] … ::: 容器（提示框 / 推导 / 引用卡）
+  function renderContainer(lines, start) {
+    const head = /^:::([\w-]+)(?:\[([^\]]*)\])?\s*$/.exec(lines[start].trim());
+    if (!head) return null;
+    const type = head[1].toLowerCase();
+    const title = head[2] || '';
+    const buf = [];
+    let i = start + 1;
+    while (i < lines.length && !/^:::\s*$/.test(lines[i].trim())) { buf.push(lines[i]); i++; }
+    if (i < lines.length) i++;   // 吃掉收尾 :::
+    let inner = render(buf.join('\n'));
+    if (type === 'quote') {
+      // <right>/<left> 是博客的对齐标记（我们的管线会把 HTML 转义），换成对齐容器；
+      // <br> 是博客引卡模板里的换行，一并接住
+      inner = inner
+        .replace(/&lt;br\s*\/?&gt;/g, '<br />')
+        .replace(/&lt;right&gt;/g, '</div><div class="q-right">')
+        .replace(/&lt;\/right&gt;/g, '</div><div class="q-body">')
+        .replace(/&lt;left&gt;/g, '</div><div class="q-left">')
+        .replace(/&lt;\/left&gt;/g, '</div><div class="q-body">');
+      // 「—— 出处」行靠右
+      inner = inner.replace(/<p class="md-p">(——[^<]*)<\/p>/g, '<div class="q-from">$1</div>');
+      return { html: '<div class="quote"><div class="q-body">' + inner + '</div></div>', next: i };
+    }
+    if (type === 'derivation') {
+      return {
+        html: '<div class="admonition derivation"><div class="admonition-title">推导过程</div>'
+          + '<div class="admonition-body">' + inner + '</div></div>',
+        next: i,
+      };
+    }
+    const known = ['tip', 'note', 'important', 'warning', 'caution'];
+    const cls = known.includes(type) ? type : 'tip';
+    const label = title || ({ tip: 'Tip', note: 'Note', important: 'Important', warning: 'Warning', caution: 'Caution' }[cls] || type);
+    return {
+      html: '<div class="admonition ' + cls + '"><div class="admonition-title">' + esc(label) + '</div>'
+        + '<div class="admonition-body">' + inner + '</div></div>',
+      next: i,
+    };
+  }
+
+  // ::github{repo="user/repo"} / ::music{id="网易云ID"}
+  function renderCardLine(trimmed) {
+    const gh = /^::github\{(.*)\}\s*$/.exec(trimmed);
+    if (gh) {
+      const repo = (/repo\s*=\s*"([^"]*)"/.exec(gh[1]) || [])[1] || '';
+      const owner = repo.split('/')[0] || '';
+      const name = repo.split('/')[1] || repo;
+      if (!repo) return '';
+      return '<a class="card-github no-styling" data-md-link="https://github.com/' + esc(repo) + '" href="javascript:void(0)">'
+        + '<div class="gc-titlebar"><div class="gc-titlebar-left"><span class="gc-owner">'
+        + '<span class="gc-avatar"></span><span class="gc-user">' + esc(owner) + '</span></span>'
+        + '<span class="gc-divider">/</span><span class="gc-repo">' + esc(name) + '</span></div>'
+        + '<span class="github-logo"></span></div>'
+        + '<div class="gc-infobar"><span class="gc-stars">GitHub 仓库</span></div></a>';
+    }
+    const mu = /^::music\{(.*)\}\s*$/.exec(trimmed);
+    if (mu) {
+      const id = (/id\s*=\s*"([^"]*)"/.exec(mu[1]) || [])[1] || '';
+      const name = (/name\s*=\s*"([^"]*)"/.exec(mu[1]) || [])[1] || '';
+      const artist = (/artist\s*=\s*"([^"]*)"/.exec(mu[1]) || [])[1] || '';
+      if (!id) return '';
+      return '<a class="card-music no-styling" data-md-link="https://music.163.com/#/song?id=' + encodeURIComponent(id) + '" href="javascript:void(0)">'
+        + '<div class="music-card"><div class="music-cover-wrapper"><div class="music-cover"></div></div>'
+        + '<div class="music-info"><div class="music-header">'
+        + '<div class="music-title">' + esc(name || ('网易云歌曲 ' + id)) + '</div>'
+        + '<div class="music-artist">' + esc(artist || '点击在浏览器里打开') + '</div>'
+        + '</div></div></div></a>';
+    }
+    return '';
+  }
+
   function render(text) {
     const lines = String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n');
     const out = [];
+    const footnotes = [];   // [ { n, text } ]
     let i = 0;
     while (i < lines.length) {
       const line = lines[i];
@@ -117,6 +210,32 @@
         i++;   // 跳过收尾 ```
         out.push('<pre class="md-pre"><code' + (fence[1] ? ' data-lang="' + esc(fence[1]) + '"' : '') + '>'
           + esc(buf.join('\n')) + '</code></pre>');
+        continue;
+      }
+
+      // ::: 容器（提示框 / 推导 / 引用卡）
+      if (/^:::[\w-]/.test(trimmed)) {
+        const c = renderContainer(lines, i);
+        if (c) { out.push(c.html); i = c.next; continue; }
+      }
+
+      // ::github / ::music 卡片
+      if (/^::(github|music)\{/.test(trimmed)) {
+        const card = renderCardLine(trimmed);
+        if (card) { out.push(card); i++; continue; }
+      }
+
+      // 脚注定义：[^1]: 内容（收集到最后统一渲染）
+      const fn = /^\[\^(\d+)\]:\s*(.*)$/.exec(trimmed);
+      if (fn) {
+        const n = fn[1];
+        let defText = fn[2];
+        i++;
+        while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|>\s?|```|:::|\[\^\d+\]:)/.test(lines[i].trim())) {
+          defText += ' ' + lines[i].trim();
+          i++;
+        }
+        footnotes.push({ n, text: defText });
         continue;
       }
 
@@ -169,7 +288,7 @@
         continue;
       }
 
-      // 列表（无序 / 有序）
+      // 列表（无序 / 有序 / 任务）
       if (/^([-*+])\s+/.test(trimmed) || /^\d+[.)]\s+/.test(trimmed)) {
         const ordered = /^\d+[.)]\s+/.test(trimmed);
         const items = [];
@@ -177,10 +296,17 @@
           const t = lines[i].trim();
           const m = ordered ? /^\d+[.)]\s+(.*)$/.exec(t) : /^[-*+]\s+(.*)$/.exec(t);
           if (!m) break;
-          items.push('<li>' + inline(m[1]) + '</li>');
+          const tm = /^\[( |x|X)\]\s+(.*)$/.exec(m[1]);
+          if (tm && !ordered) {
+            const done = tm[1].toLowerCase() === 'x';
+            items.push('<li class="md-task"><input type="checkbox" disabled' + (done ? ' checked' : '') + ' />'
+              + '<span' + (done ? ' class="md-task-done"' : '') + '>' + inline(tm[2]) + '</span></li>');
+          } else {
+            items.push('<li>' + inline(m[1]) + '</li>');
+          }
           i++;
         }
-        out.push((ordered ? '<ol class="md-list">' : '<ul class="md-list">') + items.join('') + (ordered ? '</ol>' : '</ul>'));
+        out.push((ordered ? '<ol class="md-list">' : '<ul class="md-list md-ul">') + items.join('') + (ordered ? '</ol>' : '</ul>'));
         continue;
       }
 
@@ -188,12 +314,19 @@
       const buf = [trimmed];
       i++;
       while (i < lines.length && lines[i].trim()
-        && !/^(#{1,6}\s|>\s?|```|\$\$|-{3,}$|\|)/.test(lines[i].trim())
+        && !/^(#{1,6}\s|>\s?|```|\$\$|:::|::(github|music)\{|-{3,}$|\[\^\d+\]:|\|)/.test(lines[i].trim())
         && !/^([-*+])\s+/.test(lines[i].trim()) && !/^\d+[.)]\s+/.test(lines[i].trim())) {
         buf.push(lines[i].trim());
         i++;
       }
       out.push('<p class="md-p">' + buf.map(inline).join('<br />') + '</p>');
+    }
+    // 文末脚注区
+    if (footnotes.length) {
+      out.push('<hr class="md-fn-hr" /><section class="md-footnotes">'
+        + footnotes.map((f) => '<div class="md-fn" id="fn-' + esc(f.n) + '">'
+          + '<span class="md-fn-index">[' + esc(f.n) + ']</span> ' + inline(f.text) + '</div>').join('')
+        + '</section>');
     }
     return out.join('\n');
   }
@@ -202,16 +335,74 @@
   function plain(text, max) {
     const s = String(text == null ? '' : text)
       .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/:::[\w-]*(\[[^\]]*)?[\s\S]*?(:::\s*$|[\n\r])/gm, ' ')
+      .replace(/::(github|music)\{[^}]*\}/g, ' ')
       .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
       .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/\[\^\d+\]/g, ' ')
+      .replace(/\[\^\d+\]:/g, ' ')
       .replace(/^#{1,6}\s+/gm, '')
       .replace(/^>\s?/gm, '')
-      .replace(/[*_~`]/g, '')
+      .replace(/\{([^{}]+)\}\(([^()]+)\)/g, '$1')
+      .replace(/[*_~`+=!]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
     const n = max || 90;
     return s.length > n ? s.slice(0, n) + '…' : s;
   }
 
-  return { render, inline, plain, esc, safeHref };
+  // ---------- 旧富文本笔记 → Markdown（一次性迁移，正则版，Node / 浏览器都能跑） ----------
+  function stripTags(s) {
+    return decode(String(s == null ? '' : s).replace(/<[^>]+>/g, ''));
+  }
+
+  function fromHtml(html) {
+    let s = String(html || '');
+    if (!s.trim()) return '';
+    const slots = { pre: [], img: [], a: [] };
+    // 1. 整块结构先抽走，避免内部标记被二次处理
+    s = s.replace(/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi, (_, c) => {
+      slots.pre.push('```\n' + stripTags(c) + '\n```');
+      return '\u0003P' + (slots.pre.length - 1) + '\u0003';
+    });
+    s = s.replace(/<img[^>]*>/gi, (tag) => {
+      const src = /(?:data-md-img|src)\s*=\s*"([^"]*)"/i.exec(tag);
+      const alt = /alt\s*=\s*"([^"]*)"/i.exec(tag);
+      slots.img.push('![' + (alt ? alt[1] : '') + '](' + (src ? src[1] : '') + ')');
+      return '\u0003I' + (slots.img.length - 1) + '\u0003';
+    });
+    s = s.replace(/<a[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, txt) => {
+      slots.a.push('[' + stripTags(txt).trim() + '](' + href + ')');
+      return '\u0003A' + (slots.a.length - 1) + '\u0003';
+    });
+    // 2. 行内样式
+    s = s.replace(/<(strong|b)>([\s\S]*?)<\/\1>/gi, '**$2**');
+    s = s.replace(/<(em|i)>([\s\S]*?)<\/\1>/gi, '*$2*');
+    s = s.replace(/<(u|ins)>([\s\S]*?)<\/\1>/gi, '++$2++');
+    s = s.replace(/<(del|s|strike)>([\s\S]*?)<\/\1>/gi, '~~$2~~');
+    s = s.replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`');
+    s = s.replace(/\*\*(?=[*_~+=!`])/g, '** ');   // 相邻标记隔开：**粗***斜* → **粗** *斜*
+    // 3. 块级结构
+    s = s.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n\n# $1\n\n');
+    s = s.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n\n## $1\n\n');
+    s = s.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n\n### $1\n\n');
+    s = s.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n\n#### $1\n\n');
+    s = s.replace(/<h[56][^>]*>([\s\S]*?)<\/h[56]>/gi, '\n\n##### $1\n\n');
+    s = s.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi,
+      (_, c) => '\n\n' + stripTags(c).split('\n').map((l) => '> ' + l.trim()).filter((l) => l.trim() !== '>').join('\n') + '\n\n');
+    s = s.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
+    s = s.replace(/<\/(p|div|h[1-6]|ul|ol|li|blockquote|pre|table|tr)>/gi, '\n');
+    s = s.replace(/<br\s*\/?>/gi, '\n');
+    s = s.replace(/<[^>]+>/g, '');
+    // 4. 实体 + 占位符还原
+    s = decode(s);
+    s = s.replace(/\u0003([PIA])(\d+)\u0003/g, (_, k, n) => (slots[{ P: 'pre', I: 'img', A: 'a' }[k]] || [])[+n] || '');
+    // 5. 收尾：清单项顶格、空行收敛
+    s = s.split('\n').map((l) => l.replace(/^\s*[-*]\s+\*\*/, '- **')).join('\n');
+    s = s.replace(/[ \t]+\n/g, '\n');
+    s = s.replace(/\n{3,}/g, '\n\n');
+    return s.trim();
+  }
+
+  return { render, inline, plain, esc, safeHref, fromHtml };
 });

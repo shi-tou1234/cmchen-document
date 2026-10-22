@@ -7,6 +7,7 @@ const settings = require('./settings.js');
 const fulltext = require('./fulltext.js');
 const formats = require('./formats.js');
 const metadata = require('./metadata.js');
+const fetchpdf = require('./fetchpdf.js');
 const pdfmeta = require('./pdfmeta.js');
 const docconvert = require('./docconvert.js');
 const Cite = require('./cite.js');
@@ -1128,6 +1129,35 @@ ipcMain.handle('lib-ft-clear', () => {
 ipcMain.handle('lib-fetch-metadata', async (_e, info) => {
   const id = info && info.identifier;
   return metadata.fetchMetadata(id);
+});
+
+// v9：抓 PDF 全文（arXiv → Unpaywall → 直链/doi.org 依次尝试），成功就挂到条目上
+ipcMain.handle('lib-fetch-pdf', async (_e, info) => {
+  const key = String((info && info.key) || '').trim();
+  const it = key ? library.findItem(key) : null;
+  if (!it) return { ok: false, error: '条目不存在' };
+  if (it.deletedAt) return { ok: false, error: '回收站里的条目不能抓取' };
+  const custom = String((info && info.url) || '').trim();
+  const src = {
+    doi: it.doi || '',
+    arxivId: fetchpdf.arxivIdFromUrl((it.fields && it.fields.arxivId) || it.url || ''),
+    url: custom || it.url || '',
+    email: (settings.get().fetchEmail || '').trim(),
+  };
+  if (!src.doi && !src.arxivId && !src.url) {
+    return { ok: false, error: '这条文献没有 DOI / arXiv / 链接，先在详情里补一个再抓' };
+  }
+  const dir = path.join(currentDataDir(), 'attachments');
+  const dest = path.join(dir, key + '.pdf');
+  const r = await fetchpdf.fetchToFile(src, dest, { timeout: (info && info.timeout) || undefined });
+  if (!r.ok) return Object.assign({ ok: false }, r, { sources: src });
+  try {
+    library.setAttachment(key, r.path);
+    if (win) win.webContents.send('lib-changed');
+  } catch (err) {
+    return { ok: false, error: '下载成功但挂载失败：' + (err && err.message ? err.message : err) };
+  }
+  return { ok: true, path: r.path, source: r.source, bytes: r.bytes, tried: r.tried };
 });
 ipcMain.handle('lib-import-refs', (_e, info) => {
   if (info && typeof info.text === 'string') {

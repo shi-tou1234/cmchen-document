@@ -372,6 +372,20 @@ function loadRichDoc(payload) {
     if (host) {
       host.hidden = false;
       host.innerHTML = pages.map((p, i) => richPageHtml(p, i, pages.length)).join('');
+      // v9.5：富文档页也挂标注层（和 PDF 页同一套两个 SVG）。
+      // 不设 viewBox → 用户单位就是页面 CSS 像素；页面因图片加载变高时标注不会漂，
+      // 缩放由 #doc-view 的 CSS zoom 统一处理，标注天然跟着放大缩小。
+      for (const pageEl of host.querySelectorAll('.doc-page')) {
+        const n = +pageEl.dataset.page;
+        const base = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        base.setAttribute('class', 'anno-base');
+        const anno = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        anno.setAttribute('class', 'anno');
+        pageEl.appendChild(base);
+        pageEl.appendChild(anno);
+        if (window.Anno) window.Anno.attachPage(pageEl, n, anno);
+        pageEl._unit = { w: pageEl.offsetWidth || 900, h: pageEl.offsetHeight || 1200 };
+      }
     }
     App.els.pageCount.textContent = '/ ' + s.numPages;
     App.els.pageInput.max = String(s.numPages);
@@ -394,6 +408,7 @@ function loadRichDoc(payload) {
     if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide();
+    restoreAnnos(s.filePath);   // 富文档的标注也按文件路径存取，和 PDF 一致
     refreshSidebar();
     syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
     renderTabs();
@@ -2068,6 +2083,30 @@ async function pageTextForSpeech(pdfPage) {
   } catch (_) { return ''; }
 }
 
+// 富文档（Word / PPT / Excel / Markdown）没有 pdfPage，直接读渲染出来的 DOM 文本
+function richTextForSpeech(pageNum) {
+  const host = document.querySelector('#doc-view');
+  if (!host) return '';
+  const pages = Array.from(host.querySelectorAll('.doc-page'));
+  const node = pages.find((p) => +p.dataset.page === pageNum) || pages[0] || host;
+  return String(node.innerText || '').replace(/\s+/g, ' ').trim();
+}
+
+function startSpeak(text, label) {
+  if (!text) { toast('这一页没有可朗读的文字（可能是扫描件）'); return false; }
+  const u = new SpeechSynthesisUtterance(text.slice(0, 6000));
+  u.lang = /[\u4e00-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
+  u.rate = 1;
+  u.onend = () => { speakState.status = 'idle'; syncSpeakUi(); };
+  u.onerror = () => { speakState.status = 'idle'; syncSpeakUi(); };
+  try { window.speechSynthesis.cancel(); } catch (_) {}
+  window.speechSynthesis.speak(u);
+  speakState.status = 'speaking';
+  syncSpeakUi();
+  toast('开始朗读' + (label ? '：' + label : ''));
+  return true;
+}
+
 App.speakToggle = async function () {
   if (!('speechSynthesis' in window)) { toast('当前环境不支持朗读'); return; }
   if (speakState.status === 'speaking') {
@@ -2083,24 +2122,20 @@ App.speakToggle = async function () {
     return;
   }
   const s = App.state;
-  if (!s.pdfDoc) { toast('先打开一个文档'); return; }
+  if (!s.pdfDoc && s.mode !== 'rich') { toast('先打开一个文档'); return; }
   const pageNum = s.currentPage || 1;
+  // 富文档（Word / PPT / Excel / Markdown）走 DOM 文本，没有 pdfPage
+  if (s.mode === 'rich') {
+    const text = richTextForSpeech(pageNum);
+    if (!text) { toast('这篇文档没有可朗读的文字'); return; }
+    if (startSpeak(text, '第 ' + pageNum + ' 页')) speakState.page = pageNum;
+    return;
+  }
   const el = App.pageEl(pageNum);
   const pdfPage = el && el._pdfPage;
-  if (!pdfPage) { toast('这一页还没渲染好'); return; }
+  if (!pdfPage) { toast('这一页还没渲染好，稍等一下再点'); return; }
   const text = (await pageTextForSpeech(pdfPage)).slice(0, 6000);
-  if (!text) { toast('这一页没有可朗读的文字（可能是扫描件）'); return; }
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = /[\u4e00-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
-  u.rate = 1;
-  u.onend = () => { speakState.status = 'idle'; syncSpeakUi(); };
-  u.onerror = () => { speakState.status = 'idle'; syncSpeakUi(); };
-  try { window.speechSynthesis.cancel(); } catch (_) {}
-  window.speechSynthesis.speak(u);
-  speakState.status = 'speaking';
-  speakState.page = pageNum;
-  syncSpeakUi();
-  toast('开始朗读第 ' + pageNum + ' 页');
+  if (startSpeak(text, '第 ' + pageNum + ' 页')) speakState.page = pageNum;
 };
 
 App.speakStop = function () {
@@ -2186,7 +2221,10 @@ function bind() {
       if (!p || p !== App.state.filePath) return;
       const s = App.state;
       s.annos = new Map();
-      for (const n of Array.from(s.rendered.keys())) { try { Anno.renderPage(n); } catch (_) {} }
+      // 富文档不维护 s.rendered（那是 PDF 的懒渲染表），按页数补齐，避免改完后旧图形残留
+      const pages = new Set(s.rendered.keys());
+      if (s.mode === 'rich') for (let n = 1; n <= s.numPages; n++) pages.add(n);
+      for (const n of pages) { try { Anno.renderPage(n); } catch (_) {} }
       restoreAnnos(p);
       toast('标注已更新');
     });

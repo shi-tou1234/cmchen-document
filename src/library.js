@@ -27,6 +27,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const Creators = require('./creators.js');
+const RichText = require('./richtext.js');
 
 const VERSION = 8;
 const BACKUP_KEEP = 10;
@@ -367,7 +368,9 @@ function normalizeNotes(raw, legacyText, created, updated) {
     out.push({
       id,
       title: str(n.title),
+      // text 是纯文本：搜索、摘要、导出都用它；html 是富文本正文（像 Word 一样编辑）
       text: str(n.text),
+      html: RichText.sanitize(n.html),
       // v8：从标注生成的笔记带一张页面截图（数据目录内的相对/绝对路径）
       image: str(n.image),
       annoIds: strList(n.annoIds).slice(0, 30),
@@ -377,7 +380,7 @@ function normalizeNotes(raw, legacyText, created, updated) {
   }
   if (!out.length && legacyText) {
     // 老库里的单条 note → 变成第一条笔记，不丢内容
-    out.push({ id: genNoteId(), title: '', text: legacyText, created: created || 0, updated: updated || 0 });
+    out.push({ id: genNoteId(), title: '', text: legacyText, html: '', created: created || 0, updated: updated || 0 });
   }
   return out;
 }
@@ -531,10 +534,13 @@ function removeTag(key, tag) {
 // ---------- 阅读笔记（v23：一条文献可以挂多条笔记） ----------
 function addNote(key, note) {
   const it = findItem(key); if (!it) return null;
+  const html = RichText.sanitize(note && note.html);
   const n = {
     id: genNoteId(),
     title: str(note && note.title),
-    text: str(note && note.text),
+    // 只给了 html 就自动提纯文本；两者都给以 text 为准
+    text: note && note.text != null ? str(note.text) : RichText.toText(html),
+    html,
     image: str(note && note.image),
     annoIds: strList(note && note.annoIds).slice(0, 30),
     created: now(),
@@ -552,6 +558,11 @@ function updateNote(key, id, patch) {
   const n = it.notes.find((x) => x.id === id);
   if (!n) return null;
   if (patch && 'title' in patch) n.title = str(patch.title);
+  if (patch && 'html' in patch) {
+    n.html = RichText.sanitize(patch.html);
+    // 只传了 html 就顺手把纯文本同步过来（搜索 / 摘要 / 导出都用 text）
+    if (!('text' in patch)) n.text = RichText.toText(n.html);
+  }
   if (patch && 'text' in patch) n.text = str(patch.text);
   n.updated = now();
   it.updated = now();
@@ -746,7 +757,8 @@ function setPageByKey(key, page) {
 
 function publicItem(it, collIds) {
   const notes = (Array.isArray(it.notes) ? it.notes : []).map((n) => ({
-    id: n.id, title: n.title, text: n.text, image: n.image || '', annoIds: (n.annoIds || []).slice(),
+    id: n.id, title: n.title, text: n.text, html: n.html || '',
+    image: n.image || '', annoIds: (n.annoIds || []).slice(),
     created: n.created || 0, updated: n.updated || 0,
   }));
   return {

@@ -13,10 +13,15 @@ window.SelectionUI = (function () {
   function pageGeo() {
     const viewer = $('viewer');
     if (!viewer) return [];
-    return Array.from(viewer.querySelectorAll('.page')).map((el) => {
+    // PDF 用 .page，富文档（Word/PPT/Markdown…）用 .doc-page：两者都有标注层，
+    // 统一按「页面 CSS 像素」算坐标（富文档整体靠 #doc-view 的 zoom 缩放）
+    return Array.from(viewer.querySelectorAll('.page, .doc-page')).map((el) => {
       const r = el.getBoundingClientRect();
-      return { el, r, unit: el._unit };
-    }).filter((x) => x.unit && x.r.width > 10 && x.r.height > 10);
+      const unit = el._unit && el._unit.w
+        ? el._unit
+        : { w: el.offsetWidth || r.width, h: el.offsetHeight || r.height };
+      return { el, r, unit };
+    }).filter((x) => x.unit && x.unit.w > 10 && x.r.width > 10 && x.r.height > 10);
   }
 
   function rectsForRange(range) {
@@ -58,7 +63,9 @@ window.SelectionUI = (function () {
 
   function barPos(rect) {
     const bar = $('sel-bar');
-    const w = 260, h = 38;
+    // 工具条宽度按实际内容算（加了「下划线」按钮后固定 260 会偏）
+    const w = bar.offsetWidth || 300;
+    const h = bar.offsetHeight || 38;
     let left = rect.left + rect.width / 2 - w / 2;
     left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
     let top = rect.bottom + 8;
@@ -73,54 +80,65 @@ window.SelectionUI = (function () {
     pending = null;
   }
 
+  // 从当前选区重建 pending。抽出来是因为「点了工具条但 pending 已被清空」时还要能兜底，
+  // 否则点击会静默 return —— 用户看到的就是「点了没有任何反应」。
+  function buildPending() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const text = sel.toString().replace(/\r/g, '').trim();
+    if (!text) return null;
+    const range = sel.getRangeAt(0);
+    const viewer = $('viewer');
+    if (!viewer || !viewer.contains(range.commonAncestorContainer)) return null;
+    const rich = App.state.mode === 'rich';
+    const color = ($('sel-color') && $('sel-color').value) || '#ffd54f';
+    const rect = range.getBoundingClientRect();
+    // 富文档和 PDF 走同一套：Range 的行框按页分组，再换算成页面像素坐标
+    const groups = rectsForRange(range);
+    if (!groups.size) return null;
+    return {
+      text: text.slice(0, 6000), rich, groups: [...groups.entries()],
+      page: +groups.keys().next().value, color, rect,
+    };
+  }
+
   function onMouseUp() {
     const rich = App.state.mode === 'rich';
     if (!rich && !App.state.pdfDoc) return;
     if (!rich && Anno.state.tool !== 'select') { hideBar(); return; }
     setTimeout(() => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || !sel.rangeCount) { hideBar(); return; }
-      const text = sel.toString().replace(/\r/g, '').trim();
-      if (!text) { hideBar(); return; }
-      const range = sel.getRangeAt(0);
-      const viewer = $('viewer');
-      if (!viewer || !viewer.contains(range.commonAncestorContainer)) { hideBar(); return; }
-      if (rich) {
-        const pageEl = range.startContainer.parentElement
-          && range.startContainer.parentElement.closest('.doc-page');
-        pending = {
-          text: text.slice(0, 6000),
-          rich: true,
-          page: pageEl ? +pageEl.dataset.page : App.state.currentPage,
-          color: ($('sel-color') && $('sel-color').value) || '#ffd54f',
-        };
-      } else {
-        const groups = rectsForRange(range);
-        if (!groups.size) { hideBar(); return; }
-        pending = {
-          text: text.slice(0, 6000),
-          groups: [...groups.entries()],
-          page: +groups.keys().next().value,
-          color: ($('sel-color') && $('sel-color').value) || '#ffd54f',
-        };
-      }
+      const p = buildPending();
+      if (!p) { hideBar(); return; }
+      pending = p;
       const bar = $('sel-bar');
+      bar.hidden = false;          // 先显示，offsetWidth 才有值
       bar.style.display = 'flex';
-      barPos(range.getBoundingClientRect());
-      bar.hidden = false;
+      barPos(p.rect);
     }, 0);
   }
 
   function commitMarks(comment, kind) {
     if (!pending) return;
     const p = pending;
-    for (const [page, rects] of p.groups) {
-      if (!rects.length) continue;
-      Anno.addShape(page, {
-        tool: 'mark', color: p.color, width: 0, rects,
-        text: p.text, comment: String(comment || '').trim(),
-        ...(kind ? { kind } : {}),
-      });
+    if (!p.groups || !p.groups.length) {
+      hideBar();
+      App.toast('没找到可标注的文字位置，请重新选中文字再试');
+      return;
+    }
+    try {
+      for (const [page, rects] of p.groups) {
+        if (!rects.length) continue;
+        Anno.addShape(page, {
+          tool: 'mark', color: p.color, width: 0, rects,
+          text: p.text, comment: String(comment || '').trim(),
+          ...(kind ? { kind } : {}),
+        });
+      }
+    } catch (err) {
+      // 任何意外都要让用户看到原因，不能再静默
+      hideBar();
+      App.toast('标注失败：' + ((err && err.message) || '未知错误'));
+      return;
     }
     try { window.getSelection().removeAllRanges(); } catch (_) {}
     hideBar();
@@ -175,7 +193,15 @@ window.SelectionUI = (function () {
     bar.addEventListener('mousedown', (e) => e.preventDefault());
     bar.addEventListener('click', (e) => {
       const b = e.target.closest('[data-sel]');
-      if (!b || !pending) return;
+      if (!b) return;
+      // 选区还在就重建（pending 可能被滚动/外部点击清掉），真的没了再给提示——
+      // 以前这里是 `if (!b || !pending) return;`，用户看到的就是「点了没反应」
+      if (!pending) pending = buildPending();
+      if (!pending) {
+        App.toast && App.toast('选区已失效，请重新选中文字再点');
+        hideBar();
+        return;
+      }
       const action = b.dataset.sel;
       const text = pending.text;
       const page = pending.page || App.state.currentPage;

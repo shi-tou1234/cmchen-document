@@ -25,7 +25,6 @@ window.LibraryUI = (function () {
     annos: [],            // 标注条目化 —— 汇总起来的标注
     annoTags: {},         // 标注 id → 标签
     annoLoaded: false,
-    notePreview: new Set(),   // v9：哪些笔记正处于 Markdown 预览态
     tagFilter: new Set(),   // v14：标签选择器（多选，命中任一即可）
     citeStyle: 'gbt7714',   // v14：引用样式
     citekeys: new Map(),    // v27：条目 key → 确定性 citekey
@@ -381,7 +380,11 @@ window.LibraryUI = (function () {
     }
     // 标注视图不是条目表格，列头和搜索提示都换一套
     if (el.columns) el.columns.hidden = isAnnoScope();
-    if (el.search) el.search.placeholder = isAnnoScope() ? '搜索标注文字…' : '搜索标题 / 作者 / 全文…（"短语" · -排除 · title: 字段）';
+    // placeholder 别塞语法说明：输入框只有 190px 宽，长文案会被截断（用户看到的"文字被切断"）
+    if (el.search) {
+      el.search.placeholder = isAnnoScope() ? '搜索标注文字…' : '搜索标题 / 作者 / 全文…';
+      el.search.title = '检索语法："短语" 精确匹配 · -词 排除 · title:/author:/tag:/year: 等字段限定';
+    }
     const keepTop = el.grid.scrollTop;
     el.grid.innerHTML = list.map((it) => cardHtml(it)).join('');
     el.grid.scrollTop = keepTop;
@@ -433,8 +436,12 @@ window.LibraryUI = (function () {
       ? '<button data-detail="' + esc(it.key) + '">详情</button>' +
         '<button data-restore="' + esc(it.key) + '">还原</button>' +
         '<button class="rm" data-delete="' + esc(it.key) + '">永久删除</button>'
-      : '<button data-detail="' + esc(it.key) + '">详情</button>' +
-        '<button class="rm" data-trash="' + esc(it.key) + '">回收站</button>';
+      : (isNoteItem
+        // 笔记没有附件，"编辑"就是打开全屏编辑器
+        ? '<button data-open-note="' + esc(it.key) + '">编辑</button>' +
+          '<button class="rm" data-trash="' + esc(it.key) + '">回收站</button>'
+        : '<button data-detail="' + esc(it.key) + '">详情</button>' +
+          '<button class="rm" data-trash="' + esc(it.key) + '">回收站</button>');
     const note = trashed
       ? '<div class="lcpath">在回收站中 · 磁盘文件未被删除</div>'
       : (!isNoteItem && !it.hasFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
@@ -891,46 +898,271 @@ window.LibraryUI = (function () {
     state.query = '';
     if (el.search) el.search.value = '';
     await refresh();
+    // 只标记选中，不调 render()：render 会顺带把右侧详情栏打开
     state.selectedKey = r.item.key;
-    render();
-    openDetail(r.item.key);
-    // 直接落在正文上：新建笔记就该能立刻写
-    setTimeout(() => {
-      const it = selectedItem();
-      const box = el.ld.notes && el.ld.notes.querySelector('[data-note-field="text"]');
-      if (it && it.itemType === 'note' && box) box.focus();
-      else if (el.ld.title) el.ld.title.focus();
-    }, 60);
+    state.selectedKeys.clear();
+    markSelection();
+    // 新建笔记直接进全屏编辑器：像打开一份文档一样，落笔就能写
+    await openNoteEditor(r.item.key);
   }
+
+  // ---------- 独立笔记的全屏 Markdown 编辑器（v9.6） ----------
+  // 语法与样式对齐用户博客后台（D:/项目/博客站点）：按钮组工具栏（无下拉）+ 左源码右实时预览。
+  // 正文存 notes[].text（Markdown 源码）；html 置空，避免和旧的富文本内容打架。
+  const nv = { key: '', noteId: '', timer: null, open: false, previewTimer: null };
+
+  function nvStatus(msg) {
+    const s = $('nv-status');
+    if (s) s.textContent = msg || '';
+  }
+
+  function nvSaveNow() {
+    const md = $('nv-md');
+    if (!nv.open || !nv.key || !nv.noteId || !md) return Promise.resolve();
+    if (nv.timer) { clearTimeout(nv.timer); nv.timer = null; }
+    const text = md.value;
+    const title = ($('nv-title') && $('nv-title').value.trim()) || '';
+    const key = nv.key, id = nv.noteId;
+    nvStatus('保存中…');
+    const p = Promise.resolve()
+      .then(() => L().updateNote(key, id, { text, html: '' }))
+      .then(() => (title ? L().updateItem(key, { title }) : null))
+      .then(() => reloadItemsQuiet())
+      .then(() => {
+        if (nv.key !== key) return;
+        const d = new Date();
+        nvStatus('已保存 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'));
+      })
+      .catch(() => { if (nv.key === key) nvStatus('保存失败'); });
+    return p;
+  }
+
+  function nvScheduleSave() {
+    if (!nv.open) return;
+    nvStatus('编辑中…');
+    if (nv.timer) clearTimeout(nv.timer);
+    nv.timer = setTimeout(() => { nv.timer = null; nvSaveNow(); }, 700);
+  }
+
+  function nvRenderPreview() {
+    const md = $('nv-md'), box = $('nv-preview');
+    if (!box || !window.Md) return;
+    box.innerHTML = window.Md.render(md ? md.value : '');
+    nvLoadLocalImages(box);   // 本地图片（snapshots/xx.png）走 IPC 读 dataURL
+  }
+
+  function nvSchedulePreview() {
+    if (!nv.open) return;
+    if (nv.previewTimer) clearTimeout(nv.previewTimer);
+    nv.previewTimer = setTimeout(() => { nv.previewTimer = null; nvRenderPreview(); }, 350);
+  }
+
+  function nvMdSource(note) {
+    // Markdown 笔记直接用 text；旧富文本笔记（只有 html）在这里一次性转成 Markdown
+    if (!note) return '';
+    const text = String(note.text || '');
+    if (text.trim()) return text;
+    if ((note.html || '').trim() && window.Md && window.Md.fromHtml) return window.Md.fromHtml(note.html);
+    return '';
+  }
+
+  async function openNoteEditor(key) {
+    const it = state.items.find((x) => x.key === key);
+    if (!it || !L()) return;
+    let note = (it.notes || [])[0] || null;
+    if (!note) {
+      // 老条目 / 空笔记：没有正文就先建一条，保证打开后能直接写
+      const created = await L().addNote(key, { title: '', text: '' });
+      if (created && created.id) note = created;
+      await reloadItemsQuiet();
+    }
+    const md = $('nv-md'), title = $('nv-title');
+    if (!md || !title) return;
+    nv.key = key;
+    nv.noteId = note ? note.id : '';
+    nv.open = true;
+    md.value = nvMdSource(note);
+    title.value = it.title || '';
+    nvStatus('已打开');
+    $('note-view').hidden = false;
+    document.body.classList.add('note-editing');
+    nvRenderPreview();
+    setTimeout(() => { md.focus(); }, 30);
+  }
+
+  // 不发网络/不刷新的快速关闭：切到阅读器时用，避免和文献库淡出动画抢状态
+  function nvCloseQuiet() {
+    if (!nv.open) return;
+    nvSaveNow();
+    nv.open = false;
+    nv.key = '';
+    nv.noteId = '';
+    if (nv.timer) { clearTimeout(nv.timer); nv.timer = null; }
+    if (nv.previewTimer) { clearTimeout(nv.previewTimer); nv.previewTimer = null; }
+    const box = $('note-view');
+    if (box) box.hidden = true;
+    document.body.classList.remove('note-editing');
+  }
+
+  async function closeNoteEditor() {
+    if (!nv.open) return;
+    await nvSaveNow();   // 等保存真正落库，回去的列表摘要才是新的
+    nvCloseQuiet();
+    if (window.App && window.App.toast) window.App.toast('笔记已保存');
+    // 回到文献库时不要顺手把右侧详情栏弹出来（renderDetail 会跟着 selectedKey 走）
+    state.selectedKey = null;
+    state.selectedKeys.clear();
+    await refresh();
+  }
+
+  // ===== Markdown 工具栏（博客 posts.ts 的 insertMarkdownSnippet 移植版，操作 #nv-md） =====
+  function nvAfterEdit() { nvScheduleSave(); nvSchedulePreview(); }
+
+  // 光标处包裹：有选中就包选中内容，没有就插占位符并选中之
+  function nvWrap(before, after, placeholder) {
+    const ta = $('nv-md');
+    if (!ta) return;
+    const start = ta.selectionStart, end = ta.selectionEnd;
+    const sel = ta.value.slice(start, end);
+    const body = sel || placeholder || '';
+    ta.setRangeText(before + body + after, start, end, 'end');
+    ta.focus();
+    ta.setSelectionRange(start + before.length, start + before.length + body.length);
+    nvAfterEdit();
+  }
+
+  // 光标处插入一段文本（替换选中）
+  function nvInsertText(str) {
+    const ta = $('nv-md');
+    if (!ta) return;
+    ta.setRangeText(str, ta.selectionStart, ta.selectionEnd, 'end');
+    ta.focus();
+    nvAfterEdit();
+  }
+
+  // 插入块级内容：自动补前面的空行，写完不挤压上一段
+  function nvInsertBlock(text) {
+    const ta = $('nv-md');
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const pre = ta.value.slice(0, start);
+    const pad = !pre ? '' : (/\n\n$/.test(pre) ? '' : (/\n$/.test(pre) ? '\n' : '\n\n'));
+    ta.setRangeText(pad + text, ta.selectionStart, ta.selectionEnd, 'end');
+    ta.focus();
+    nvAfterEdit();
+  }
+
+  function nvInsertSnippet(type) {
+    const ta = $('nv-md');
+    if (!ta || !type) return;
+    switch (type) {
+      case 'bold': nvWrap('**', '**', '加粗文本'); break;
+      case 'italic': nvWrap('*', '*', '斜体文本'); break;
+      case 'strike': nvWrap('~~', '~~', '删除线文本'); break;
+      case 'underline': nvWrap('++', '++', '下划线文本'); break;
+      case 'spoiler': nvWrap('!!', '!!', '模糊文本，悬停或点击后清晰'); break;
+      case 'rainbow': nvWrap('==', '==', '彩虹文字'); break;
+      case 'code-inline': nvWrap('`', '`', 'code'); break;
+      case 'code-block': nvWrap('```ts\n', '\n```', "console.log('hello')"); break;
+      case 'formula-inline': nvWrap('$', '$', 'a^2+b^2=c^2'); break;
+      case 'formula-block': nvWrap('$$\n', '\n$$', '\\int_a^b f(x)\\,dx'); break;
+      case 'heading-2': nvInsertText('## 二级标题\n'); break;
+      case 'heading-3': nvInsertText('### 三级标题\n'); break;
+      case 'link': nvInsertText('[链接标题](https://example.com)'); break;
+      case 'ruby': nvInsertText('{汉字}(hàn|zì)'); break;
+      case 'blockquote': nvInsertText('> 这是一段引用\n'); break;
+      case 'ul': nvInsertText('- 列表项 1\n- 列表项 2\n'); break;
+      case 'ol': nvInsertText('1. 列表项 1\n2. 列表项 2\n'); break;
+      case 'task': nvInsertText('- [ ] 待办事项\n- [x] 已完成事项\n'); break;
+      case 'hr': nvInsertBlock('---\n'); break;
+      case 'table': nvInsertText('| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 内容1 | 内容2 | 内容3 |\n'); break;
+      case 'tip': nvInsertBlock(':::tip\n这里填写提示内容\n:::\n'); break;
+      case 'tip-note': nvInsertBlock(':::note\n这里填写注意内容\n:::\n'); break;
+      case 'tip-important': nvInsertBlock(':::important\n这里填写重要内容\n:::\n'); break;
+      case 'tip-warning': nvInsertBlock(':::warning\n这里填写警告内容\n:::\n'); break;
+      case 'tip-caution': nvInsertBlock(':::caution\n这里填写危险内容\n:::\n'); break;
+      case 'tip-title': nvInsertBlock(':::tip[自定义标题]\n这里填写提示内容\n:::\n'); break;
+      case 'derivation': nvInsertBlock(':::derivation\n**推导过程：**\n\n在此填写推导内容...\n:::\n'); break;
+      case 'quote-card': nvInsertBlock(':::quote\n在此填写引用内容\n\n<right>—— 出处</right>\n:::\n'); break;
+      case 'music-card': nvInsertBlock('::music{id="网易云歌曲ID"}\n'); break;
+      case 'github-card': nvInsertBlock('::github{repo="用户名/仓库名"}\n'); break;
+      case 'footnote': {
+        // 自动选未占用的编号：光标处插引用，文末追加定义（博客同款行为）
+        const used = Array.from(ta.value.matchAll(/\[\^(\d+)\]/g)).map((m) => parseInt(m[1], 10));
+        const next = (used.length ? Math.max(...used) : 0) + 1;
+        nvInsertText('[^' + next + ']');
+        ta.setRangeText('\n\n[^' + next + ']: 在此填写脚注内容\n', ta.value.length, ta.value.length, 'end');
+        ta.focus();
+        nvAfterEdit();
+        break;
+      }
+      default: break;
+    }
+  }
+
+
+  // v9：笔记改成富文本（像 Word 一样直接排版，不再是「写 Markdown 再切预览」）
+  const RICH_BAR = '<div class="rt-bar">' +
+    '<button type="button" data-rt="bold" title="加粗 (Ctrl+B)"><b>B</b></button>' +
+    '<button type="button" data-rt="italic" title="斜体 (Ctrl+I)"><i>I</i></button>' +
+    '<button type="button" data-rt="underline" title="下划线 (Ctrl+U)"><u>U</u></button>' +
+    '<button type="button" data-rt="strikeThrough" title="删除线"><s>S</s></button>' +
+    '<select data-rt="formatBlock" title="段落样式">' +
+      '<option value="p">正文</option><option value="h2">标题</option>' +
+      '<option value="h3">小标题</option><option value="blockquote">引用</option>' +
+    '</select>' +
+    '<button type="button" data-rt="insertUnorderedList" title="无序列表">• 列表</button>' +
+    '<button type="button" data-rt="insertOrderedList" title="有序列表">1. 列表</button>' +
+    '<button type="button" data-rt="createLink" title="把选中的文字变成链接">链接</button>' +
+    '<button type="button" data-rt="removeFormat" title="清除格式">清除格式</button>' +
+    '</div>';
 
   // v23：阅读笔记列表（每条独立保存，不影响表单里没保存的其他字段）
   function renderNotes(it) {
     if (!el.ld.notes) return;
     const notes = (it && it.notes) || [];
-    if (!notes.length) {
-      el.ld.notes.innerHTML = '<div class="ld-hint">还没有笔记。读完一段写一条，之后能单独翻出来看。</div>';
+    const isNoteItem = !!(it && it.itemType === 'note' && !it.attachment);
+    // 独立笔记：侧栏只留「去编辑器」入口 + 只读 Markdown 预览（编辑在 Markdown 编辑器里做，
+    // 不在侧栏改，免得两种格式互相覆盖）
+    const openBtn = isNoteItem
+      ? '<button class="ld-btn primary ld-note-open" data-open-note-editor="1" '
+        + 'title="像打开文档一样全屏编辑（双击卡片也可以）">在编辑器里打开这条笔记</button>'
+      : '';
+    if (isNoteItem) {
+      const n0 = notes[0] || null;
+      const body = n0 ? ((window.Md && window.Md.render(n0.text || '')) || '') : '';
+      el.ld.notes.innerHTML = openBtn
+        + '<div class="ld-note-md ld-note-readonly">' + (body || '<div class="ld-hint">还没有内容，点上面的按钮去写。</div>') + '</div>';
+      nvLoadLocalImages(el.ld.notes);
       return;
     }
-    el.ld.notes.innerHTML = notes.map((n) => {
-      // v9：正文存 Markdown，默认编辑态；点「预览」看渲染结果（图片 / 表格 / 链接 / 代码）
-      const md = (window.Md && n.text) ? window.Md.render(n.text) : '';
+    if (!notes.length) {
+      el.ld.notes.innerHTML = openBtn + '<div class="ld-hint">还没有笔记。读完一段写一条，之后能单独翻出来看。</div>';
+      return;
+    }
+    el.ld.notes.innerHTML = openBtn + notes.map((n) => {
+      // 富文本正文：优先用存下来的 html；老笔记（只有 Markdown text）在这里一次性渲染成富文本
+      const mdHtml = (window.Md && n.text) ? window.Md.render(n.text) : '';
+      const body = window.RichText ? window.RichText.initial(n, mdHtml) : esc(n.text || '');
       return '<div class="ld-note" data-note-id="' + esc(n.id) + '">' +
         '<input class="ld-note-title" data-note-field="title" value="' + esc(n.title) + '" placeholder="标题（可以留空）" />' +
-        '<div class="ld-note-bar">' +
-          (md ? '<button class="ld-mini" data-note-preview="1" title="在编辑与预览之间切换">预览</button>'
-              : '<span class="ld-hint">支持 Markdown：**粗体** · [链接](url) · ![](图片) · 表格 · 代码块</span>') +
-        '</div>' +
         (n.image
           ? '<img class="ld-note-img" data-note-img="' + esc(n.image) + '" alt="标注截图" title="从标注生成的页面截图" />'
           : '') +
-        '<textarea class="ld-note-text" data-note-field="text" rows="3" placeholder="这条笔记的内容…（Markdown：**粗体**、[链接](https://…)、![](snapshots/xx.png)、| 表格 |）">' + esc(n.text) + '</textarea>' +
-        (md ? '<div class="ld-note-md" hidden>' + md + '</div>' : '') +
-        '<div class="ld-note-foot"><span class="ld-hint">失焦自动保存' + (n.image ? ' · 含标注截图' : '') + ' · Markdown</span>' +
+        RICH_BAR +
+        '<div class="ld-note-rich" contenteditable="true" data-note-field="html" ' +
+          'data-placeholder="直接在这里写，选中文字就能加粗 / 列表 / 链接…">' + body + '</div>' +
+        '<div class="ld-note-foot"><span class="ld-hint">改完自动保存' + (n.image ? ' · 含标注截图' : '') + '</span>' +
         '<button class="ld-mini ld-note-del" title="删除这条笔记">删除</button></div>' +
       '</div>';
     }).join('');
-    // 截图与 Markdown 里的图片都走 IPC 读 dataURL（别让渲染层直接碰 file://）
-    for (const img of el.ld.notes.querySelectorAll('[data-note-img], [data-md-img]')) {
+    nvLoadLocalImages(el.ld.notes);
+  }
+
+  // 容器里的本地图片（截图 data-note-img / Markdown 图片 data-md-img）走 IPC 读 dataURL
+  function nvLoadLocalImages(scope) {
+    if (!scope) return;
+    for (const img of scope.querySelectorAll('[data-note-img], [data-md-img]')) {
       const rel = img.dataset.noteImg || img.dataset.mdImg;
       if (!rel || !window.pdfBridge || !window.pdfBridge.noteImage) continue;
       const token = rel;
@@ -940,36 +1172,29 @@ window.LibraryUI = (function () {
         img.src = r.dataUrl;
       }).catch(() => {});
     }
-    // 重建后保持原来处于预览态的笔记（失焦保存会触发重建）
-    for (const id of state.notePreview) {
-      const box = el.ld.notes.querySelector('[data-note-id="' + id + '"]');
-      const btn = box && box.querySelector('[data-note-preview]');
-      if (box && btn) toggleNotePreview(box, btn);
-    }
   }
 
-  // 预览 / 编辑切换（就地切，不重建列表，免得丢掉正在编辑的其它内容）
-  function toggleNotePreview(noteEl, btn) {
-    const box = noteEl.querySelector('.ld-note-md');
-    const ta = noteEl.querySelector('.ld-note-text');
-    if (!box || !ta) return;
-    const toPreview = box.hidden;
-    // 切到预览前先把当前编辑内容同步进去（失焦保存是异步的，这里要能立刻看到）
-    if (toPreview && window.Md) {
-      const noteId = noteEl.dataset.noteId;
-      box.innerHTML = window.Md.render(ta.value);
-      for (const img of box.querySelectorAll('[data-md-img]')) {
-        const rel = img.dataset.mdImg;
-        if (!rel || !window.pdfBridge || !window.pdfBridge.noteImage) continue;
-        window.pdfBridge.noteImage(rel).then((r) => { if (r && r.ok && img.isConnected) img.src = r.dataUrl; }).catch(() => {});
-      }
-      if (noteId) state.notePreview.add(noteId);
-    } else if (!toPreview) {
-      state.notePreview.delete(noteEl.dataset.noteId);
+  // 富文本正文保存：html 落库，同时提纯文本给搜索/摘要；不重建列表（免得丢焦点）
+  const noteSaveTimers = new Map();
+  async function saveNoteRich(noteEl, immediate) {
+    const key = state.selectedKey;
+    const id = noteEl && noteEl.dataset.noteId;
+    const box = noteEl && noteEl.querySelector('.ld-note-rich');
+    if (!key || !id || !box || !window.RichText) return;
+    const clear = () => { const t = noteSaveTimers.get(id); if (t) { clearTimeout(t); noteSaveTimers.delete(id); } };
+    if (!immediate) {
+      const prev = noteSaveTimers.get(id);
+      if (prev) clearTimeout(prev);
+      noteSaveTimers.set(id, setTimeout(() => { noteSaveTimers.delete(id); saveNoteRich(noteEl, true); }, 700));
+      return;
     }
-    box.hidden = !toPreview;
-    ta.hidden = toPreview;
-    if (btn) btn.textContent = toPreview ? '编辑' : '预览';
+    clear();
+    const html = window.RichText.sanitize(box.innerHTML);
+    const text = window.RichText.toText(html);
+    try {
+      await L().updateNote(key, id, { html, text });
+      await reloadItemsQuiet();
+    } catch (_) {}
   }
 
   // 刷新条目数据但不重绘详情表单（免得把用户没保存的其它字段冲掉）
@@ -1439,6 +1664,7 @@ window.LibraryUI = (function () {
     if (el.setSort) el.setSort.value = state.settings.defaultSort || 'added';
     if (el.setAutoIndex) el.setAutoIndex.checked = state.settings.autoIndex !== false;
     if (el.setInvertPages) el.setInvertPages.checked = !!state.settings.invertPages;
+    if (el.setFetchEmail) el.setFetchEmail.value = state.settings.fetchEmail || '';
     if (el.setViewMode) el.setViewMode.value = state.settings.viewMode === 'page' ? 'page' : 'scroll';
     if (window.App && App.setViewMode && state.settings.viewMode) {
       App.state.viewMode = state.settings.viewMode === 'page' ? 'page' : 'scroll';
@@ -1460,6 +1686,7 @@ window.LibraryUI = (function () {
       autoIndex: el.setAutoIndex ? el.setAutoIndex.checked : true,
       invertPages: el.setInvertPages ? el.setInvertPages.checked : false,
       viewMode: el.setViewMode ? el.setViewMode.value : 'scroll',
+      fetchEmail: el.setFetchEmail ? el.setFetchEmail.value.trim() : '',
     };
     const r = await window.pdfBridge.setSettings(patch);
     if (!r || !r.ok) { setSettingsStatus('保存失败：' + ((r && r.error) || '未知错误')); return; }
@@ -1570,6 +1797,35 @@ window.LibraryUI = (function () {
       renderDetailTags(false);
     }
     el.ld.fetchStatus.textContent = '已从 ' + String(r.source || '').toUpperCase() + ' 抓取，记得点「保存」';
+  }
+
+  // v9：抓 PDF 全文（arXiv → Unpaywall → 直链 / doi.org）
+  async function fetchPdfFull() {
+    const it = selectedItem();
+    if (!it || it.deletedAt) return;
+    if (!L() || !L().fetchPdf) { el.ld.fetchStatus.textContent = '当前环境不支持抓取'; return; }
+    // 表单里刚填的 DOI / 链接优先（不必先保存）
+    const doi = (el.ld.doi.value || '').trim();
+    const url = (el.ld.url.value || '').trim();
+    if (!doi && !url && !(it.attachment && it.attachment.path)) {
+      el.ld.fetchStatus.textContent = '先填 DOI 或链接';
+      return;
+    }
+    const old = (el.ld.fetchPdf || {}).textContent;
+    if (el.ld.fetchPdf) { el.ld.fetchPdf.disabled = true; el.ld.fetchPdf.textContent = '下载中…'; }
+    el.ld.fetchStatus.textContent = '正在找开放获取的 PDF…';
+    const r = await L().fetchPdf(it.key, url || undefined);
+    if (el.ld.fetchPdf) { el.ld.fetchPdf.disabled = false; el.ld.fetchPdf.textContent = old || '抓 PDF 全文'; }
+    if (!r || !r.ok) {
+      el.ld.fetchStatus.textContent = '没抓到：' + ((r && r.error) || '未知错误');
+      return;
+    }
+    await reloadItemsQuiet();
+    await refresh();
+    const kb = Math.round((r.bytes || 0) / 1024);
+    el.ld.fetchStatus.textContent = '已下载（' + kb + ' KB · 来源 ' + String(r.source || '')
+      + '），可以直接双击阅读';
+    window.App && window.App.toast && window.App.toast('PDF 已挂到条目上');
   }
 
   // ---------- 查重 ----------
@@ -2129,7 +2385,7 @@ window.LibraryUI = (function () {
       newNote: $('lib-new-note'), undo: $('lib-undo'), redo: $('lib-redo'),
       settingsBtn: $('lib-settings'),
       settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
-      setAutoIndex: $('set-auto-index'), setInvertPages: $('set-invert-pages'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
+      setAutoIndex: $('set-auto-index'), setInvertPages: $('set-invert-pages'), setFetchEmail: $('set-fetch-email'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
       setFtStatus: $('set-ft-status'), setIndex: $('set-index'), setReindex: $('set-reindex'),
       dupModal: $('dup-modal'), dupBody: $('dup-body'), dupStatus: $('dup-status'),
       bulkModal: $('bulk-modal'), bulkTitle: $('bulk-title'), bulkType: $('bulk-type'), bulkColl: $('bulk-add-coll'),
@@ -2145,7 +2401,7 @@ window.LibraryUI = (function () {
         annos: $('ld-annos'),
         tags: $('ld-tags'), tagInput: $('ld-tag-input'), tagAdd: $('ld-tag-add'),
         colls: $('ld-colls'), attach: $('ld-attach'), dates: $('ld-dates'), status: $('ld-status'),
-        fetch: $('ld-fetch'), fetchStatus: $('ld-fetch-status'),
+        fetch: $('ld-fetch'), fetchPdf: $('ld-fetch-pdf'), fetchStatus: $('ld-fetch-status'),
         save: $('ld-save'), trash: $('ld-trash'), restore: $('ld-restore'),
         del: $('ld-delete'), close: $('ld-close'),
         citeStyle: $('ld-cite-style'), citeCopy: $('ld-cite-copy'),
@@ -2182,37 +2438,99 @@ window.LibraryUI = (function () {
       if (cardMenu && !cardMenu.contains(e.target)) closeCardMenu();
     }, true);
     document.addEventListener('scroll', () => { closeCardMenu(); closeColorPop(); }, true);
-    // v23：阅读笔记（新建 / 失焦保存 / 删除）
+    // v23：阅读笔记（新建 / 编辑 / 删除）。v9：正文改为富文本 contenteditable
     if (el.ld.notes) {
+      // 工具栏按钮不要抢走编辑器的焦点
+      el.ld.notes.addEventListener('mousedown', (e) => {
+        if (e.target.closest('[data-rt]')) e.preventDefault();
+      });
       el.ld.notes.addEventListener('change', async (e) => {
         const box = e.target.closest('[data-note-id]');
         if (!box) return;
-        const field = e.target.dataset.noteField;
-        if (field !== 'title' && field !== 'text') return;
-        const patch = {};
-        patch[field] = e.target.value;
-        const key = state.selectedKey;
-        if (!key) return;
-        await L().updateNote(key, box.dataset.noteId, patch);
-        await reloadItemsQuiet();
-        const it = state.items.find((x) => x.key === key);
-        if (it) renderNotes(it);
-      });
-      el.ld.notes.addEventListener('click', async (e) => {
-        // v9：Markdown 预览切换 / 预览里的外链
-        const pv = e.target.closest('[data-note-preview]');
-        if (pv) {
-          const box = pv.closest('[data-note-id]');
-          if (box) toggleNotePreview(box, pv);
+        // 段落样式下拉（正文 / 标题 / 小标题 / 引用）
+        if (e.target.matches('select[data-rt="formatBlock"]')) {
+          const rich = box.querySelector('.ld-note-rich');
+          if (rich) {
+            rich.focus();
+            document.execCommand('formatBlock', false, '<' + e.target.value + '>');
+            saveNoteRich(box, true);
+          }
           return;
         }
-        const link = e.target.closest('[data-md-link]');
+        const field = e.target.dataset.noteField;
+        if (field !== 'title') return;
+        const key = state.selectedKey;
+        if (!key) return;
+        await L().updateNote(key, box.dataset.noteId, { title: e.target.value });
+        await reloadItemsQuiet();
+      });
+      // 正文输入 → 防抖保存；失焦 → 立刻保存
+      el.ld.notes.addEventListener('input', (e) => {
+        const rich = e.target.closest('.ld-note-rich');
+        if (rich) saveNoteRich(rich.closest('[data-note-id]'), false);
+      });
+      el.ld.notes.addEventListener('focusout', (e) => {
+        const rich = e.target.closest('.ld-note-rich');
+        if (rich) saveNoteRich(rich.closest('[data-note-id]'), true);
+      });
+      // 从 Word / 网页粘贴：先清洗再插入，别把外部样式和脚本带进来
+      el.ld.notes.addEventListener('paste', (e) => {
+        const rich = e.target.closest('.ld-note-rich');
+        if (!rich) return;
+        e.preventDefault();
+        const html = (e.clipboardData && e.clipboardData.getData('text/html')) || '';
+        const text = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+        if (html && window.RichText) {
+          document.execCommand('insertHTML', false, window.RichText.sanitize(html));
+        } else if (text) {
+          document.execCommand('insertText', false, text);
+        }
+        saveNoteRich(rich.closest('[data-note-id]'), false);
+      });
+      el.ld.notes.addEventListener('click', async (e) => {
+        const openEd = e.target.closest('[data-open-note-editor]');
+        if (openEd) { openNoteEditor(state.selectedKey); return; }
+        // v9：Markdown 预览切换 / 预览里的外链
+        // 富文本工具栏（加粗 / 斜体 / 下划线 / 段落样式 / 列表 / 链接 / 清除格式）
+        const rt = e.target.closest('[data-rt]');
+        if (rt && rt.tagName === 'BUTTON') {
+          const noteEl = rt.closest('[data-note-id]');
+          const box = noteEl && noteEl.querySelector('.ld-note-rich');
+          if (!noteEl || !box) return;
+          box.focus();
+          const cmd = rt.dataset.rt;
+          if (cmd === 'createLink') {
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed) {
+              window.App && window.App.toast && window.App.toast('先选中要变成链接的文字');
+              return;
+            }
+            inlineInput(rt, 'https://', (url) => {
+              if (!/^(https?:\/\/|mailto:)/i.test(url)) {
+                window.App && window.App.toast && window.App.toast('只支持 http/https/mailto 链接');
+                return;
+              }
+              box.focus();
+              document.execCommand('createLink', false, url);
+              saveNoteRich(noteEl, true);
+            });
+            return;
+          }
+          document.execCommand(cmd, false, null);
+          box.focus();
+          saveNoteRich(noteEl, true);
+          return;
+        }
+        // 富文本里的链接点一下就打开（编辑时要按住 Alt 才点）
+        const link = e.target.closest('.ld-note-rich a');
         if (link) {
           e.preventDefault();
-          const url = link.dataset.mdLink || '';
-          if (window.pdfBridge && window.pdfBridge.openExternal) {
+          const url = link.getAttribute('href') || '';
+          if (e.altKey && window.pdfBridge && window.pdfBridge.openExternal) {
             const r = await window.pdfBridge.openExternal(url);
             if (!r || !r.ok) window.App && window.App.toast && window.App.toast('打不开这个链接：' + ((r && r.error) || url));
+          } else {
+            window.App && window.App.toast && window.App.toast('编辑状态下按住 Alt 再点链接可打开');
           }
           return;
         }
@@ -2231,12 +2549,12 @@ window.LibraryUI = (function () {
       el.ld.noteAdd.addEventListener('click', async () => {
         const key = state.selectedKey;
         if (!key) return;
-        const n = await L().addNote(key, { title: '', text: '' });
+        const n = await L().addNote(key, { title: '', text: '', html: '' });
         await reloadItemsQuiet();
         const it = state.items.find((x) => x.key === key);
         if (it) renderNotes(it);
         if (n && el.ld.notes) {
-          const box = el.ld.notes.querySelector('[data-note-id="' + n.id + '"] .ld-note-text');
+          const box = el.ld.notes.querySelector('[data-note-id="' + n.id + '"] .ld-note-rich');
           if (box) box.focus();
         }
       });
@@ -2357,6 +2675,82 @@ window.LibraryUI = (function () {
     if (el.redo) el.redo.addEventListener('click', () => doUndo(true));
     if (el.settingsBtn) el.settingsBtn.addEventListener('click', openSettings);
 
+    // 全屏笔记编辑器（Markdown）
+    const nvBack = $('nv-back');
+    if (nvBack) nvBack.addEventListener('click', closeNoteEditor);
+    const nvSaveBtn = $('nv-save');
+    if (nvSaveBtn) nvSaveBtn.addEventListener('click', () => {
+      nvSaveNow();
+      if (window.App && window.App.toast) window.App.toast('笔记已保存');
+    });
+    const nvTitle = $('nv-title');
+    if (nvTitle) nvTitle.addEventListener('input', nvScheduleSave);
+    const nvMd = $('nv-md');
+    if (nvMd) {
+      nvMd.addEventListener('input', () => { nvScheduleSave(); nvSchedulePreview(); });
+      nvMd.addEventListener('focusout', nvSaveNow);
+      nvMd.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        const k = (e.key || '').toLowerCase();
+        if (k === 'b') { e.preventDefault(); nvInsertSnippet('bold'); }
+        else if (k === 'i') { e.preventDefault(); nvInsertSnippet('italic'); }
+        else if (k === 'u') { e.preventDefault(); nvInsertSnippet('underline'); }
+      });
+    }
+    const nvToolbar = $('nv-toolbar');
+    if (nvToolbar) {
+      // 点按钮别抢走编辑器的焦点（否则选区会丢）
+      nvToolbar.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.toolbar-btn')) e.preventDefault();
+      });
+      nvToolbar.addEventListener('click', (e) => {
+        const btn = e.target.closest('.toolbar-btn[data-action]');
+        if (!btn) return;
+        nvInsertSnippet(btn.dataset.action);
+      });
+    }
+    // 预览交互：剧透点击显示 / 脚注跳转 / 外链（博客预览同款行为）
+    const nvPreview = $('nv-preview');
+    if (nvPreview) {
+      nvPreview.addEventListener('click', async (e) => {
+        const sp = e.target.closest('[data-spoiler]');
+        if (sp) { sp.classList.toggle('revealed'); return; }
+        const fnj = e.target.closest('[data-fnjump]');
+        if (fnj) {
+          const target = nvPreview.querySelector('[id="' + (fnj.dataset.fnjump || '').replace(/"/g, '') + '"]');
+          if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+          return;
+        }
+        const link = e.target.closest('[data-md-link]');
+        if (link) {
+          e.preventDefault();
+          const url = link.dataset.mdLink || '';
+          if (window.pdfBridge && window.pdfBridge.openExternal) {
+            const r = await window.pdfBridge.openExternal(url);
+            if (!r || !r.ok) window.App && window.App.toast && window.App.toast('打不开这个链接：' + ((r && r.error) || url));
+          }
+        }
+      });
+    }
+    const nvPreviewToggle = $('nv-preview-toggle');
+    if (nvPreviewToggle) nvPreviewToggle.addEventListener('click', () => {
+      const hidden = document.body.classList.toggle('nv-preview-hidden');
+      nvPreviewToggle.setAttribute('aria-pressed', hidden ? 'false' : 'true');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (!nv.open) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeNoteEditor();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        nvSaveNow();
+        if (window.App && window.App.toast) window.App.toast('笔记已保存');
+      }
+    });
+
     // 参考文献表
     if (el.bib && el.bib.modal) {
       el.bib.close.addEventListener('click', closeBib);
@@ -2442,6 +2836,7 @@ window.LibraryUI = (function () {
 
     // 详情：DOI/arXiv 抓取
     if (el.ld.fetch) el.ld.fetch.addEventListener('click', fetchMetadata);
+    if (el.ld.fetchPdf) el.ld.fetchPdf.addEventListener('click', fetchPdfFull);
 
     // 侧栏：集合选择 / 删除（事件委托）
     el.collections.addEventListener('click', async (e) => {
@@ -2532,10 +2927,20 @@ window.LibraryUI = (function () {
       if (row) toggleTagFilter(row.dataset.tagFilter);
     });
 
+    // v9：打开语义统一入口 —— 笔记进详情，其余进阅读
+    let lastClickKey = '', lastClickAt = 0, skipNextDbl = 0;
+    function openByKey(key) {
+      const it = state.items.find((x) => x.key === key);
+      if (it && it.itemType === 'note' && !it.attachment) { openNoteEditor(key); return; }
+      openItem(key);
+    }
+
     // 卡片：打开 / 详情 / 改名 / 标签 / 回收站
     el.grid.addEventListener('click', async (e) => {
       const detailBtn = e.target.closest('[data-detail]');
       if (detailBtn) { openDetail(detailBtn.dataset.detail); return; }
+      const openNoteBtn = e.target.closest('[data-open-note]');
+      if (openNoteBtn) { e.stopPropagation(); openNoteEditor(openNoteBtn.dataset.openNote); return; }
       const trashBtn = e.target.closest('[data-trash]');
       if (trashBtn) { e.stopPropagation(); await trashItem(trashBtn.dataset.trash); return; }
       const restoreBtn = e.target.closest('[data-restore]');
@@ -2605,18 +3010,40 @@ window.LibraryUI = (function () {
       // 2026-10-21：点标题不再重命名（和整行一样进阅读）；重命名走详情面板标题字段
       if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.lc-check')) return;
       const card = e.target.closest('.lib-card');
-      if (card && card.dataset.key) selectCard(card.dataset.key, e);
+      if (!card || !card.dataset.key) return;
+      const key = card.dataset.key;
+      if (key.startsWith(ANNO_PREFIX)) { selectCard(key, e); return; }
+      const it = state.items.find((x) => x.key === key);
+      const isNoteItem = !!(it && it.itemType === 'note' && !it.attachment);
+      // v9.5：笔记单击只选中（不再打开右侧详情栏），双击进全屏编辑器 —— 和「打开文件」一致
+      if (isNoteItem) {
+        closeDetail();          // 会清 selectedKey，所以先关再设
+        state.selectedKeys.clear();
+        state.selectedKey = key;
+        markSelection();
+        return;
+      }
+      // 其他条目：单击选中，双击打开。这里用时间戳兜底一次——
+      // 第一次单击会打开详情面板、网格宽度变化，浏览器有时不会补发 dblclick
+      const now = Date.now();
+      const doubleHit = lastClickKey === key && (now - lastClickAt) < 520;
+      lastClickKey = key;
+      lastClickAt = now;
+      if (doubleHit) {
+        skipNextDbl = Date.now() + 900;
+        openByKey(key);
+        return;
+      }
+      selectCard(key, e);
     });
 
     // 双击打开（Zotero 的列表行为：单击选中，双击进阅读）
     el.grid.addEventListener('dblclick', (e) => {
+      if (Date.now() < skipNextDbl) return;   // click 里的双击兜底已经处理过
       if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.lc-check')) return;
       const card = e.target.closest('.lib-card[data-open]');
       if (!card) return;
-      const it = state.items.find((x) => x.key === card.dataset.open);
-      // v9：独立笔记没有附件，双击直接进详情写正文（不然会弹「条目没有附件」）
-      if (it && it.itemType === 'note' && !it.attachment) { openDetail(it.key); return; }
-      openItem(card.dataset.open);
+      openByKey(card.dataset.open);
     });
 
     // 右键菜单
@@ -2773,17 +3200,17 @@ window.LibraryUI = (function () {
         return;
       }
       if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
-        if (!isOpen()) return;
+        if (!isOpen() || nv.open) return;
         e.preventDefault(); e.stopPropagation();
         el.search.focus(); el.search.select();
-      } else if (isOpen() && !modalOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter')) {
+      } else if (isOpen() && !modalOpen && !nv.open && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter')) {
         const t = e.target;
         const typing = t && (t.closest('input, textarea, select, [contenteditable="true"]'));
         if (typing || (e.key === 'Enter' && t && t.closest('button, a'))) return;
         if (e.key === 'Enter') {
           if (!state.selectedKey) return;
           e.preventDefault();
-          openItem(state.selectedKey);
+          openByKey(state.selectedKey);   // 笔记条目走全屏编辑器，别去开附件
           return;
         }
         const list = visibleItems().filter((x) => !x.deletedAt);
@@ -2797,6 +3224,9 @@ window.LibraryUI = (function () {
         const card = el.grid.querySelector('.lib-card.selected');
         if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest' });
       } else if (e.key === 'Escape') {
+        // 全屏笔记编辑器开着时，Esc 只关它（由编辑器自己的 keydown 处理），
+        // 不能顺手把整个文献库收掉、把人丢到空白阅读页
+        if (nv.open) return;
         if (cardMenu || colorPop) { e.preventDefault(); closeCardMenu(); closeColorPop(); return; }
         if (el.settingsModal && !el.settingsModal.hidden) { e.preventDefault(); closeSettings(); }
         else if (el.dupModal && !el.dupModal.hidden) { e.preventDefault(); el.dupModal.hidden = true; }
@@ -2911,6 +3341,7 @@ window.LibraryUI = (function () {
   // 只藏根节点的话，它们会留在阅读器上面，遮住整页。
   // 收起库时记住列表滚动位置
   function hide() {
+    nvCloseQuiet();   // 去阅读器时把全屏笔记收掉（先落盘），别让它盖住文档
     if (el.grid) state.listScroll = el.grid.scrollTop;
     const seq = ++layerSeq;
     leaving = true;

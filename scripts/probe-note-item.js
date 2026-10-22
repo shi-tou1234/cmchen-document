@@ -16,28 +16,32 @@ module.exports = `(async () => {
     push('启动后文献库自动展开', libReady);
     if (!libReady) return { checks, stage: 'startup' };
 
-    // 1. 新建笔记
+    // 1. 新建笔记 → 直接进全屏编辑器（v9.5）
     const btn = $('#lib-new-note');
     push('工具栏有「＋ 笔记」按钮', !!btn, btn ? btn.textContent : '');
     btn.click();
-    await waitFor(() => $$('#lib-grid .lib-card').length >= 1, 8000);
+    await waitFor(() => !$('#note-view').hidden, 8000);
     const sum1 = await pdfBridge.lib.summary();
     const noteItem = (sum1.items || []).find((x) => x.itemType === 'note');
     push('库里出现笔记条目', !!noteItem, JSON.stringify((sum1.items || []).map((x) => x.itemType)));
     push('笔记条目默认标题', !!noteItem && noteItem.title === '未命名笔记', noteItem && noteItem.title);
-    push('新建后详情面板打开', !$('#lib-detail').hidden, '');
-    push('详情标题写成「笔记」', ($('#ld-kind').textContent || '').indexOf('笔记') >= 0, $('#ld-kind').textContent);
+    push('新建后直接进全屏编辑器', !$('#note-view').hidden, '');
+    // 侧栏详情仍可打开（卡片上的「详情」），但笔记条目会隐藏引用/相关条目这些无关区块
+    LibraryUI.openDetail(noteItem && noteItem.key);
+    await sleep(200);
     push('笔记条目隐藏引用/相关条目区块',
-      $$('#lib-detail [data-ld-sec][hidden]').length >= 2, 'hidden=' + $$('#lib-detail [data-ld-sec][hidden]').length);
+      $$('#lib-detail [data-ld-sec][hidden]').length >= 2,
+      'hidden=' + $$('#lib-detail [data-ld-sec][hidden]').length);
+    LibraryUI.closeDetail();
 
-    // 2. 写正文（失焦保存）
-    const box = await waitFor(() => $('#ld-notes [data-note-field="text"]'), 4000)
-      ? $('#ld-notes [data-note-field="text"]') : null;
-    push('详情里有正文编辑框', !!box);
+    // 2. 写正文（Markdown，自动保存）
+    const box = $('#nv-md');
+    push('编辑器里有 Markdown 正文区', !!box && box.tagName === 'TEXTAREA');
     if (box) {
+      box.focus();
       box.value = '这是一条独立笔记，关于深度学习的实验记录：学习率 3e-4 效果最好。';
-      box.dispatchEvent(new Event('change', { bubbles: true }));
-      await sleep(700);
+      box.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      await sleep(1300);
     }
     const sum2 = await pdfBridge.lib.summary();
     const it2 = (sum2.items || []).find((x) => x.key === (noteItem && noteItem.key));
@@ -55,15 +59,18 @@ module.exports = `(async () => {
     sbox.dispatchEvent(new Event('input', { bubbles: true }));
     await sleep(400);
 
-    // 4. 双击笔记卡片 → 打开详情而不是阅读器
+    // 4. 回到列表：双击笔记卡片 → 进全屏编辑器（不是阅读器）
+    if (!$('#note-view').hidden) { $('#nv-back').click(); await sleep(900); }
     const card = $('#lib-grid .lib-card[data-key="' + (noteItem && noteItem.key) + '"]');
     push('笔记卡片存在', !!card);
     if (card) {
       card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-      await sleep(600);
+      await sleep(900);
     }
-    push('双击笔记打开详情', !$('#lib-detail').hidden, '');
+    push('双击笔记打开全屏编辑器', !$('#note-view').hidden, '');
     push('双击笔记不进入阅读器', !document.body.classList.contains('has-doc'), '');
+    push('编辑器里能看到刚才的正文', ($('#nv-md') || {}).value && $('#nv-md').value.indexOf('学习率 3e-4') >= 0,
+      ($('#nv-md') || {}).value || '');
     push('卡片显示正文摘要', !!card && (card.querySelector('.lcmeta') || {}).textContent.indexOf('独立笔记') >= 0,
       card ? (card.querySelector('.lcmeta') || {}).textContent : '');
 

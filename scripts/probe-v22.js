@@ -51,20 +51,33 @@ module.exports = `(async () => {
     push('命中矩形能在 rects 里定位', rects.indexOf(h0.rect) >= 0,
       'page=' + h0.page + ' idx=' + rects.indexOf(h0.rect) + ' rects=' + rects.length);
   }
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true }));
+  // 「当前命中」的高亮画在 .hl-layer 里，而 .hl-layer 的元素要等该页渲染完才存在。
+  // 所以断言前先等目标页渲染出来（隐藏窗口里渲染是异步的）。
+  const waitCurrentMark = async (ms) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < (ms || 10000)) {
+      const h = hits[App.state.search.hitIndex];
+      if (h && App.state.rendered.get(h.page) && $$('.hl-layer .hl.is-current').length === 1) return true;
+      await sleep(120);
+    }
+    return false;
+  };
+  // v9 起：搜索有命中就自动跳到第一处（从文献库点全文结果进来时落点就是命中位置）
+  push('搜索后自动落在第一处命中', App.state.search.hitIndex === 0, 'index=' + App.state.search.hitIndex);
+  push('当前命中有高亮标记', await waitCurrentMark(), 'n=' + $$('.hl-layer .hl.is-current').length +
+    ' hitIdx=' + App.state.search.hitIndex + ' hits=' + hits.length);
+  const n = hits.length;
+  const F3 = (shift) => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, shiftKey: !!shift, cancelable: true }));
+  F3(false);
   await sleep(400);
-  push('F3 跳到第一处命中', App.state.search.hitIndex === 0, 'index=' + App.state.search.hitIndex);
-  push('当前命中有高亮标记', $$('.hl-layer .hl.is-current').length === 1, 'n=' + $$('.hl-layer .hl.is-current').length +
-    ' p1hl=' + (App.pageEl(1) ? App.pageEl(1).querySelectorAll('.hl-layer .hl').length : -1) +
-    ' rendered1=' + App.state.rendered.get(1) + ' hitIdx=' + App.state.search.hitIndex);
-  if (hits.length > 1) {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true }));
-    await sleep(300);
-    push('再按 F3 到下一处', App.state.search.hitIndex === 1, 'index=' + App.state.search.hitIndex);
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, shiftKey: true, cancelable: true }));
-    await sleep(300);
-    push('Shift+F3 回到上一处', App.state.search.hitIndex === 0, 'index=' + App.state.search.hitIndex);
-  }
+  push('F3 到下一处命中', App.state.search.hitIndex === 1 % n, 'index=' + App.state.search.hitIndex + ' hits=' + n);
+  push('下一处命中有高亮标记', await waitCurrentMark(), 'n=' + $$('.hl-layer .hl.is-current').length + ' hitIdx=' + App.state.search.hitIndex);
+  F3(false);
+  await sleep(400);
+  push('再按 F3 到下一处', App.state.search.hitIndex === 2 % n, 'index=' + App.state.search.hitIndex);
+  F3(true);
+  await sleep(400);
+  push('Shift+F3 回到上一处', App.state.search.hitIndex === (2 % n - 1 + n) % n, 'index=' + App.state.search.hitIndex);
   await App.doSearch('');
   await sleep(200);
 

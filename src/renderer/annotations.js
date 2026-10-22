@@ -411,7 +411,12 @@ const Anno = window.Anno = (() => {
     const ed = document.getElementById('text-editor');
     ed.value = '';
     ed.hidden = false;
-    ed.style.width = '180px';
+    // v9：输入框和最终排出来的文字用同一套字号/行高/字体，并且跟着页面缩放 ——
+    // 以前输入框固定 13px、缩放 150% 时最终文字大一圈，用户看到的就是「输入时和正式的不一致」
+    const zs = App.state.scale || 1;
+    const zsize = (state.textHeight || 14) * zs;
+    ed.style.font = zsize + 'px/1.25 "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", sans-serif';
+    ed.style.width = Math.max(170, Math.round(190 * zs)) + 'px';
     ed.style.height = 'auto';
     ed.placeholder = kind === 'note' ? '便签内容 · Enter 完成 · Esc 取消' : 'Enter 完成 · Esc 取消';
     // 贴边时把输入框拉回可视区，避免点开右下角后输入框跑到窗口外
