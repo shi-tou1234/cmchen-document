@@ -42,23 +42,28 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 |---|---|
 | `src/main.js` | 窗口、IPC、打开文档、备份恢复、数据目录、单实例、全文索引调度 |
 | `src/preload.js` | `contextBridge` 暴露 `window.pdfBridge`，渲染层唯一入口 |
-| `src/library.js` | 库数据层 v8：CRUD、标签、收藏集、回收站、迁移、查重、标注对象 |
+| `src/library.js` | 库数据层 v8：CRUD、标签、收藏集、回收站、迁移、查重、标注对象、撤销栈 |
 | `src/fulltext.js` | 全文索引：建、查、清、状态 |
 | `src/docconvert.js` | Word / PPT / Excel / EPUB / Markdown → 安全 HTML |
-| `src/formats.js` | BibTeX / RIS / CSL-JSON 解析与导出 |
+| `src/formats.js` | BibTeX / RIS / CSL-JSON / EndNote / RefWorks 解析与导出 |
 | `src/cite.js` | 5 种引用样式、37 类标识、citekey |
 | `src/creators.js` | 作者结构化：姓 / 名 / 角色拆分、归一化、缩写 |
 | `src/bib.js` | 参考文献表：排序 / 编号 / 同年 a-b / Markdown 与纯文本 |
+| `src/query.js` | 统一检索语法：短语 / 排除 / 14 个字段限定 / 变音折叠（主进程与渲染进程共用） |
+| `src/markdown.js` | Markdown 渲染器（UMD，零依赖）+ `fromHtml()` 迁移器 |
+| `src/richtext.js` | 富文本 HTML 白名单清洗 + 纯文本提取（UMD） |
+| `src/fetchpdf.js` | arXiv / Unpaywall / doi.org 抓 PDF 全文 |
 | `src/metadata.js` | Crossref / arXiv 抓取 |
 | `src/pdfmeta.js` | 读 PDF 的 Title / Author |
 | `src/settings.js` | 设置白名单、原子写、损坏回退 |
 | `src/usermigrate.js` | PDF Reader → Trove 的数据目录搬家 |
-| `src/renderer/renderer.js` | 阅读器主逻辑（PDF / 富文档 / 缩放 / 翻页 / 标签 / 搜索 / 导出） |
-| `src/renderer/library-ui.js` | 库界面（列表 / 详情 / 收藏集 / 标签 / 批量 / 设置） |
+| `src/renderer/renderer.js` | 阅读器主逻辑（PDF / 富文档 / 缩放 / 翻页 / 标签 / 搜索 / 导出 / 朗读 / 打印） |
+| `src/renderer/library-ui.js` | 库界面（列表 / 详情 / 收藏集 / 标签 / 批量 / 设置）+ 全屏 Markdown 笔记编辑器 |
 | `src/renderer/annotations.js` | 标注模型与 SVG 渲染 |
 | `src/renderer/selection.js` | 文本层选区、高亮、评论、摘录 |
 | `src/renderer/lightbox.js` | 看图模式灯箱 |
 | `src/renderer/pdfimages.js` | 从 PDF 操作符定位内嵌位图 |
+| `src/renderer/modeswitch.js` | 阅读 / 文献库 双视图切换 |
 
 更细的调用链见 [architecture.md](architecture.md)。
 
@@ -75,13 +80,13 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 }
 ```
 
-这样会跑 38 个 Node 驱动的脚本；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
+这样会跑 54 个 Node 驱动的脚本；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
 
 | 类型 | 数量 | 怎么跑 |
 |---|---|---|
-| 纯 Node | 9 | `node scripts/test-library.js` 等，不需要 Electron |
-| Electron 探针 | 25 | `node scripts/test-*.js`，内部 spawn Electron，用 `PDFREADER_PROBE` 注入探针 |
-| 打包冒烟 | 1 | `node scripts/test-packaged.js build\Trove-1.1.0-portable.exe` |
+| 纯 Node | 15 | `node scripts/test-library.js` 等，不需要 Electron |
+| Electron 探针 | 39 | `node scripts/test-*.js`，内部 spawn Electron，用 `PDFREADER_PROBE` 注入探针 |
+| 打包冒烟 | 1 | `node scripts/test-packaged.js build\Trove-1.2.0-portable.exe` |
 | 直跑 Electron | 3 | `electron.exe scripts/test-pen.js` 等，需要真实输入 / 手势 |
 
 ### 测试隔离
@@ -123,6 +128,8 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
   ```
 
 - 隐藏窗口的 `requestAnimationFrame` 会降到约 1 Hz。任何依赖 rAF 的等待都会变成"随机超时"。
+- **断言"页面上画出了某物"之前先确认那一页渲染完了**。搜索高亮画在 `.hl-layer` 里，元素要等该页 `renderPageNum` 的 promise 兑现才存在；隐藏窗口里渲染是异步的，直接查会得到 0。改成轮询等 `App.state.rendered.get(page)` 为真再断言。
+- **功能语义变了，断言要一起改**。`test-v22.js` 曾经按"搜索后不自动跳转"写期望，而 v9 起搜索有命中就会自动落到第一处——断言没跟上，测试红了 4 项。改断言时要在 commit 里写清"为什么旧期望不再成立"，否则下一个人会以为改坏了产品。
 - `canvas` 默认尺寸是 300×150，不能用"有尺寸"判断"已渲染"；要量实际位图或像素。
 - 合成 `PointerEvent` 会绕过命中测试，画笔类问题要用 `webContents.sendInputEvent()` 注入真实鼠标（`test-real-input.js`）。
 - `getDocument({data})` 会把 ArrayBuffer 转移给 worker，之后原 buffer 是 detached 的；测试里别复用同一个 buffer。
@@ -142,7 +149,7 @@ npx electron-builder --win dir
 npx electron-builder --win portable --prepackaged "build\win-unpacked"
 npx electron-builder --win nsis     --prepackaged "build\win-unpacked"
 
-node scripts\test-packaged.js "build\Trove-1.1.0-portable.exe"
+node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 ```
 
 ### 三条铁律
@@ -165,7 +172,7 @@ assets/icon-source.png      ← 1024×1024 成品图（已裁白边）
 
 ```powershell
 # 静默安装到临时目录，跑冒烟，再卸载
-.\build\Trove-Setup-1.1.0.exe /S /D=$env:TEMP\TroveInstall
+.\build\Trove-Setup-1.2.0.exe /S /D=$env:TEMP\TroveInstall
 & "$env:TEMP\TroveInstall\Trove.exe" --no-sandbox --disable-gpu
 ```
 
@@ -205,16 +212,18 @@ NSIS 安装包默认装到当前用户目录（`%LOCALAPPDATA%\Programs\Trove`�
 
 ## 发布清单
 
-- [ ] `node scripts/test-usermigrate.js` 等 12 个纯 Node 回归全过
-- [ ] Electron 回归全过（至少 library-ui / richdoc / reader-plus / backup / datadir / single-instance）
+- [ ] 15 个纯 Node 回归全过
+- [ ] 39 个 Electron 回归全过（至少 library-ui / richdoc / reader-plus / backup / datadir / single-instance / note-editor / rich-anno / undo / search）
 - [ ] `npx electron-builder --win dir` → rcedit → portable + nsis
-- [ ] `node scripts/test-packaged.js "build\Trove-1.1.0-portable.exe"` 17 项全过
+- [ ] `node scripts/test-packaged.js "build\Trove-<版本>-portable.exe"` 17 项全过
 - [ ] 安装包静默安装 → 启动 → 卸载，快捷方式与安装目录清理干净
 - [ ] 更新 `CHANGELOG.md`（版本号在 `package.json`）
+- [ ] 更新 README / docs 里的版本号、测试数量与"已知边界"（功能变了边界也会变）
 - [ ] 推送 `main`
 
 ## 版本与分支
 
 - 分支只有一个：`main`。提交信息用 conventional commits（`feat:` / `fix:` / `docs:` / `refactor:`）。
-- 版本号只在用户确认后改；改名不自动等于升版本。
+- 版本号只在用户确认后改；改名不自动等于升版本。升版本时 `package.json` 与 `package-lock.json` 一起改，README / docs 里出现的产物文件名与测试数量也要跟着改。
 - 数据层版本（`library.js` 的 `VERSION`）和应用版本无关，改数据结构时才升，并同时写迁移与回归。
+- **数据层升版本后要 grep 全部测试里的 `version === N` 断言**，别只改新写的那个测试（v8 时 `test-v23.js` 与 `test-creators.js` 就漏了 4 处）。

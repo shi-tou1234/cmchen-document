@@ -7,7 +7,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 │ 窗口 · IPC · 打开文档 · 备份恢复 · 数据目录 · 单实例 · 全文索引 · 格式转换  │
 │   library.js   fulltext.js   docconvert.js   settings.js   formats.js      │
 │   cite.js      bib.js        creators.js     metadata.js   pdfmeta.js      │
-│   usermigrate.js
+│   query.js     fetchpdf.js   usermigrate.js                               │
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     │ preload.js / contextBridge
                                     │ window.pdfBridge.*  (invoke / send / on)
@@ -15,12 +15,17 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 │ 渲染进程 src/renderer/                                                      │
 │   renderer.js     阅读器：PDF.js / 富文档 / 缩放 / 翻页 / 标签 / 搜索        │
 │   library-ui.js   文献库：列表 / 详情 / 收藏集 / 标签 / 批量 / 设置          │
+│                   + 全屏 Markdown 笔记编辑器（源码 / 预览双栏）              │
 │   annotations.js  标注模型与 SVG 绘制                                       │
 │   selection.js    文本层选区 → 高亮 / 评论 / 摘录                            │
 │   lightbox.js     看图模式灯箱                                              │
 │   pdfimages.js    从 PDF 操作符里定位内嵌位图                                │
 │   docswitch.js    文档快速切换面板                                          │
+│   modeswitch.js   阅读 / 文献库 双视图切换                                  │
 │   index.html / styles.css                                                   │
+│                                                                             │
+│ 渲染进程与主进程共用的 UMD 模块：query.js（检索语法）· markdown.js（渲染）    │
+│                                    richtext.js（清洗）· creators.js（姓名）   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,13 +41,16 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 
 ## 数据模型
 
-### 库 `library.json`（v7）
+### 库 `library.json`（v8）
 
 ```js
 {
-  version: 7,
+  version: 8,
   tagColors: { "标签": "#rrggbb" },
-  annoTags: { "<标注 id>": ["标签"] },    // 标注的标签（标注本体在 annotations/）
+  annoTags: { "<标注 id>": ["标签"] },    // 兼容读：v7 的位置式键，写入前会并进 annoMeta
+  annoMeta: {                            // 标注对象层：标注意体在 annotations/，这里存"对象这一侧"
+    "<标注 id>": { text, comment, tags, itemKey, noteIds, created, updated },
+  },
   collections: [{ id, name, parentId, color }],
   searches:    [{ id, name, query }],          // 智能收藏集：保存的搜索条件
   items: [{
@@ -52,6 +60,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
     fields: { publisher, place, isbn, ... },    // 按条目类型的补充字段
     relations: [key],                            // 双向相关条目
     notes: [{ id, title, text, created, updated }],
+    annoIds: [string],                           // 与 annoMeta 的 itemKey 构成双向关联
     attachment: { path, name },                  // 只引用磁盘路径，不复制文件
     page, created, updated, deletedAt
   }]
@@ -67,6 +76,21 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 - **迁移**：读到低版本先写 `backups/library-pre-vN-*.json` 快照，再逐级补字段。v3 → v4 把单个 `note` 变成 `notes[0]`；v4 → v5 增加 `fields` / `relations` / 颜色；v5 → v6 把字符串作者拆成结构化作者；v6 → v7 增加 `annoTags`（标注标签）；v7 → v8 增加 `annoMeta`（标注对象层：可编辑文字/标签/所属条目/生成的笔记）与条目的 `annoIds`。
 - **写盘**：先写临时文件再 `rename`，避免半截 JSON。读坏文件时留 `.corrupt-*` 备份并回退到空库，不让应用起不来。
 - **删除**：`deletedAt > 0` 即回收站；所有删除入口只改索引，绝不 `unlink` 附件。
+- **撤销栈**：写操作前后各序列化一次库，有变化才入栈（上限 20 步）。笔记的逐字编辑**不进栈**，否则打字就填满。
+
+### 标注对象层（v8）
+
+标注真身（坐标 / 颜色 / 文字）仍然在 `annotations/<sha1(path)>.json`，库这边存"对象这一侧"的东西：
+
+```
+annotations/<sha1(path)>.json   ← 形状：pen / highlight / underline / rect / mark / image …
+library.json  annoMeta[id]      ← 文字、批注、标签、所属条目、生成的笔记
+library.json  items[].annoIds   ← 与 annoMeta.itemKey 双向
+```
+
+- **稳定 id**：老 id 是「文件 hash:页码:本页下标」，删掉中间一条后面全串位（标签会贴到别的标注上）。现在形状在创建时生成稳定 id，启动时给老标注补 id，并把 `annoTags` 的旧位置式键一次性重映射成新 id。
+- **可编辑**：`updateAnno` 改的是标注真身（写回 `annotations/*.json` 并通知阅读器重绘），`annoMeta` 只存对象这一侧。
+- **生成笔记**：按标注包围盒截页面区域（选区高亮叠半透明色块）→ PNG 存 `snapshots/` → 生成一条带图的阅读笔记，标注侧记下 `noteIds`。
 
 ### 标注 `annotations/<sha1(path)[:20]>.json`
 
@@ -74,7 +98,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 { path, saved, pages: [{ page, shapes: [...] }] }
 ```
 
-图形种类：`pen` / `highlight` / `line` / `rect` / `arrow` / `text` / `note` / `mark`（文字选区，含 `kind:'quote'` 摘录）。
+图形种类：`pen` / `highlight` / `underline` / `line` / `rect` / `arrow` / `text` / `note` / `mark`（文字选区，含 `kind:'quote'` 摘录）/ `image`（图片标注，位置 = 它在页面上的矩形）。
 
 坐标是**单位坐标**：scale = 1 时的页面像素（等于 PDF 点），左上原点、y 向下。SVG 的 `viewBox` 固定为页面单位尺寸，外层用 CSS 宽高拉伸，所以缩放不需要重算任何形状。
 
@@ -83,15 +107,18 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 - `.anno-base`：荧光笔、文字高亮（在文字下面）；
 - `.anno`：画笔、图形、文字、便签（在文字上面）。
 
-标注按文件路径哈希存盘。移动 / 重命名文件后哈希变了，旧标注不会自动跟随——这是"按路径引用"的代价，库里的"附件重定位"只改条目路径，不迁移旧标注。
+**富文档（Word / PPT / Excel / Markdown / EPUB）也有同一套叠加层**：`loadRichDoc` 给每个 `.doc-page` 挂上 `.anno-base` / `.anno` 两个 SVG 并 `Anno.attachPage`。区别是富文档的 SVG **不设 viewBox**——用户单位 = 页面 CSS 像素，页面变高 / 缩放都不漂（`#doc-view` 用 CSS zoom，缩放天然跟随）。
 
-这些标注现在在文献库里有第二个入口：侧栏「标注」把 `annotations/*.json` 里的批注汇总成一张表（`anno-list` IPC），可以搜索、打标签（标签存在 `library.json` 的 `annoTags` 里）、批量导出成 Markdown 笔记。标注本体仍然跟着文件走，库这边只保存用户加的标签。
+标注按文件路径哈希存盘。在应用里用"按条目重命名"改名时，**标注文件与全文索引会跟着搬到新路径**（`annotations/<sha1(旧路径)>.json` → 新 hash，索引同理并更新内部 path）；但在资源管理器里直接改名 / 移动，旧标注不会跟随——这是"按路径引用"的代价，库里的"附件重定位"只改条目路径。
+
+这些标注现在在文献库里有第二个入口：侧栏「标注」把 `annotations/*.json` 里的批注汇总成一张表（`anno-list` IPC），可以搜索、打标签（标签存在 `library.json` 的 `annoMeta[id].tags` 里）、批量导出成 Markdown 笔记。标注本体仍然跟着文件走，库这边存的是"对象这一侧"（见「标注对象层」）。
 
 ### 设置与窗口状态
 
-- `settings.json`：`dataDir`、`defaultSort`、`theme`、`autoIndex`、`hintSeen`、`invertPages`、`viewMode`。字段白名单，读坏回退默认值。
+- `settings.json`：`dataDir`、`defaultSort`、`theme`、`autoIndex`、`hintSeen`、`invertPages`、`viewMode`、`fetchEmail`（Unpaywall 的联系邮箱）。字段白名单，读坏回退默认值。
 - `window-state.json`：窗口位置 / 尺寸 / 最近打开（最多 8 条，含每份文件的页码）。
 - `fulltext/<sha1(path)>.json`：全文索引，按 `mtime + size` 判断新鲜度，可重建，不进备份。
+- `snapshots/*.png`：图片标注与"标注 → 笔记"的截图，备份一并带走（单份备份最多 60 MB 图）。
 
 ## 打开一份文档的链路
 
@@ -135,7 +162,24 @@ PDF 每页一个 `.page` 容器，里面是 `canvas` + `.textlayer` + `.hl-layer
 - 每份文档一个 JSON，按路径哈希命名；写入前比对 `mtime + size`，没变就跳过。
 - 启动后延迟 1.2 秒后台补索引，不阻塞首屏；也可以在设置里关掉自动索引。
 - 搜索是子串匹配 + AND 多关键词，返回 `{page, snippet, source}`；`source` 区分全文 / 批注 / 摘录 / 笔记。
+- 结果按**相关性**排序：命中次数 × 词重（短语 ×3）+ 每千字密度加成；snippet 优先在原文上定位（折叠会改字符串长度，不能拿折叠索引切原文）。
 - 索引不属于用户数据，备份不包含；丢了在设置里点"重建索引"。
+
+## 统一检索语法（query.js）
+
+`query.js` 是 UMD 模块，主进程与渲染进程共用一份。库内搜索、全文检索、批注 / 摘录 / 笔记合并搜索都走它。
+
+```
+"deep learning"      引号短语（直引号 / 中文引号都认）
+-综述  -"书评"       排除（词中间的 foo-bar 不算排除）
+title: author: year: tag: note: abstract: type: file: publication:
+doi: url: volume: issue: pages: language:      14 个字段限定
+```
+
+- **变音折叠**：搜 `cafe` 能命中 `café`；拉丁扩展逐字符折叠（不整串 NFD，韩文等长度不变），弯引号 / 各类空格一并归一。
+- **连续 CJK 串**天然按短语整体匹配。
+- 匹配助手分工别搞混：`matchTokens`（全中）、`matchNone`（任一命中即弃，排除语义用它，**不能拿 `matchTokens` 取反**）、`matchFields` / `matchFieldsNot`（字段级过滤）。
+- 只有字段限定、没有正文词时，走条目级分支（`type:item`）直接按条目字段过滤。
 
 ## 引用与参考文献表
 
@@ -155,6 +199,29 @@ PDF 每页一个 `.page` 容器，里面是 `canvas` + `.textlayer` + `.hl-layer
 - 旧 `.doc` 用 `word-extractor` 取纯文本，旧 `.ppt` 直接提示另存为 `.pptx`。
 
 新增格式时不要绕过 `clean()`，也不要把远程资源放进来。
+
+## 笔记与 Markdown 编辑器
+
+- **存储**：笔记正文存 `notes[].text`（Markdown 源码），`notes[].html` 置空；条目详情里的内联富文本编辑只针对文献条目的笔记。
+- **编辑器**：独立的 `#note-view` 全屏视图（占满阅读区），顶栏 + 工具栏 + 左源码 / 右实时预览双栏，预览防抖 350ms 跟随。工具栏的每个按钮对应一个 Markdown 语法片段，插入到光标处。
+- **`markdown.js`（UMD，零依赖）**：先转义再拼标签，所以 HTML 注入一律当文本。支持标题 / 粗斜体 / 删除线 / 代码 / 引用 / 列表 / 表格（对齐 + `\|` 转义）/ 链接 / 图片，外加 `:::提示框`、`:::` 推导容器、引用卡、`++下划线++`、`!!剧透!!`、`==彩虹==`、拼音注音、`[^1]` 脚注、任务列表、`::github{}` / `::music{}` 卡片。
+- **`javascript:` 链接降级**成纯文本；外链点击经 `open-external`（只放行 http/https/mailto）用系统浏览器打开；本地图片走 IPC 读 dataURL，渲染层不碰 `file://`。
+- **`fromHtml()`**：旧的富文本笔记第一次打开时自动转成 Markdown，不丢内容。
+- **公式仍是等宽源码**（`$…$` / `$$…$$`）：项目没有数学排版引擎，预览面板会明说，不假装支持。
+- **`richtext.js`（UMD）**：HTML 白名单清洗（删 script/style/iframe、去 on* 事件与 `javascript:` 链接、未知标签只留文字）+ 纯文本提取。**落库前和渲染前都过一遍**。
+- **保存时序**：`closeNoteEditor` 先 `await` 落库再刷新列表，否则卡片摘要会显示旧内容。
+
+## 抓 PDF 全文（fetchpdf.js）
+
+`fetchpdf.js` 是纯 Node 模块，主进程里跑：
+
+- **来源顺序**：arXiv → Unpaywall → 条目里的直链 / doi.org，第一个拿到真 PDF 的就挂到条目上。
+  - arXiv：支持新式 id（`2401.12345v2`）、老式 id（`hep-th/9901001`）、abs/pdf 链接、裸 id；
+  - Unpaywall：需要设置里填联系邮箱（它的礼貌要求），不填就跳过这一步；
+  - doi.org：跟随到出版商页面，**不是 PDF 就明确报错，不会把网页存下来**。
+- **下载稳健性**：只走 http/https；重定向最多 5 次；超时 40s；单文件上限 80MB；先写 `.part` 再改名（失败不留半截文件）；**校验前 5 字节必须是 `%PDF-`**——网页冒充 PDF、付费墙登录页都会被挡住。
+- **网络错误走返回值不抛出**，失败时返回每个来源的尝试记录（`tried`）便于排查。
+- 落到 `<数据目录>/attachments/<条目 key>.pdf`，成功后 `setAttachment` 挂到条目。
 
 ## 标签页、会话与单实例
 
