@@ -28,7 +28,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const Creators = require('./creators.js');
 
-const VERSION = 7;
+const VERSION = 8;
 const BACKUP_KEEP = 10;
 
 // v5：补齐 Zotero 常用的条目类型（30+），让导入 BibTeX/RIS/CSL-JSON 时不至于全被压成「文档」。
@@ -104,7 +104,7 @@ function init(userDataDir) {
 function filePath() { return FILE || init(null); }
 
 function emptyStore() {
-  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {} };
+  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {}, annoMeta: {} };
 }
 
 // 标注的标签：{ "<annoId>": ["方法", "待读"] }。
@@ -120,6 +120,31 @@ function normalizeAnnoTags(raw) {
   }
   return out;
 }
+
+// 标注对象（数据层 v8）：{ "<annoId>": { text, comment, tags, itemKey, noteIds, created, updated } }。
+// 标注的真身（坐标 / 颜色 / 工具）仍在 annotations/<hash>.json，这里存"库这一侧"的东西：
+// 可编辑的文字、标签、所属条目、由它生成的笔记。v7 的 annoTags 读进来并入 tags。
+function normalizeAnnoMeta(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of Object.keys(src)) {
+    const id = str(k);
+    if (!id) continue;
+    const m = src[k] && typeof src[k] === 'object' ? src[k] : {};
+    out[id] = {
+      text: str(m.text),
+      comment: str(m.comment),
+      tags: strList(m.tags).filter((t) => t.length <= 40).slice(0, 20),
+      itemKey: str(m.itemKey),
+      noteIds: strList(m.noteIds).slice(0, 50),
+      created: Number.isFinite(+m.created) ? +m.created : 0,
+      updated: Number.isFinite(+m.updated) ? +m.updated : 0,
+    };
+  }
+  return out;
+}
+
+function clearTags(list) { return strList(list).filter((t) => t.length <= 40).slice(0, 20); }
 
 // 标签颜色是全局映射（标签本身仍是字符串，不把每条标签都对象化，兼容旧数据）。
 function normalizeTagColors(raw) {
@@ -249,9 +274,21 @@ function normalize(o) {
     s.searches = normalizeSearches(o.searches);
     s.tagColors = normalizeTagColors(o.tagColors);
     s.annoTags = normalizeAnnoTags(o.annoTags);
+    s.annoMeta = normalizeAnnoMeta(o.annoMeta);
     if (Array.isArray(o.items)) s.items = o.items.filter((it) => it && it.key).map(migrateItem);
   }
+  // v7→v8：标注标签搬进标注对象层（annoTags 只留着做兼容读，不再写）
+  for (const id of Object.keys(s.annoTags)) {
+    const tags = s.annoTags[id];
+    if (!tags || !tags.length) continue;
+    const m = s.annoMeta[id] || (s.annoMeta[id] = emptyAnnoMeta());
+    for (const t of tags) if (!m.tags.includes(t)) m.tags.push(t);
+  }
   return s;
+}
+
+function emptyAnnoMeta() {
+  return { text: '', comment: '', tags: [], itemKey: '', noteIds: [], created: 0, updated: 0 };
 }
 
 const str = (v) => (v == null ? '' : String(v).trim());
@@ -302,6 +339,8 @@ function migrateItem(it) {
   x.deletedAt = Number.isFinite(+src.deletedAt) && +src.deletedAt > 0 ? +src.deletedAt : 0;
   // v23：阅读笔记改成多条（notes[]）。v3 的单个 note 字段自动搬成第一条笔记。
   x.notes = normalizeNotes(src.notes, x.note, x.created, x.updated);
+  // v8：条目 ↔ 标注双向关联的「条目这一侧」（标注那侧的 itemKey 在 annoMeta 里）
+  x.annoIds = strList(src.annoIds).slice(0, 500);
   return x;
 }
 
@@ -329,6 +368,9 @@ function normalizeNotes(raw, legacyText, created, updated) {
       id,
       title: str(n.title),
       text: str(n.text),
+      // v8：从标注生成的笔记带一张页面截图（数据目录内的相对/绝对路径）
+      image: str(n.image),
+      annoIds: strList(n.annoIds).slice(0, 30),
       created: Number.isFinite(+n.created) ? +n.created : (created || 0),
       updated: Number.isFinite(+n.updated) ? +n.updated : (updated || 0),
     });
@@ -493,6 +535,8 @@ function addNote(key, note) {
     id: genNoteId(),
     title: str(note && note.title),
     text: str(note && note.text),
+    image: str(note && note.image),
+    annoIds: strList(note && note.annoIds).slice(0, 30),
     created: now(),
     updated: now(),
   };
@@ -702,7 +746,8 @@ function setPageByKey(key, page) {
 
 function publicItem(it, collIds) {
   const notes = (Array.isArray(it.notes) ? it.notes : []).map((n) => ({
-    id: n.id, title: n.title, text: n.text, created: n.created || 0, updated: n.updated || 0,
+    id: n.id, title: n.title, text: n.text, image: n.image || '', annoIds: (n.annoIds || []).slice(),
+    created: n.created || 0, updated: n.updated || 0,
   }));
   return {
     key: it.key, itemType: it.itemType, title: it.title, creators: Creators.normalizeCreators(it.creators),
@@ -713,6 +758,8 @@ function publicItem(it, collIds) {
     note: notes.map((n) => n.text).filter(Boolean).join('\n\n'),   // 老字段保留：导出/兼容用
     notes,
     language: it.language, tags: it.tags.slice(),
+    // v8：条目 → 标注（双向关联的条目侧）
+    annoIds: (it.annoIds || []).slice(),
     collectionIds: it.collectionIds.filter((id) => collIds.has(id)),
     page: it.page || 0, created: it.created || 0, updated: it.updated || 0,
     deletedAt: it.deletedAt || 0,
@@ -730,7 +777,8 @@ function summary() {
     collections: s.collections.slice(),
     searches: s.searches.slice(),
     tagColors: Object.assign({}, s.tagColors || {}),
-    annoTags: Object.assign({}, s.annoTags || {}),
+    annoTags: Object.assign({}, s.annoTags || {}),   // v7 兼容读（写入统一走 annoMeta）
+    annoMeta: Object.assign({}, s.annoMeta || {}),   // v8：标注对象层（text/comment/tags/itemKey/noteIds）
     items: s.items.map((it) => publicItem(it, collIds)),
     trashCount: s.items.filter((x) => x.deletedAt).length,
   };
@@ -993,32 +1041,50 @@ function importItems(records, opts) {
   return { added, skipped, keys };
 }
 
-// ---------- 标注标签（v7） ----------
-// 标注本体在 annotations/<hash>.json（跟着文件走），这里只存用户给标注打的标签。
+// ---------- 标注对象（v8） ----------
+// 标注真身（坐标 / 颜色）在 annotations/<hash>.json，库里存的是"对象层"：
+// 可编辑的文字、标签、所属条目、由它生成的笔记。标签从 v7 的 annoTags 迁进来。
+function annoMetaOf(id, s) {
+  const key = str(id);
+  const store = s || load();
+  return store.annoMeta[key] || null;
+}
+
+// 读一条标注的标签（兼容 v7 的 annoTags：annoMeta 里没有就回退）
+function annoTagsOf(id, s) {
+  const key = str(id);
+  const store = s || load();
+  if (store.annoMeta[key]) return store.annoMeta[key].tags.slice();
+  return strList(store.annoTags[key]);
+}
+
 function setAnnoTags(id, tags) {
   const key = str(id);
   if (!key) return { ok: false, error: '标注 id 为空' };
   const s = load();
-  const list = strList(tags).filter((t) => t.length <= 40).slice(0, 20);
-  if (list.length) s.annoTags[key] = list;
-  else delete s.annoTags[key];
+  const list = clearTags(tags);
+  const m = s.annoMeta[key] || (s.annoMeta[key] = emptyAnnoMeta());
+  m.tags = list;
+  m.updated = now();
+  delete s.annoTags[key];      // 迁过来了，旧位置不再存
   save();
   return { ok: true, id: key, tags: list };
 }
 
 function addAnnoTags(ids, tags) {
   const set = Array.isArray(ids) ? ids : [];
-  const add = strList(tags).filter((t) => t.length <= 40).slice(0, 20);
+  const add = clearTags(tags);
   if (!set.length || !add.length) return { ok: false, updated: 0 };
   const s = load();
   let n = 0;
   for (const raw of set) {
     const key = str(raw);
     if (!key) continue;
-    const cur = strList(s.annoTags[key]);
+    const m = s.annoMeta[key] || (s.annoMeta[key] = emptyAnnoMeta());
     let changed = false;
-    for (const t of add) if (!cur.includes(t)) { cur.push(t); changed = true; }
-    if (changed) { s.annoTags[key] = cur.slice(0, 20); n++; }
+    for (const t of add) if (!m.tags.includes(t)) { m.tags.push(t); changed = true; }
+    if (changed) { m.tags = clearTags(m.tags); m.updated = now(); n++; }
+    delete s.annoTags[key];
   }
   if (n) save();
   return { ok: true, updated: n };
@@ -1027,13 +1093,101 @@ function addAnnoTags(ids, tags) {
 function removeAnnoTag(id, tag) {
   const key = str(id), t = str(tag);
   const s = load();
-  const cur = strList(s.annoTags[key]);
-  const next = cur.filter((x) => x !== t);
-  if (next.length !== cur.length) {
-    if (next.length) s.annoTags[key] = next; else delete s.annoTags[key];
-    save();
-  }
+  const m = s.annoMeta[key] || (s.annoMeta[key] = emptyAnnoMeta());
+  const next = m.tags.filter((x) => x !== t);
+  if (next.length !== m.tags.length) { m.tags = next; m.updated = now(); save(); }
+  delete s.annoTags[key];
   return { ok: true, id: key, tags: next };
+}
+
+// 更新标注对象（文字 / 批注 / 所属条目 / 生成的笔记）。坐标不在这里改。
+function updateAnno(id, patch) {
+  const key = str(id);
+  if (!key) return { ok: false, error: '标注 id 为空' };
+  const p = patch && typeof patch === 'object' ? patch : {};
+  const s = load();
+  const m = s.annoMeta[key] || (s.annoMeta[key] = emptyAnnoMeta());
+  if (!m.created) m.created = now();
+  if (typeof p.text === 'string') m.text = str(p.text);
+  if (typeof p.comment === 'string') m.comment = str(p.comment);
+  if (p.tags != null) m.tags = clearTags(p.tags);
+  if (typeof p.itemKey === 'string') m.itemKey = str(p.itemKey);
+  if (Array.isArray(p.noteIds)) m.noteIds = strList(p.noteIds).slice(0, 50);
+  m.updated = now();
+  save();
+  return { ok: true, id: key, anno: annoPublic(key, m) };
+}
+
+// 标注 → 条目：把标注挂到条目上（两边都写，双向关联）
+function linkAnnoToItem(id, itemKey) {
+  const key = str(id);
+  const s = load();
+  const it = itemKey ? s.items.find((x) => x.key === itemKey) : null;
+  if (!key || !it) return { ok: false, error: '条目不存在' };
+  const m = s.annoMeta[key] || (s.annoMeta[key] = emptyAnnoMeta());
+  if (m.itemKey && m.itemKey !== it.key) {
+    const prev = s.items.find((x) => x.key === m.itemKey);
+    if (prev) prev.annoIds = prev.annoIds.filter((x) => x !== key);
+  }
+  m.itemKey = it.key;
+  m.updated = now();
+  if (!it.annoIds.includes(key)) { it.annoIds.push(key); it.updated = now(); }
+  save();
+  return { ok: true, id: key, itemKey: it.key, annoIds: it.annoIds.slice() };
+}
+
+function unlinkAnno(id) {
+  const key = str(id);
+  const s = load();
+  const m = s.annoMeta[key];
+  if (!m) return { ok: true, id: key, removed: 0 };
+  const prev = m.itemKey ? s.items.find((x) => x.key === m.itemKey) : null;
+  if (prev) prev.annoIds = prev.annoIds.filter((x) => x !== key);
+  m.itemKey = '';
+  m.updated = now();
+  save();
+  return { ok: true, id: key, removed: 1 };
+}
+
+// 稳定 id 升级后，把标签 / 对象的键从旧 id（hash:页:下标）搬到新 id
+function remapAnnoTags(map) {
+  const m = map && typeof map === 'object' ? map : {};
+  const s = load();
+  let n = 0;
+  for (const oldId of Object.keys(m)) {
+    const newId = str(m[oldId]);
+    if (!newId || newId === oldId) continue;
+    const oldTags = strList(s.annoTags[oldId]);
+    const oldMeta = s.annoMeta[oldId];
+    const target = s.annoMeta[newId] || (s.annoMeta[newId] = emptyAnnoMeta());
+    for (const t of oldTags) if (!target.tags.includes(t)) target.tags.push(t);
+    if (oldMeta) {
+      for (const t of oldMeta.tags) if (!target.tags.includes(t)) target.tags.push(t);
+      if (!target.text) target.text = oldMeta.text;
+      if (!target.comment) target.comment = oldMeta.comment;
+      if (!target.itemKey) target.itemKey = oldMeta.itemKey;
+      for (const nid of oldMeta.noteIds) if (!target.noteIds.includes(nid)) target.noteIds.push(nid);
+      if (!target.created) target.created = oldMeta.created;
+      delete s.annoMeta[oldId];
+    }
+    delete s.annoTags[oldId];
+    n++;
+  }
+  if (n) save();
+  return { ok: true, remapped: n };
+}
+
+function annoPublic(id, m) {
+  return {
+    id: str(id),
+    text: m.text || '',
+    comment: m.comment || '',
+    tags: (m.tags || []).slice(),
+    itemKey: m.itemKey || '',
+    noteIds: (m.noteIds || []).slice(),
+    created: m.created || 0,
+    updated: m.updated || 0,
+  };
 }
 
 module.exports = {
@@ -1047,6 +1201,7 @@ module.exports = {
   addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment,
   addSearch, removeSearch,
   setAnnoTags, addAnnoTags, removeAnnoTag,
+  annoMetaOf, annoTagsOf, updateAnno, linkAnnoToItem, unlinkAnno, remapAnnoTags,
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,
   exportStore, replaceStore, mergeStore, backupNow,
   guessTitleFromPath, ITEM_TYPES,

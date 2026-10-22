@@ -64,7 +64,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 - **37 类条目**：`ITEM_TYPES` 在 `library.js` 里，label 同时供 UI 和引用格式化使用，不重复维护。
 - **作者结构化（v6）**：`creators` 是 `{firstName, lastName, creatorType}` 数组，中文名与机构名只填 `lastName`。
   拆分规则集中在 `creators.js`：逗号在前（`Smith, John`）、空格在后（`John Smith`）、含汉字不拆、`{...}` 当机构名。
-- **迁移**：读到低版本先写 `backups/library-pre-vN-*.json` 快照，再逐级补字段。v3 → v4 把单个 `note` 变成 `notes[0]`；v4 → v5 增加 `fields` / `relations` / 颜色；v5 → v6 把字符串作者拆成结构化作者；v6 → v7 增加 `annoTags`（标注标签）。
+- **迁移**：读到低版本先写 `backups/library-pre-vN-*.json` 快照，再逐级补字段。v3 → v4 把单个 `note` 变成 `notes[0]`；v4 → v5 增加 `fields` / `relations` / 颜色；v5 → v6 把字符串作者拆成结构化作者；v6 → v7 增加 `annoTags`（标注标签）；v7 → v8 增加 `annoMeta`（标注对象层：可编辑文字/标签/所属条目/生成的笔记）与条目的 `annoIds`。
 - **写盘**：先写临时文件再 `rename`，避免半截 JSON。读坏文件时留 `.corrupt-*` 备份并回退到空库，不让应用起不来。
 - **删除**：`deletedAt > 0` 即回收站；所有删除入口只改索引，绝不 `unlink` 附件。
 

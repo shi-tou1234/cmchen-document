@@ -36,6 +36,13 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   setAnnoTags: (id, tags) => ipcRenderer.invoke('anno-set-tags', { id, tags }),
   addAnnoTags: (ids, tags) => ipcRenderer.invoke('anno-add-tags', { ids, tags }),
   removeAnnoTag: (id, tag) => ipcRenderer.invoke('anno-remove-tag', { id, tag }),
+  // v8：标注是库里的对象 —— 可编辑文字/批注/颜色，可与条目双向关联
+  updateAnno: (id, patch) => ipcRenderer.invoke('anno-update', { id, patch }),
+  linkAnno: (id, itemKey) => ipcRenderer.invoke('anno-link', { id, itemKey }),
+  onAnnoReload: (cb) => { ipcRenderer.on('anno-reload', (_e, info) => cb(info)); },
+  // v8：从标注生成带页面截图的笔记
+  noteFromAnno: (info) => ipcRenderer.invoke('note-from-anno', info),
+  noteImage: (path) => ipcRenderer.invoke('note-image', { path }),
   // 批注导出为纯文本笔记
   exportNote: (info) => ipcRenderer.invoke('export-note', info),
   // 菜单命令：专注阅读模式 / 导出当前页图片（主进程菜单触发）

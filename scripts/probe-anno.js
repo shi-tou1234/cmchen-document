@@ -47,8 +47,10 @@ module.exports = `(async () => {
   $('#lib-anno-tag-add').click();
   await sleep(600);
   const sum = await pdfBridge.lib.summary();
-  const annoId = Object.keys(sum.annoTags || {})[0] || '';
-  push('标签写进库数据', !!(sum.annoTags && sum.annoTags[annoId] && sum.annoTags[annoId].indexOf('方法') >= 0), JSON.stringify(sum.annoTags));
+  // v8：标签存进标注对象层 annoMeta[id].tags（旧的 annoTags 位置上不再写）
+  const annoId = Object.keys(sum.annoMeta || {})[0] || '';
+  push('标签写进库数据（标注对象层）', !!(sum.annoMeta && sum.annoMeta[annoId]
+    && (sum.annoMeta[annoId].tags || []).indexOf('方法') >= 0), JSON.stringify(sum.annoMeta));
   const tagText = ($('#lib-grid .lib-anno .lctag') || {}).textContent || '';
   push('卡片上出现标签', tagText.indexOf('方法') >= 0, tagText);
 

@@ -30,7 +30,7 @@ process.env.PDFREADER_LIBRARY = storeFile;
 lib.resetCache();
 let sum = lib.summary();
 ok('空库无条目/集合', sum.items.length === 0 && sum.collections.length === 0);
-ok('库版本为 v7', sum.version === 7, 'version=' + sum.version);
+ok('库版本为 v8', sum.version === 8, 'version=' + sum.version);
 ok('summary 带条目类型表', Array.isArray(sum.itemTypes) && sum.itemTypes.some((t) => t.id === 'journalArticle'));
 
 // 拖入 PDF → 建条目，标题从文件名猜（去下划线、去数字前缀）

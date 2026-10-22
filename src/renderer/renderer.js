@@ -1420,6 +1420,79 @@ async function renderImageRegion(pdfPage, rect, targetW) {
   }
 }
 
+// v8：从标注生成笔记用的页面截图 —— 按标注包围盒裁一块页面图像，
+// 选区高亮（mark）以半透明色块叠在截图上，和阅读器里看到的一致。
+function annoShapeBBox(sh) {
+  if (!sh) return null;
+  if (sh.tool === 'mark' && Array.isArray(sh.rects) && sh.rects.length) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const r of sh.rects) {
+      x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + (r.w || 0)); y1 = Math.max(y1, r.y + (r.h || 0));
+    }
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+  if (sh.a && sh.b) {
+    return {
+      x: Math.min(sh.a.x, sh.b.x), y: Math.min(sh.a.y, sh.b.y),
+      w: Math.abs(sh.b.x - sh.a.x), h: Math.abs(sh.b.y - sh.a.y),
+    };
+  }
+  if (Array.isArray(sh.pts) && sh.pts.length) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of sh.pts) {
+      x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
+      x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+    }
+    return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+  }
+  if (sh.at) {
+    const size = sh.size || 14;
+    const lines = String(sh.text || '').split('\n');
+    const w = Math.max(24, Math.max(...lines.map((l) => l.length)) * size * 0.62);
+    return { x: sh.at.x, y: sh.at.y - size, w, h: Math.max(size * 1.4, lines.length * size * 1.25) };
+  }
+  return null;
+}
+
+App.renderAnnoSnapshot = async function (pageNum, shapes) {
+  const el = App.pageEl(pageNum);
+  const pdfPage = el && el._pdfPage;
+  if (!pdfPage) return null;
+  const list = Array.isArray(shapes) ? shapes.filter(Boolean) : [];
+  const boxes = list.map(annoShapeBBox).filter(Boolean);
+  if (!boxes.length) return null;
+  const vp = pdfPage.getViewport({ scale: 1 });
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const b of boxes) {
+    x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+    x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+  }
+  const pad = 16;
+  const rect = {
+    x: Math.max(0, x0 - pad), y: Math.max(0, y0 - pad),
+    w: Math.min(vp.width, x1 + pad) - Math.max(0, x0 - pad),
+    h: Math.min(vp.height, y1 + pad) - Math.max(0, y0 - pad),
+  };
+  if (!(rect.w > 1) || !(rect.h > 1)) return null;
+  const canvas = await renderImageRegion(pdfPage, rect);
+  if (!canvas) return null;
+  // 把选区高亮叠上去（坐标是 scale=1 的单位坐标）
+  const scale = canvas.width / rect.w;
+  const ctx = canvas.getContext('2d');
+  for (const sh of list) {
+    if (sh.tool !== 'mark' || !Array.isArray(sh.rects)) continue;
+    ctx.save();
+    ctx.globalAlpha = sh.kind === 'quote' ? 0.2 : 0.38;
+    ctx.fillStyle = sh.color || '#ffd54f';
+    for (const r of sh.rects) {
+      ctx.fillRect((r.x - rect.x) * scale, (r.y - rect.y) * scale, Math.max(1, r.w * scale), Math.max(1, r.h * scale));
+    }
+    ctx.restore();
+  }
+  return canvas;
+};
+
 // 点在没有位图的地方时，取点击处周围一块当「局部放大」的区域
 function regionAround(ux, uy, unit) {
   const u = unit || { w: 600, h: 800 };
@@ -1645,7 +1718,10 @@ async function saveAnnosNow() {
   if (!s.filePath || !window.pdfBridge.saveAnnos) return;
   const pages = [];
   for (const [n, shapes] of s.annos) {
-    if (shapes && shapes.length) pages.push({ page: n, shapes: JSON.parse(JSON.stringify(shapes)) });
+    if (!shapes || !shapes.length) continue;
+    // v8：稳定 id 兜底（库里按 id 存标签 / 所属条目，缺 id 会串位）
+    for (const sh of shapes) if (!sh.id && window.Anno) sh.id = window.Anno.newAnnoId();
+    pages.push({ page: n, shapes: JSON.parse(JSON.stringify(shapes)) });
   }
   try { await window.pdfBridge.saveAnnos(s.filePath, pages); } catch (_) {}
 }
@@ -1947,6 +2023,18 @@ function bind() {
     if (res.smoke) loadPdf(res.data, res.fileName, true, res);
     else openDocument(res, { newTab: true });
   });
+  // v8：在文献库里改了标注文字/批注，主进程改完真身后通知阅读器重画
+  if (window.pdfBridge.onAnnoReload) {
+    window.pdfBridge.onAnnoReload((info) => {
+      const p = info && info.path;
+      if (!p || p !== App.state.filePath) return;
+      const s = App.state;
+      s.annos = new Map();
+      for (const n of Array.from(s.rendered.keys())) { try { Anno.renderPage(n); } catch (_) {} }
+      restoreAnnos(p);
+      toast('标注已更新');
+    });
+  }
 
   // 标签栏：+ 打开新 PDF；点标签切换；点 × 关闭
   const tabNew = $('tab-new');

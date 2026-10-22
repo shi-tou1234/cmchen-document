@@ -42,7 +42,7 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 |---|---|
 | `src/main.js` | 窗口、IPC、打开文档、备份恢复、数据目录、单实例、全文索引调度 |
 | `src/preload.js` | `contextBridge` 暴露 `window.pdfBridge`，渲染层唯一入口 |
-| `src/library.js` | 库数据层 v7：CRUD、标签、收藏集、回收站、迁移、查重、标注标签 |
+| `src/library.js` | 库数据层 v8：CRUD、标签、收藏集、回收站、迁移、查重、标注对象 |
 | `src/fulltext.js` | 全文索引：建、查、清、状态 |
 | `src/docconvert.js` | Word / PPT / Excel / EPUB / Markdown → 安全 HTML |
 | `src/formats.js` | BibTeX / RIS / CSL-JSON 解析与导出 |

@@ -223,6 +223,7 @@
         <span id="lib-anno-tools" hidden>
           <input id="lib-anno-tag-input" type="text" placeholder="给选中的标注加标签" />
           <button id="lib-anno-tag-add" class="tbtn">加标签</button>
+          <button id="lib-anno-note" class="tbtn" title="把选中的标注（带页面截图）生成一条阅读笔记">生成笔记</button>
           <button id="lib-anno-export" class="tbtn">导出标注</button>
         </span>
         <button id="lib-bulk-clear" class="tbtn">取消选择</button>
@@ -273,6 +274,11 @@
           <span id="ld-fetch-status" class="ld-hint"></span>
         </div>
         <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">标注 <span class="ld-hint">这篇文献上的高亮 / 批注，可跳到原页编辑</span></div>
+          <div id="ld-annos" class="ld-annos"></div>
+        </div>
 
         <div class="ld-sec">
           <div class="ld-sec-title">阅读笔记 <span class="ld-hint">一条文献可以写多条</span></div>
@@ -527,6 +533,28 @@
       <footer class="modal-foot"><span class="grow"></span>
         <button id="comment-save" class="ld-btn primary">保存评论</button>
         <button id="comment-cancel" class="ld-btn">取消</button></footer>
+    </div>
+  </div>
+
+  <!-- 编辑标注（阶段二：标注是库里的对象，文字 / 批注可以改） -->
+  <div id="anno-edit-modal" class="modal" hidden>
+    <div class="modal-card">
+      <header class="modal-head"><span>编辑标注</span><span class="grow"></span>
+        <button id="anno-edit-x" class="ld-x" title="关闭">✕</button></header>
+      <div class="modal-body">
+        <div id="anno-edit-src" class="ld-hint"></div>
+        <label class="ld-row"><span class="ld-lbl">标注文字</span>
+          <textarea id="anno-edit-text" rows="4" placeholder="高亮 / 摘录的文字"></textarea></label>
+        <label class="ld-row"><span class="ld-lbl">批注</span>
+          <textarea id="anno-edit-comment" rows="3" placeholder="你的想法"></textarea></label>
+        <div id="anno-edit-status" class="set-status"></div>
+      </div>
+      <footer class="modal-foot">
+        <span class="ld-hint">改完会同步回 PDF 上的标注本身。</span>
+        <span class="grow"></span>
+        <button id="anno-edit-save" class="ld-btn primary">保存</button>
+        <button id="anno-edit-cancel" class="ld-btn">取消</button>
+      </footer>
     </div>
   </div>
 

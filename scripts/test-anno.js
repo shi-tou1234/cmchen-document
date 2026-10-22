@@ -30,40 +30,41 @@ process.env.PDFREADER_LIBRARY = store;
 lib.resetCache();
 
 let sum = lib.summary();
-ok('v6 库升到 v7', sum.version === 7, 'version=' + sum.version);
-ok('默认没有标注标签', sum.annoTags && Object.keys(sum.annoTags).length === 0, JSON.stringify(sum.annoTags));
+ok('v6 库升到 v8', sum.version === 8, 'version=' + sum.version);
+ok('默认没有标注对象', sum.annoMeta && Object.keys(sum.annoMeta).length === 0, JSON.stringify(sum.annoMeta));
 
 let r = lib.setAnnoTags('abc:2:0', ['方法', '待读']);
 ok('给标注打标签', r.ok && r.tags.length === 2, JSON.stringify(r));
 sum = lib.summary();
-ok('标签进了库数据', (sum.annoTags['abc:2:0'] || []).includes('方法'), JSON.stringify(sum.annoTags));
+ok('标签进了标注对象', ((sum.annoMeta['abc:2:0'] || {}).tags || []).includes('方法'), JSON.stringify(sum.annoMeta));
 
 r = lib.addAnnoTags(['abc:2:0', 'abc:3:1'], ['重要']);
 ok('批量加标签', r.updated === 2, JSON.stringify(r));
 sum = lib.summary();
-ok('标签是累加而不是覆盖', (sum.annoTags['abc:2:0'] || []).length === 3
-  && (sum.annoTags['abc:3:1'] || []).length === 1, JSON.stringify(sum.annoTags));
+ok('标签是累加而不是覆盖', ((sum.annoMeta['abc:2:0'] || {}).tags || []).length === 3
+  && ((sum.annoMeta['abc:3:1'] || {}).tags || []).length === 1, JSON.stringify(sum.annoMeta));
 
 r = lib.removeAnnoTag('abc:2:0', '待读');
 sum = lib.summary();
-ok('移除单个标签', !(sum.annoTags['abc:2:0'] || []).includes('待读')
-  && (sum.annoTags['abc:2:0'] || []).includes('方法'), JSON.stringify(sum.annoTags));
+ok('移除单个标签', !((sum.annoMeta['abc:2:0'] || {}).tags || []).includes('待读')
+  && ((sum.annoMeta['abc:2:0'] || {}).tags || []).includes('方法'), JSON.stringify(sum.annoMeta));
 
 r = lib.setAnnoTags('abc:3:1', []);
 sum = lib.summary();
-ok('清空标签会删掉这一条', !sum.annoTags['abc:3:1'], JSON.stringify(sum.annoTags));
+ok('清空标签后标注对象仍在（tags 为空）', !!sum.annoMeta['abc:3:1']
+  && (sum.annoMeta['abc:3:1'].tags || []).length === 0, JSON.stringify(sum.annoMeta));
 
 r = lib.setAnnoTags('', ['x']);
 ok('空 id 被拒绝', r.ok === false, JSON.stringify(r));
 
 // 落盘后重新读回来还在
 const onDisk = JSON.parse(fs.readFileSync(store, 'utf8'));
-ok('落盘为 v7 且带 annoTags', onDisk.version === 7 && onDisk.annoTags && onDisk.annoTags['abc:2:0'],
-  JSON.stringify(onDisk.annoTags));
+ok('落盘为 v8 且标注对象带标签', onDisk.version === 8 && onDisk.annoMeta && onDisk.annoMeta['abc:2:0'],
+  JSON.stringify(onDisk.annoMeta));
 
 lib.resetCache();
 sum = lib.summary();
-ok('重开进程后标签还在', (sum.annoTags['abc:2:0'] || []).length === 2, JSON.stringify(sum.annoTags));
+ok('重开进程后标签还在', ((sum.annoMeta['abc:2:0'] || {}).tags || []).length === 2, JSON.stringify(sum.annoMeta));
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
 

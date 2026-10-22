@@ -130,13 +130,13 @@ fs.writeFileSync(store, JSON.stringify({
 process.env.PDFREADER_LIBRARY = store;
 lib.resetCache();
 const sum = lib.summary();
-ok('v5 库读出来是 v7', sum.version === 7, 'version=' + sum.version);
+ok('v5 库读出来是 v8', sum.version === 8, 'version=' + sum.version);
 ok('v5 字符串作者被拆成结构', sum.items[0].creators.length === 2
   && sum.items[0].creators[0].lastName === '张三'
   && sum.items[0].creators[1].lastName === 'Brown' && sum.items[0].creators[1].firstName === 'John',
   JSON.stringify(sum.items[0].creators));
 const onDisk = JSON.parse(fs.readFileSync(store, 'utf8'));
-ok('迁移后落盘版本是 7', onDisk.version === 7, 'version=' + onDisk.version);
+ok('迁移后落盘版本是 8', onDisk.version === 8, 'version=' + onDisk.version);
 ok('迁移后落盘作者是结构', Array.isArray(onDisk.items[0].creators[0]) === false
   && onDisk.items[0].creators[0].lastName === '张三', JSON.stringify(onDisk.items[0].creators));
 ok('迁移前留了备份', fs.readdirSync(path.join(tmp, 'backups')).some((f) => /pre-v5/.test(f)),

@@ -155,7 +155,7 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 
 | 内容 | 位置 |
 |---|---|
-| 文献库 | `<数据目录>\library.json`（数据层 v7） |
+| 文献库 | `<数据目录>\library.json`（数据层 v8） |
 | 标注 | `<userData>\annotations\<sha1(路径)>.json` |
 | 全文索引 | `<数据目录>\fulltext\<hash>.json`（可重建，不进备份） |
 | 设置 | `<userData>\settings.json` |
@@ -207,14 +207,14 @@ node scripts\test-packaged.js "build\Trove-1.1.0-portable.exe"
 
 | 脚本 | 覆盖 |
 |---|---|
-| `test-library.js` | 数据层 v7：37 类条目 / fields / relations / 颜色 / CRUD / 回收站 / 迁移 / 查重合并 / 批量 / 持久化（82） |
+| `test-library.js` | 数据层 v8：37 类条目 / fields / relations / 颜色 / CRUD / 回收站 / 迁移 / 查重合并 / 批量 / 持久化（82） |
 | `test-fulltext.js` | 全文索引 / 搜索 / 新鲜度 / 容错（36） |
 | `test-formats.js` | BibTeX / RIS / CSL-JSON 解析与导出（78） |
 | `test-settings.js` | 设置白名单 / BOM / 损坏自愈（22） |
 | `test-metadata.js` | DOI / arXiv 抓取，fake fetch（47） |
 | `test-cite.js` | 5 种引用样式 + 37 类标识 + citekey / `[@key]`（73） |
 | `test-creators.js` | 作者结构化：姓名拆分 / v5→v6 迁移 / 5 种样式拆分姓与名 / 姓氏排序 / 导入导出往返（44） |
-| `test-anno.js` | 标注标签：v6→v7 迁移 / 打标签 / 批量加标签 / 移除 / 落盘与重载（12） |
+| `test-anno.js` | 标注标签：v6→v8 迁移 / 打标签 / 批量加标签 / 移除 / 落盘与重载（11） |
 | `test-bib.js` | 参考文献表：编号 / 作者排序 / 拼音 / 同年 a-b / Markdown / citekey（33） |
 | `test-docconvert.js` | 全格式转换 + sanitize + 图片内联（31） |
 | `test-export.js` | pdf-lib 导出管线 |
@@ -288,7 +288,7 @@ pdf-reader/
 ├─ src/
 │  ├─ main.js            # 窗口 / IPC / 打开文档 / 备份恢复 / 单实例 / 数据目录
 │  ├─ preload.js         # contextBridge，渲染层唯一的 Node 入口
-│  ├─ library.js         # 数据层 v7（JSON + 原子写 + 迁移）
+│  ├─ library.js         # 数据层 v8（JSON + 原子写 + 迁移）
 │  ├─ fulltext.js        # 主进程全文索引
 │  ├─ docconvert.js      # 全格式 → 安全 HTML
 │  ├─ formats.js         # BibTeX / RIS / CSL-JSON

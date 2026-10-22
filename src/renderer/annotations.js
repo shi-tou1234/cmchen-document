@@ -297,6 +297,7 @@ const Anno = window.Anno = (() => {
     } else if (!sh.a || (Math.abs(sh.a.x - sh.b.x) < 1 && Math.abs(sh.a.y - sh.b.y) < 1)) {
       return;
     }
+    sh.id = newAnnoId();      // v8：稳定 id 在形状落地时就定下来
     shapesOf(n).push(sh);
     undoStack.push({ type: 'add', n, shape: sh });
   }
@@ -412,7 +413,7 @@ const Anno = window.Anno = (() => {
         return;
       }
       if (v) {
-        const sh = { tool: kind, color: state.color, width: 0, size: state.textHeight,
+        const sh = { id: newAnnoId(), tool: kind, color: state.color, width: 0, size: state.textHeight,
           at: { x: +ed.dataset.ux, y: +ed.dataset.uy }, text: v };
         shapesOf(n).push(sh);
         undoStack.push({ type: 'add', n, shape: sh });
@@ -465,9 +466,21 @@ const Anno = window.Anno = (() => {
     notify();
   }
 
+  // v8：每条标注一个稳定 id。库里按 id 存标签 / 所属条目，删掉中间一条不能再串位。
+  const ANNO_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  function newAnnoId() {
+    let s = '';
+    const buf = new Uint8Array(10);
+    if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(buf);
+    else for (let i = 0; i < buf.length; i++) buf[i] = Math.floor(Math.random() * 256);
+    for (let i = 0; i < buf.length; i++) s += ANNO_ALPHABET[buf[i] % ANNO_ALPHABET.length];
+    return 'a' + s;
+  }
+
   // 供选区高亮/评论等外部模块写入模型，同时进撤销栈
   function addShape(n, sh, opts) {
     if (!sh) return null;
+    if (!sh.id) sh.id = newAnnoId();
     shapesOf(n).push(sh);
     if (!opts || opts.undo !== false) undoStack.push({ type: 'add', n, shape: sh });
     renderPage(n);
@@ -540,5 +553,5 @@ const Anno = window.Anno = (() => {
     setTool('select');
   }
 
-  return { init, attachPage, setTool, undo, clearPage, renderPage, addShape, updateShape, reset, get state() { return state; } };
+  return { init, attachPage, setTool, undo, clearPage, renderPage, addShape, updateShape, reset, newAnnoId, get state() { return state; } };
 })();

@@ -94,6 +94,11 @@ let appState = loadWindowState();
 const library = require('./library.js');
 library.init(currentDataDir());
 fulltext.init(currentDataDir());
+// 老标注补稳定 id（v8 地基）：这次不动它，后面删一条标注就会把所有标签串位
+try {
+  const up = upgradeAnnoIds();
+  if (up && up.upgraded) console.log('[anno] upgrade ids ' + JSON.stringify(up));
+} catch (err) { console.warn('[anno] id upgrade failed:', err && err.message); }
 
 // ---------- 最近打开 + 每文件页码 ----------
 const MAX_RECENT = 8;
@@ -424,6 +429,39 @@ function applyAnnotationBundle(list) {
   return n;
 }
 
+// v8：从标注生成的笔记带页面截图（PNG 存在数据目录 snapshots/）。
+// 备份是单个 JSON，图片以 base64 一起带走，恢复时写回；单份备份最多带 60MB 图。
+function readSnapshotBundle() {
+  const out = {};
+  const dir = path.join(currentDataDir(), 'snapshots');
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => /\.png$/i.test(f)); } catch (_) { return out; }
+  let total = 0;
+  for (const f of files) {
+    try {
+      const buf = fs.readFileSync(path.join(dir, f));
+      if (total + buf.length > 60 * 1024 * 1024) break;
+      total += buf.length;
+      out[f] = buf.toString('base64');
+    } catch (_) {}
+  }
+  return out;
+}
+
+function applySnapshotBundle(obj) {
+  const dir = path.join(currentDataDir(), 'snapshots');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) { return 0; }
+  let n = 0;
+  for (const name of Object.keys(obj || {})) {
+    if (!/\.png$/i.test(name)) continue;   // 只认 png，别被备份里的路径穿越坑到
+    try {
+      fs.writeFileSync(path.join(dir, path.basename(name)), Buffer.from(obj[name], 'base64'));
+      n++;
+    } catch (_) {}
+  }
+  return n;
+}
+
 function buildBackupPayload() {
   return {
     app: 'trove',
@@ -432,6 +470,7 @@ function buildBackupPayload() {
     settings: settings.get(),
     library: library.exportStore(),
     annotations: readAnnotationBundle(),
+    images: readSnapshotBundle(),
     note: '全文索引不包含在备份内；恢复后可在设置里重建。',
   };
 }
@@ -475,6 +514,7 @@ function restoreFromFile(file) {
     atomicWrite(pre, JSON.stringify(buildBackupPayload()));
     library.replaceStore(obj.library);
     const n = applyAnnotationBundle(obj.annotations || []);
+    const imgs = applySnapshotBundle(obj.images || {});
     const keepDir = settings.get().dataDir;
     if (obj.settings && typeof obj.settings === 'object') {
       settings.set(Object.assign({}, obj.settings, { dataDir: keepDir }));
@@ -482,7 +522,7 @@ function restoreFromFile(file) {
     }
     fulltext.init(currentDataDir());
     if (win) win.webContents.send('lib-changed');
-    return { ok: true, path: file, preBackup: pre, items: obj.library.items.length, annotations: n };
+    return { ok: true, path: file, preBackup: pre, items: obj.library.items.length, annotations: n, images: imgs };
   } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 }
 
@@ -1035,19 +1075,92 @@ function annoFileFor(filePath) {
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, h + '.json');
 }
+
+// ---------- 标注稳定 id（数据层 v8 的地基） ----------
+// v7 及更早的标注 id 是「文件 hash:页码:本页下标」——删掉中间一条，后面所有标注的
+// 下标都往前挪，库里按 id 存的标签就串到别的标注上了。所以每条标注真身上必须带一个
+// 不随顺序变化的 id；老标注首次读到时补齐并回写文件，标签键跟着一次性重映射。
+function genAnnoId() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(10);
+  let s = '';
+  for (let i = 0; i < 10; i++) s += alphabet[bytes[i] % alphabet.length];
+  return 'a' + s;
+}
+
+// 给一份标注文件的所有形状补齐 id，返回 { changed, map: {旧id: 新id} }
+function ensureAnnoIds(obj, fileId, writeBack) {
+  const map = {};
+  let changed = false;
+  const pages = Array.isArray(obj && obj.pages) ? obj.pages : [];
+  pages.forEach((pg) => {
+    const shapes = (pg && Array.isArray(pg.shapes)) ? pg.shapes : [];
+    shapes.forEach((sh, i) => {
+      if (!sh || typeof sh !== 'object') return;
+      if (sh.id) return;
+      sh.id = genAnnoId();
+      changed = true;
+      const oldId = fileId + ':' + (pg.page || 0) + ':' + i;
+      map[oldId] = sh.id;
+    });
+  });
+  if (changed && writeBack) writeBack();
+  return { changed, map };
+}
+
+// 启动时跑一次：老标注补 id → 库里的标签键重映射到新 id
+function upgradeAnnoIds() {
+  let dir = '';
+  try { dir = annoDir(); } catch (_) { return { ok: false, upgraded: 0 }; }
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f)); } catch (_) { return { ok: false, upgraded: 0 }; }
+  const map = {};
+  let upgraded = 0;
+  for (const f of files) {
+    const full = path.join(dir, f);
+    let obj = null;
+    try { obj = JSON.parse(fs.readFileSync(full, 'utf8')); } catch (_) { continue; }
+    if (!obj || !Array.isArray(obj.pages)) continue;
+    const res = ensureAnnoIds(obj, f.replace(/\.json$/i, ''), () => {
+      try { fs.writeFileSync(full, JSON.stringify(obj)); } catch (_) {}
+    });
+    if (!res.changed) continue;
+    upgraded++;
+    Object.assign(map, res.map);
+  }
+  let remapped = 0;
+  if (Object.keys(map).length) {
+    try { remapped = (library.remapAnnoTags(map) || {}).remapped || 0; } catch (_) {}
+  }
+  return { ok: true, upgraded, remapped };
+}
 ipcMain.handle('anno-save', (_e, info) => {
   if (!info || !info.path) return false;
   try {
     // 空标注也落盘（用户清空后重开不应复活旧标注）
-    fs.writeFileSync(annoFileFor(info.path), JSON.stringify({ path: info.path, saved: Date.now(), pages: info.pages || [] }));
+    const obj = { path: info.path, saved: Date.now(), pages: info.pages || [] };
+    // 兜底：渲染层没带 id 的形状顺手补上（新建标注由渲染层生成 id，这里是保险）
+    ensureAnnoIds(obj, '', () => {});
+    fs.writeFileSync(annoFileFor(info.path), JSON.stringify(obj));
     return true;
   } catch (err) { return { error: String(err && err.message ? err.message : err) }; }
 });
 ipcMain.handle('anno-load', (_e, info) => {
   if (!info || !info.path) return [];
+  const file = annoFileFor(info.path);
+  const fileId = path.basename(file, '.json');
   try {
-    const obj = JSON.parse(fs.readFileSync(annoFileFor(info.path), 'utf8'));
-    return Array.isArray(obj.pages) ? obj.pages : [];
+    const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const pages = Array.isArray(obj.pages) ? obj.pages : [];
+    // 老标注首次打开：补 id → 回写文件 → 库里的标签键重映射过去
+    const res = ensureAnnoIds(obj, fileId, () => {
+      try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (_) {}
+    });
+    if (res.changed) {
+      try { library.remapAnnoTags(res.map); } catch (_) {}
+      if (win) win.webContents.send('lib-changed');
+    }
+    return pages;
   } catch (_) { return []; }
 });
 
@@ -1077,6 +1190,9 @@ function listAllAnnotations() {
     try { obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
     const pages = (obj && Array.isArray(obj.pages)) ? obj.pages : [];
     const filePath = String((obj && obj.path) || '');
+    const fileId = f.replace(/\.json$/i, '');
+    const parent = filePath ? library.findItemByPath(filePath) : null;
+    const parentKey = parent && !parent.deletedAt ? parent.key : '';
     for (const pg of pages) {
       const shapes = (pg && Array.isArray(pg.shapes)) ? pg.shapes : [];
       shapes.forEach((sh, i) => {
@@ -1084,8 +1200,11 @@ function listAllAnnotations() {
         const text = String(sh.text || '').trim();
         const comment = String(sh.comment || '').trim();
         if (!text && !comment) return;   // 纯涂鸦没有文字，先不进列表
+        // 稳定 id：真身上有 id 就用它；没有（还没补过的老标注）退回旧的位置式 id
+        const id = String(sh.id || (fileId + ':' + (pg.page || 0) + ':' + i));
+        const meta = parentKey ? library.annoMetaOf(id) : null;
         out.push({
-          id: f.replace(/\.json$/i, '') + ':' + (pg.page || 0) + ':' + i,
+          id,
           path: filePath,
           fileName: filePath ? path.basename(filePath) : f,
           page: Number(pg.page) || 0,
@@ -1094,6 +1213,9 @@ function listAllAnnotations() {
           color: String(sh.color || ''),
           text, comment,
           kind: annoKindOf(sh),
+          itemKey: (meta && meta.itemKey) || parentKey,
+          itemTitle: parent ? (parent.title || '(无标题)') : '',
+          updated: (meta && meta.updated) || 0,
         });
       });
     }
@@ -1101,6 +1223,104 @@ function listAllAnnotations() {
   out.sort((a, b) => (a.fileName === b.fileName ? a.page - b.page : a.fileName.localeCompare(b.fileName)));
   return out;
 }
+
+// 编辑标注对象：改文字 / 批注 / 颜色。文字与批注同时写回标注真身（阅读器要看到），
+// 颜色只存在于真身，库里记一份更新时间。
+ipcMain.handle('anno-update', (_e, info) => {
+  const id = String((info && info.id) || '').trim();
+  if (!id) return { ok: false, error: '标注 id 为空' };
+  const patch = (info && info.patch) || {};
+  let dir = '';
+  try { dir = annoDir(); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f)); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
+  let touched = null;
+  for (const f of files) {
+    const full = path.join(dir, f);
+    let obj = null;
+    try { obj = JSON.parse(fs.readFileSync(full, 'utf8')); } catch (_) { continue; }
+    const pages = Array.isArray(obj && obj.pages) ? obj.pages : [];
+    let hit = false;
+    for (const pg of pages) {
+      for (const sh of (pg && Array.isArray(pg.shapes) ? pg.shapes : [])) {
+        if (!sh || String(sh.id || '') !== id) continue;
+        if (typeof patch.text === 'string') sh.text = patch.text;
+        if (typeof patch.comment === 'string') sh.comment = patch.comment;
+        if (typeof patch.color === 'string' && patch.color) sh.color = patch.color;
+        hit = true;
+      }
+    }
+    if (hit) {
+      try { fs.writeFileSync(full, JSON.stringify(obj)); touched = { path: String(obj.path || '') }; break; } catch (_) {}
+    }
+  }
+  if (!touched) return { ok: false, error: '没找到这条标注（可能已被删除）' };
+  const r = library.updateAnno(id, patch);
+  if (win) win.webContents.send('lib-changed');
+  if (touched.path && win) win.webContents.send('anno-reload', { path: touched.path });
+  return Object.assign({ ok: true }, r);
+});
+
+// ---------- 从标注生成笔记（v8 阶段二：带页面截图） ----------
+function snapshotsDir() {
+  const dir = path.join(currentDataDir(), 'snapshots');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  return dir;
+}
+
+// 渲染层截好图（dataURL）→ 落盘 PNG → 生成一条带图的库笔记 → 标注记下 noteId
+ipcMain.handle('note-from-anno', (_e, info) => {
+  const itemKey = String((info && info.itemKey) || '').trim();
+  const dataUrl = String((info && info.dataUrl) || '');
+  const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!itemKey) return { ok: false, error: '缺少条目' };
+  if (!m) return { ok: false, error: '截图数据不合法' };
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length > 12 * 1024 * 1024) return { ok: false, error: '截图太大' };
+  try {
+    const name = 'anno-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex') + '.png';
+    fs.writeFileSync(path.join(snapshotsDir(), name), buf);
+    const rel = 'snapshots/' + name;
+    const note = library.addNote(itemKey, {
+      title: String((info && info.title) || '').trim(),
+      text: String((info && info.text) || '').trim(),
+      image: rel,
+      annoIds: Array.isArray(info && info.annoIds) ? info.annoIds : [],
+    });
+    if (note) {
+      for (const id of note.annoIds) {
+        const meta = library.annoMetaOf(id) || {};
+        const ids = (meta.noteIds || []).concat([note.id]);
+        library.updateAnno(id, { noteIds: ids, itemKey });
+      }
+    }
+    if (win) win.webContents.send('lib-changed');
+    return { ok: true, noteId: note ? note.id : '', image: rel };
+  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
+
+// 笔记里的截图：渲染层按需读 base64（避免 file:// 在不同安全策略下加载不到）
+ipcMain.handle('note-image', (_e, info) => {
+  const rel = String((info && info.path) || '');
+  if (!rel) return { ok: false, error: '没有图片路径' };
+  const abs = path.resolve(currentDataDir(), rel);
+  // 只允许读数据目录内的 snapshots，别把任意文件读出来
+  if (!abs.startsWith(path.resolve(currentDataDir()) + path.sep)) return { ok: false, error: '路径不合法' };
+  try {
+    const buf = fs.readFileSync(abs);
+    return { ok: true, dataUrl: 'data:image/png;base64,' + buf.toString('base64') };
+  } catch (_) { return { ok: false, error: '图片读不到（可能被删了）' }; }
+});
+
+// 标注 ↔ 条目双向关联
+ipcMain.handle('anno-link', (_e, info) => {
+  const id = String((info && info.id) || '').trim();
+  if (!id) return { ok: false, error: '标注 id 为空' };
+  const itemKey = String((info && info.itemKey) || '').trim();
+  const r = itemKey ? library.linkAnnoToItem(id, itemKey) : library.unlinkAnno(id);
+  if (win) win.webContents.send('lib-changed');
+  return r;
+});
 
 ipcMain.handle('anno-list', () => listAllAnnotations());
 ipcMain.handle('anno-set-tags', (_e, info) => {

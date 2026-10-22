@@ -185,6 +185,24 @@ body.view-page #viewer { padding: 16px 20px; }
 /* 当前搜索命中（v22） */
 .page .hl-layer .hl.is-current { background: rgba(255, 213, 0, .75); box-shadow: 0 0 0 2px var(--accent); }
 
+/* ---------- 条目详情里的标注列表（v8 标注对象化） ---------- */
+.ld-annos { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
+.ld-anno {
+  display: flex; align-items: baseline; gap: 7px; width: 100%; text-align: left;
+  border: 1px solid var(--rule); border-radius: var(--r); background: var(--surface);
+  padding: 5px 8px; font: inherit; color: var(--text); cursor: pointer;
+}
+.ld-anno:hover { border-color: var(--accent); }
+.ld-anno-kind { font-size: 10px; color: var(--ink-3); flex: 0 0 auto; }
+.ld-anno-pg { font-size: 10px; color: var(--ink-3); flex: 0 0 auto; }
+.ld-anno-text {
+  font-family: var(--font-serif); font-size: 12px; line-height: 1.5; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 标注卡片上的「所属条目」：点一下跳到条目 */
+.anno-owner { cursor: pointer; text-decoration: underline dotted; }
+.anno-owner:hover { color: var(--accent); }
+
 /* ---------- 阅读笔记（v23） ---------- */
 .ld-notes { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .ld-note {
@@ -200,6 +218,12 @@ body.view-page #viewer { padding: 16px 20px; }
 .ld-note-text {
   font-family: var(--font-serif); font-size: 12.5px; line-height: 1.6; color: var(--text);
   background: transparent; border: none; padding: 0; outline: none; resize: vertical; min-height: 44px;
+}
+/* v8：从标注生成的笔记带页面截图 */
+.ld-note-img {
+  display: block; width: 100%; max-height: 260px; object-fit: contain;
+  border: 1px solid var(--rule); border-radius: var(--r); background: #fff;
+  margin: 2px 0 4px;
 }
 .ld-note-foot { display: flex; align-items: center; gap: 8px; }
 .ld-note-foot .ld-hint { font-size: 10.5px; }
