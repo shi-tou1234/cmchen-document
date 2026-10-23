@@ -80,12 +80,12 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 }
 ```
 
-这样会跑 54 个 Node 驱动的脚本；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
+这样会跑 58 个 Node 驱动的脚本（62 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
 
 | 类型 | 数量 | 怎么跑 |
 |---|---|---|
-| 纯 Node | 15 | `node scripts/test-library.js` 等，不需要 Electron |
-| Electron 探针 | 39 | `node scripts/test-*.js`，内部 spawn Electron，用 `PDFREADER_PROBE` 注入探针 |
+| 纯 Node | 16 | `node scripts/test-library.js` 等，不需要 Electron |
+| Electron 回归 | 43 | `node scripts/test-*.js`，多数经 `probe-runner` spawn Electron 并用 `PDFREADER_PROBE` 注入探针 |
 | 打包冒烟 | 1 | `node scripts/test-packaged.js build\Trove-1.2.0-portable.exe` |
 | 直跑 Electron | 3 | `electron.exe scripts/test-pen.js` 等，需要真实输入 / 手势 |
 
@@ -211,11 +211,13 @@ NSIS 安装包默认装到当前用户目录（`%LOCALAPPDATA%\Programs\Trove`�
 | `git push` 连不上 github.com | 先重试；仍不行用 `git -c http.sslBackend=schannel push origin main` |
 | 双击安装包一闪就退，向导都没出来 | 直接重试；并发大文件 I/O / 杀软扫描时 NSIS 从 `%TEMP%\nsXXXX.tmp` 加载插件 DLL 会失败（事件查看器里是 `System.dll` 访问冲突 `0xc0000005`）。反复失败就先退掉正在跑的旧版，或直接用 portable |
 | 安装包"静默装成功"但装回了旧目录 | electron-builder 把上次的 `InstallLocation` 记在 `HKCU\Software\<GUID>`；换目录装前先删这个键，否则静默安装会沿用旧路径 |
+| 放大后页面左半边看不见 / 水平滚不到头 | flex 容器 `align-items: center` 的超宽子项会向左右**各溢出一半**，左侧溢出滚不到。`#pages` 用 `align-items: safe center`（溢出时退回 `start`）；别改回纯 `center` |
+| 放大模式下按空格却翻页了 | `switch` 里空格原本走 `nextPage()`；放大模式要拦下来当手形工具的修饰键，别漏了 `keyup` 复位 |
 
 ## 发布清单
 
-- [ ] 15 个纯 Node 回归全过
-- [ ] 39 个 Electron 回归全过（至少 library-ui / richdoc / reader-plus / backup / datadir / single-instance / note-editor / rich-anno / undo / search）
+- [ ] 16 个纯 Node 回归全过
+- [ ] 43 个 Electron 回归全过（至少 library-ui / csl-ui / richdoc / reader-plus / backup / datadir / single-instance / note-editor / rich-anno / undo / search；另有 3 个直跑 Electron 的探针）
 - [ ] `npx electron-builder --win dir` → rcedit → portable + nsis
 - [ ] `node scripts/test-packaged.js "build\Trove-<版本>-portable.exe"` 17 项全过
 - [ ] 安装包静默安装 → 启动 → 卸载，快捷方式与安装目录清理干净

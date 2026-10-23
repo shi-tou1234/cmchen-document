@@ -6,8 +6,8 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 ┌──────────────────────────── 主进程 src/main.js ────────────────────────────┐
 │ 窗口 · IPC · 打开文档 · 备份恢复 · 数据目录 · 单实例 · 全文索引 · 格式转换  │
 │   library.js   fulltext.js   docconvert.js   settings.js   formats.js      │
-│   cite.js      bib.js        creators.js     metadata.js   pdfmeta.js      │
-│   query.js     fetchpdf.js   usermigrate.js                               │
+│   cite.js      csl.js        csl-styles.js   bib.js        creators.js     │
+│   metadata.js  pdfmeta.js    query.js        fetchpdf.js   usermigrate.js  │
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     │ preload.js / contextBridge
                                     │ window.pdfBridge.*  (invoke / send / on)
@@ -25,7 +25,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 │   index.html / styles.css                                                   │
 │                                                                             │
 │ 渲染进程与主进程共用的 UMD 模块：query.js（检索语法）· markdown.js（渲染）    │
-│                                    richtext.js（清洗）· creators.js（姓名）   │
+│   richtext.js（清洗）· creators.js（姓名）· csl.js / csl-styles.js（CSL）    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,6 +153,8 @@ PDF 每页一个 `.page` 容器，里面是 `canvas` + `.textlayer` + `.hl-layer
   合并会导致页码提前跳到下一页。
 - **单页模式不走观察器**。隐藏 / 显示的快照乱序会把刚渲染的页又 free 掉，所以单页模式由 `scrollToPage` 自己渲染 / 释放。
 - **缩放保持位置**：缩放前记下当前页顶边相对视口的位置，`applyLayout` 之后补回滚动位置。
+- **放大模式（`Z` 切换）用锚点模型**，和上面那条"保持位置"不是一回事：改缩放前记下「光标下那一点在哪一页、页内什么位置」（单位坐标），`applyLayout()` 之后把这一点挪回光标处 —— 所以连续滚滚轮时视线中心始终不跑。它按新倍数走 `applyLayout()` 真实重渲染（不 CSS 拉伸，否则字发虚）。模式下滚轮专职缩放、空格 + 左键拖动平移；退出后滚轮恢复翻页，缩放结果保留。
+- **`#pages` 必须是 `align-items: safe center`**：纯 `center` 的超宽子项向左右各溢出一半，左侧溢出滚不到（放大后页面左半边会看不见）。`safe` 在溢出时退回 `start`。
 - **不要用 CSS `transform: scale()` 放大位图**：合成层纹理 = 位图 × 倍数，超过 GPU 上限就整块不画（表现为"放大后变白"）。灯箱按显示分辨率重绘位图，CSS 只做平移。
 - **不要用 `requestAnimationFrame` 做必须执行的事**：隐藏窗口里 rAF 会降到约 1 Hz，测试环境尤其明显。用时间节流或加 `setTimeout` 兜底。
 
@@ -172,20 +174,29 @@ PDF 每页一个 `.page` 容器，里面是 `canvas` + `.textlayer` + `.hl-layer
 ```
 "deep learning"      引号短语（直引号 / 中文引号都认）
 -综述  -"书评"       排除（词中间的 foo-bar 不算排除）
+a OR b  a | b  a || b  或（OR 必须大写；小写 or 仍当普通英文词）
+(a OR b) c           括号分组 + 隐式 AND；显式 AND 也行
+-(a OR b)            整组排除
 title: author: year: tag: note: abstract: type: file: publication:
 doi: url: volume: issue: pages: language:      14 个字段限定
 ```
 
+- **语法树**：`parseQuery` 先词法分析、再递归下降生成 `ast.tree`（`term` / `and` / `or` / `not`）。旧的 `ast.text` / `ast.not` / `ast.fields` 仍然填好，排序、摘要锚点和老调用继续用；但**过滤一律走树**。
+- **三值求值 `eval3`**：字段词在正文层返回 `null`、自由词在字段层返回 `null`。这样 `(title:x OR foo)` 不会把 title 条件误当硬约束，OR 分支也不会被拉成 AND。`matchText` / `matchFields` / `evalText` 都基于它。
 - **变音折叠**：搜 `cafe` 能命中 `café`；拉丁扩展逐字符折叠（不整串 NFD，韩文等长度不变），弯引号 / 各类空格一并归一。
 - **连续 CJK 串**天然按短语整体匹配。
-- 匹配助手分工别搞混：`matchTokens`（全中）、`matchNone`（任一命中即弃，排除语义用它，**不能拿 `matchTokens` 取反**）、`matchFields` / `matchFieldsNot`（字段级过滤）。
+- 匹配助手分工别搞混：`matchTokens`（全中）、`matchNone`（任一命中即弃，排除语义用它，**不能拿 `matchTokens` 取反**）、`matchFields` / `matchFieldsNot`（字段级过滤）、`matchText` / `evalText`（正文级，字段词不参与）。
 - 只有字段限定、没有正文词时，走条目级分支（`type:item`）直接按条目字段过滤。
 
 ## 引用与参考文献表
 
 - `creators.js` 管**作者结构**：`{firstName, lastName, creatorType}` 的归一化、姓名拆分（逗号在前 / 空格在后 / 中文不拆 / 花括号=机构名）、缩写与显示名。主进程与渲染进程共用同一份。
-- `cite.js` 只格式化**单条**：5 种样式、37 类标识、citekey。姓与名分开之后，GB/T 能出 `SMITH J`、APA 能出 `Smith, J.`、IEEE 能出 `J. Smith`。
-- `bib.js` 负责**一批**：按样式决定默认排序（编号制保持传入顺序，作者-年份制按姓氏），同作者同年补 a / b，编号制重新编号，最后包成 Markdown 或纯文本。
+- `cite.js` 管**入口与 5 种内置样式**：`gbt7714 / apa / chicago / ieee / mla`，37 类标识、citekey。`format()` 先看 `csl:` 前缀，命中就交给 `csl.js`；`styleList()` 把 5 种内置与已注册的 CSL 样式合成下拉数据源（内置样式 / CSL 样式（内置）/ 导入的 CSL 样式）。
+- `csl.js` 是**自研 CSL 1.0.2 子集**（UMD，主进程与渲染进程共用）：手写 XML 解析 → 样式解析（macro / citation / bibliography / sort / locale terms / page-range-format）→ 渲染参考文献表布局。不依赖 citeproc-js，也不联网。支持 `text / group / choose / names / date / number / label`、et-al、姓名缩写与排序、页码格式、text-case、引号、affix 与标点去重；不认识的元素记进 `warnings`，不阻断导入。
+- `csl-styles.js` 是 3 份手写的内置 CSL 样式（Vancouver / Nature / Harvard–Cite Them Right），由 `cite.js` 在加载时注册；`csl:` 前缀是界面 / 存储里的唯一标识（注册表内部 key 不带前缀）。
+- `bib.js` 负责**一批**：`isNumericStyle()` 决定是否编号与默认排序；CSL 样式若带 `<sort>`，由 `cslSort()` 交给引擎，否则退回「编号制保持传入顺序 / 作者-年份制按姓氏」；同作者同年补 a / b，编号制重新编号，最后包成 Markdown 或纯文本。CSL 样式自己输出 `citation-number`，`bib.js` 不再套 `[n]`。
+- **用户样式数据流**：`main.js` 的 `csl-styles` 扫描 `<数据目录>/styles/*.csl` → 用 `Csl.parseStyle` 校验（坏文件跳过）→ preload 暴露 `lib.cslStyles()` → `library-ui.js` 启动 / 切换数据目录时调用 `Cite.registerCslStyles()` → `Csl.setUserStyles()` 先清旧用户样式再整批注册 → 重建两个下拉。导入走 `csl-import`：系统文件对话框 → 校验 → 复制到 `styles/<id>.csl` → 返回全量列表，界面直接选中新样式。
+- **删除**：`csl-remove` 按 id 删 `styles/<id>.csl`；下次启动扫描后自然消失（界面暂未放按钮，可直接删文件）。
 - citekey 由渲染层传入整库分配的 Map，避免只选部分条目时出现不同的 `-2` 后缀。
 - 保存走通用 `save-text` IPC：渲染层拼好文本，主进程只弹系统对话框 + 原子写，不再读一遍库。
 
@@ -222,6 +233,11 @@ doi: url: volume: issue: pages: language:      14 个字段限定
 - **下载稳健性**：只走 http/https；重定向最多 5 次；超时 40s；单文件上限 80MB；先写 `.part` 再改名（失败不留半截文件）；**校验前 5 字节必须是 `%PDF-`**——网页冒充 PDF、付费墙登录页都会被挡住。
 - **网络错误走返回值不抛出**，失败时返回每个来源的尝试记录（`tried`）便于排查。
 - 落到 `<数据目录>/attachments/<条目 key>.pdf`，成功后 `setAttachment` 挂到条目。
+- **批量抓取**（`lib-fetch-pdf-batch`）：按选中的 key 依次跑 `fetchToFile`，每处理完一条 `send('lib-fetch-pdf-progress')` 回传 `{done,total,fetched,failed,skipped}`；回收站 / 已有附件（不覆盖）/ 没有来源的条目只计数不下载；`lib-fetch-pdf-batch-cancel` 置模块级标志，当前这条结束后停。
+- **网页快照**（`lib-snapshot`）：隐藏 `BrowserWindow`（独立内存分区、`sandbox`、拒绝权限请求与 `window.open`）打开条目 URL，再用 DevTools 协议 `Page.captureSnapshot` 存**单文件 MHTML**，`capturePage()` 另存首屏 PNG。
+  - Electron 31 的 `webContents.savePage` 在隐藏窗口里三种格式都会静默返回 false，**不要用它**；失败再退回 `document.documentElement.outerHTML`。
+  - 文件落在 `<数据目录>/snapshots/<key>.mhtml` + `.png`，索引里只存引用（`snapshot` 字段走 `library.setSnapshot`，不在 `updateItem` 白名单里）。
+  - 条目永久删除 / 清空回收站时清掉快照文件；用户的 PDF 仍然一个不动。
 
 ## 标签页、会话与单实例
 
