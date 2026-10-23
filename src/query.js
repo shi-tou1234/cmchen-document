@@ -1,6 +1,6 @@
 'use strict';
 /*
- * 统一检索语法解析（对标 Zotero 10 检索补强，2026-10-22 报告优先级第 1 项）。
+ * 统一检索语法解析（对标 Zotero 10 检索补强 + 2026-10-22 报告遗留项）。
  *
  * 语法：
  *   机器学习            普通词；连续 CJK 串天然按短语整体匹配（不再有子串误命中的歧义）
@@ -8,6 +8,9 @@
  *   -综述  -"书评"      排除（减号开头；-紧跟词或引号才算，词中间的 foo-bar 不算）
  *   title:xxx           字段限定；value 可以是裸词或引号短语
  *   author: 相当于 creator:；file: 相当于 attachment:
+ *   a OR b  a | b       「或」；OR 要大写，避免把英文单词 or 当运算符
+ *   (a OR b) c          括号分组 + 隐式 AND
+ *   -(a OR b)           整组排除
  *
  * 全部匹配都走 fold()：小写 + 拉丁变音折叠（cafe 命中 café）+ 弯引号折叠 + 空白归一。
  * UMD 风格，主进程（fulltext / main）与渲染进程（library-ui）共用一份实现：
@@ -64,32 +67,30 @@ const FIELD_ALIASES = {
 
 const CLOSE_QUOTE = { '"': '"', '\u201c': '\u201d', '\u2018': '\u2019' };
 
-// token: { t: 折叠后的文本, phrase: 是否短语匹配, cjk: 是否含 CJK }
-function parseQuery(input) {
-  const ast = { raw: String(input == null ? '' : input).trim(), text: [], not: [], fields: {} };
-  const s = ast.raw;
+// ---------- 词法 ----------
+// token 形态：{k:'('} / {k:')'} / {k:'OR'} / {k:'NOT'} / {k:'TERM', tok:{t,phrase,cjk,field}}
+function makeTerm(raw, phrase, field) {
+  const t = fold(raw);
+  if (!t) return null;
+  return { t, phrase: !!phrase || hasCJK(raw), cjk: hasCJK(raw), field: field || null };
+}
+
+function tokenize(s) {
+  const out = [];
   let i = 0;
-  const emit = (raw, phrase, field, negate) => {
-    const t = fold(raw);
-    if (!t) return;
-    const tok = { t, phrase: !!phrase || hasCJK(raw), cjk: hasCJK(raw) };
-    if (field) {
-      if (!ast.fields[field]) ast.fields[field] = [];
-      ast.fields[field].push(tok);
-    } else {
-      (negate ? ast.not : ast.text).push(tok);
-    }
-  };
   while (i < s.length) {
     const ch = s[i];
     if (/\s/.test(ch)) { i++; continue; }
-    // 排除前缀：- 必须紧跟内容（词或引号），且在 token 边界上
-    let negate = false;
-    if (ch === '-' && i + 1 < s.length && s[i + 1] !== ' ') {
-      negate = true;
+    if (ch === '(' || ch === ')') { out.push({ k: ch }); i++; continue; }
+    // OR 运算符：|| / | / 大写 OR（小写 or 仍当普通词，英文摘要里太常见）
+    if (ch === '|') { i += s[i + 1] === '|' ? 2 : 1; out.push({ k: 'OR' }); continue; }
+    // 排除前缀：- 必须紧跟内容（词 / 引号 / 括号），词中间的 foo-bar 不算
+    if (ch === '-' && i + 1 < s.length && !/\s/.test(s[i + 1])) {
+      out.push({ k: 'NOT' });
       i++;
+      continue;
     }
-    // 字段前缀 field:
+    // 字段前缀 field:（只认已知别名，未知的当普通词，保持老行为）
     let field = null;
     const fm = /^[A-Za-z_]+:/.exec(s.slice(i, i + 24));
     if (fm) {
@@ -102,21 +103,162 @@ function parseQuery(input) {
       const end = s.indexOf(CLOSE_QUOTE[q], i + 1);
       const raw = end < 0 ? s.slice(i + 1) : s.slice(i + 1, end);
       i = end < 0 ? s.length : end + 1;
-      emit(raw, true, field, negate);
+      const tok = makeTerm(raw, true, field);
+      if (tok) out.push({ k: 'TERM', tok });
       continue;
     }
-    // 裸词：读到下一个空白
+    // 裸词：读到空白或括号
     let j = i;
-    while (j < s.length && !/\s/.test(s[j])) j++;
+    while (j < s.length && !/[\s()]/.test(s[j])) j++;
     const raw = s.slice(i, j);
     i = j;
-    if (field && !raw) continue;          // field: 后面没跟内容
-    if (!field && raw === '-') continue;  // 孤立的减号
-    emit(raw, false, field, negate);
+    if (!raw) continue;
+    if (!field && raw === 'OR') { out.push({ k: 'OR' }); continue; }
+    if (!field && raw === 'AND') { out.push({ k: 'AND' }); continue; }
+    if (!field && raw === '-') continue;   // 孤立减号
+    const tok = makeTerm(raw, false, field);
+    if (tok) out.push({ k: 'TERM', tok });
   }
+  return out;
+}
+
+// ---------- 语法 ----------
+// expr := and (OR and)*
+// and  := unary+            （隐式 AND；遇到 OR / ) / 结束就停）
+// unary:= NOT unary | '(' expr ')' | TERM
+function parseTree(tokens) {
+  let pos = 0;
+  const peek = () => tokens[pos];
+
+  function parseOr() {
+    const parts = [parseAnd()];
+    while (peek() && peek().k === 'OR') { pos++; parts.push(parseAnd()); }
+    // 去掉落单的 OR 产生的空分支（`a OR` / `OR b` 应该按 `a` / `b` 处理，而不是恒真）
+    const real = parts.filter((p) => p && p.type !== 'true');
+    if (!real.length) return { type: 'true' };
+    return real.length === 1 ? real[0] : { type: 'or', children: real };
+  }
+  function parseAnd() {
+    const parts = [];
+    while (peek() && peek().k !== 'OR' && peek().k !== ')') {
+      if (peek().k === 'AND') { pos++; continue; }   // 显式 AND 只是分隔符，AND 本来就是默认
+      const before = pos;
+      parts.push(parseUnary());
+      if (pos === before) pos++;   // 兜底：绝不原地打转
+    }
+    if (!parts.length) return { type: 'true' };
+    return parts.length === 1 ? parts[0] : { type: 'and', children: parts };
+  }
+  function parseUnary() {
+    const t = peek();
+    if (!t) return { type: 'true' };
+    if (t.k === 'NOT') { pos++; return { type: 'not', child: parseUnary() }; }
+    if (t.k === '(') {
+      pos++;
+      const n = parseOr();
+      if (peek() && peek().k === ')') pos++;
+      return n;
+    }
+    if (t.k === 'TERM') { pos++; return { type: 'term', tok: t.tok }; }
+    pos++;                       // 落单的 ')' 之类，忽略
+    return { type: 'true' };
+  }
+
+  return parseOr();
+}
+
+function parseQuery(input) {
+  const raw = String(input == null ? '' : input).trim();
+  const tree = parseTree(tokenize(raw));
+  const ast = {
+    raw, tree,
+    text: [],       // 自由词（非字段），排序 / 摘要锚点用
+    not: [],        // 被排除的自由词（兼容老接口 matchFieldsNot）
+    fields: {},     // 纯 AND 上下文的字段条件（兼容老接口）
+    freeTokens: [], // 树里全部自由词（含 OR 分支）
+    fieldTokens: [],// 树里全部字段词（含 OR 分支）
+    hasOr: false,
+    hasParens: /[()]/.test(raw),
+  };
+
+  (function collect(n, negated, underOr) {
+    if (!n) return;
+    if (n.type === 'term') {
+      const tok = n.tok;
+      if (tok.field) {
+        ast.fieldTokens.push(tok);
+        // 只有「顶层 AND 里的字段条件」才进 fields：OR 分支整体求值，不能当成硬性约束
+        if (!negated && !underOr) {
+          if (!ast.fields[tok.field]) ast.fields[tok.field] = [];
+          ast.fields[tok.field].push(tok);
+        }
+      } else {
+        ast.freeTokens.push(tok);
+        if (negated) {
+          if (!ast.not.some((x) => x.t === tok.t)) ast.not.push(tok);
+        } else {
+          ast.text.push(tok);
+        }
+      }
+      return;
+    }
+    if (n.type === 'or') ast.hasOr = true;
+    if (n.type === 'not') { collect(n.child, !negated, underOr); return; }
+    for (const c of n.children || []) collect(c, negated, underOr || n.type === 'or');
+  })(tree, false, false);
+
   return ast;
 }
 
+// ---------- 求值 ----------
+// 布尔求值：test(tok) → true / false
+function evalNode(node, test) {
+  if (!node) return true;
+  switch (node.type) {
+    case 'term': return !!test(node.tok);
+    case 'not': return !evalNode(node.child, test);
+    case 'and': return node.children.every((c) => evalNode(c, test));
+    case 'or': return node.children.some((c) => evalNode(c, test));
+    default: return true;
+  }
+}
+
+// 三值求值：true / false / null（null = 这一段交给别的层判断）
+// 用来做「只过滤字段」和「只过滤正文」两种局部匹配。
+function eval3(node, test) {
+  if (!node) return true;
+  switch (node.type) {
+    case 'term': {
+      const v = test(node.tok);
+      return v === undefined ? true : v;
+    }
+    case 'not': {
+      const v = eval3(node.child, test);
+      return v === null ? null : !v;
+    }
+    case 'and': {
+      let sawNull = false;
+      for (const c of node.children) {
+        const v = eval3(c, test);
+        if (v === false) return false;
+        if (v === null) sawNull = true;
+      }
+      return sawNull ? null : true;
+    }
+    case 'or': {
+      let sawNull = false;
+      for (const c of node.children) {
+        const v = eval3(c, test);
+        if (v === true) return true;
+        if (v === null) sawNull = true;
+      }
+      return sawNull ? null : false;
+    }
+    default: return true;
+  }
+}
+
+// ---------- 基础匹配 ----------
 // tokens 全部命中（hay 必须已 fold）
 function matchTokens(hay, tokens) {
   if (!tokens || !tokens.length) return true;
@@ -168,6 +310,42 @@ function firstHit(hay, tokens) {
   return best;
 }
 
+// 正文 / 摘录 / 批注 / 笔记这些纯文本的匹配：字段条件视为「不归我管」（null）
+function matchText(hay, ast) {
+  if (!ast || !ast.tree) return matchTokens(hay, ast && ast.text);
+  return eval3(ast.tree, (tok) => (tok.field ? null : hay.indexOf(tok.t) >= 0)) !== false;
+}
+
+// 全文检索用：返回 { ok, hits: Map<token, 次数> }，命中次数拿去算相关性
+function evalText(hay, ast) {
+  const hits = new Map();
+  if (!ast || !ast.tree) {
+    const toks = (ast && ast.text) || [];
+    for (const tok of toks) {
+      const n = countToken(hay, tok.t);
+      if (!n) return { ok: false, hits };
+      hits.set(tok, n);
+    }
+    return { ok: true, hits };
+  }
+  // 否定分支里的词只参与判定，不算命中：否则 `(a -b) OR c` 会把 b 也记进评分/摘要锚点
+  const negated = new Set();
+  (function walk(n, neg) {
+    if (!n) return;
+    if (n.type === 'term') { if (neg) negated.add(n.tok.t); return; }
+    if (n.type === 'not') { walk(n.child, !neg); return; }
+    for (const c of n.children || []) walk(c, neg);
+  })(ast.tree, false);
+
+  const ok = eval3(ast.tree, (tok) => {
+    if (tok.field) return null;
+    const n = countToken(hay, tok.t);
+    if (n && !negated.has(tok.t)) hits.set(tok, n);
+    return n > 0;
+  }) !== false;
+  return { ok, hits };
+}
+
 // creators 兼容两种形态：结构化 [{firstName, lastName, creatorType}] / 旧数据字符串数组
 function creatorsText(creators) {
   if (!Array.isArray(creators)) return '';
@@ -199,14 +377,25 @@ function fieldValues(it, field) {
   }
 }
 
-// 只做字段限定匹配（字段条件全中；text/not 不参与）——合并检索结果过滤用
+// 只做字段限定匹配（字段条件全中；自由词不参与）——合并检索结果过滤用
+// 自由词在 OR 里可能让整组为真，这时返回 null（不拦截），由正文命中决定。
 function matchFields(it, ast) {
-  const fields = (ast && ast.fields) || {};
-  for (const name of Object.keys(fields)) {
-    const vals = fieldValues(it, name).map(fold).join(' \n ');
-    if (!matchTokens(vals, fields[name])) return false;
+  if (!ast) return true;
+  if (!ast.tree) {
+    const fields = (ast.fields) || {};
+    for (const name of Object.keys(fields)) {
+      const vals = fieldValues(it, name).map(fold).join(' \n ');
+      if (!matchTokens(vals, fields[name])) return false;
+    }
+    return true;
   }
-  return true;
+  const cache = {};
+  const v = eval3(ast.tree, (tok) => {
+    if (!tok.field) return null;
+    if (!(tok.field in cache)) cache[tok.field] = fieldValues(it, tok.field).map(fold).join(' \n ');
+    return cache[tok.field].indexOf(tok.t) >= 0;
+  });
+  return v !== false;
 }
 
 // 条目全部可搜索文本（fold 过）：库内筛选的 must / not 都作用在这上面
@@ -225,25 +414,49 @@ function itemHaystack(it) {
 
 // 字段限定 + 排除（不含正文 must）——合并检索结果按条目过滤用
 function matchFieldsNot(it, ast) {
-  if (!matchFields(it, ast)) return false;
-  return matchNone(itemHaystack(it), ast.not);
+  if (!ast) return true;
+  // 没有 OR 时保持老语义：字段全中 + 排除词在整个条目里都不出现
+  if (!ast.hasOr) {
+    if (!matchFields(it, ast)) return false;
+    return matchNone(itemHaystack(it), ast.not);
+  }
+  // 有 OR 时按整棵树在条目层求值：字段条件照常，「自由词在条目里没出现」记 null
+  // （归正文层判断），否则 OR 分支里的否定词会把本该保留的结果误杀。
+  const hay = itemHaystack(it);
+  const cache = {};
+  const v = eval3(ast.tree, (tok) => {
+    if (!tok.field) return hay.indexOf(tok.t) >= 0 ? true : null;
+    if (!(tok.field in cache)) cache[tok.field] = fieldValues(it, tok.field).map(fold).join(' \n ');
+    return cache[tok.field].indexOf(tok.t) >= 0;
+  });
+  return v !== false;
 }
 
-// 库内条目匹配：字段限定（全中）+ 文本 must（全中）+ not（全不中）
+// 库内条目匹配：按语法树求值（字段词查对应字段，自由词查整条 haystack）
 function matchLibraryItem(it, ast) {
   if (!ast) return true;
-  if (!matchFields(it, ast)) return false;
-  const hay = itemHaystack(it);
-  if (!matchTokens(hay, ast.text)) return false;
-  for (const tok of ast.not) {
-    if (hay.indexOf(tok.t) >= 0) return false;
+  if (!ast.tree) {
+    if (!matchFields(it, ast)) return false;
+    const hay0 = itemHaystack(it);
+    if (!matchTokens(hay0, ast.text)) return false;
+    for (const tok of ast.not) {
+      if (hay0.indexOf(tok.t) >= 0) return false;
+    }
+    return true;
   }
-  return true;
+  const hay = itemHaystack(it);
+  const cache = {};
+  return evalNode(ast.tree, (tok) => {
+    if (!tok.field) return hay.indexOf(tok.t) >= 0;
+    if (!(tok.field in cache)) cache[tok.field] = fieldValues(it, tok.field).map(fold).join(' \n ');
+    return cache[tok.field].indexOf(tok.t) >= 0;
+  });
 }
 
 return {
   fold, hasCJK, parseQuery,
   matchTokens, matchNone, anyToken, countToken, firstHit,
+  matchText, evalText, evalNode, eval3,
   creatorsText, fieldValues, matchFields, matchFieldsNot, itemHaystack, matchLibraryItem,
   CJK_RE,
 };

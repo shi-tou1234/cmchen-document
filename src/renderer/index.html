@@ -233,6 +233,7 @@
         <button id="lib-bulk-edit" class="tbtn">批量编辑</button>
         <button id="lib-bulk-bib" class="tbtn">参考文献表</button>
         <button id="lib-bulk-rename" class="tbtn" title="按「作者 - 年份 - 标题」重命名选中的附件文件">重命名文件</button>
+        <button id="lib-bulk-fetch" class="tbtn" title="给选中的条目批量抓取开放获取 PDF（arXiv / Unpaywall / 直链）">抓 PDF</button>
         <button id="lib-bulk-trash" class="tbtn danger">移入回收站</button>
         <span id="lib-anno-tools" hidden>
           <input id="lib-anno-tag-input" type="text" placeholder="给选中的标注加标签" />
@@ -286,6 +287,8 @@
         <div id="ld-fetch-row" class="ld-fetch-row">
           <button id="ld-fetch" class="ld-mini">从 DOI / arXiv 抓取元数据</button>
           <button id="ld-fetch-pdf" class="ld-mini" title="按 arXiv / Unpaywall / doi.org 依次尝试下载开放获取的 PDF 全文">抓 PDF 全文</button>
+          <button id="ld-snapshot" class="ld-mini" title="把条目网址保存成本地网页快照，原链接失效后还能回看">网页快照</button>
+          <button id="ld-snapshot-open" class="ld-mini" hidden>打开快照</button>
           <span id="ld-fetch-status" class="ld-hint"></span>
         </div>
         <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
@@ -614,6 +617,7 @@
         <div class="bib-head">
           <span id="bib-count" class="ld-hint"></span>
           <span class="grow"></span>
+          <button id="bib-csl-import" class="ld-mini" title="导入 Zotero / CSL 样式库的 .csl 文件">导入 CSL…</button>
           <button id="bib-copy" class="ld-mini">复制</button>
           <button id="bib-save" class="ld-mini">保存为文件…</button>
         </div>
@@ -621,7 +625,7 @@
         <div id="bib-status" class="set-status"></div>
       </div>
       <footer class="modal-foot">
-        <span class="ld-hint">编号制自动编号；作者-年份制按姓氏排序，同年自动补 a/b。</span>
+        <span class="ld-hint">编号制自动编号；作者-年份制按姓氏排序，同年自动补 a/b。CSL 样式可导入 .csl 文件。</span>
         <span class="grow"></span>
         <button id="bib-close2" class="ld-btn">关闭</button>
       </footer>
@@ -676,6 +680,8 @@
   <script src="../query.js"></script>
   <script src="../markdown.js"></script>
   <script src="../richtext.js"></script>
+  <script src="../csl.js"></script>
+  <script src="../csl-styles.js"></script>
   <script src="../cite.js"></script>
   <script src="../bib.js"></script>
   <script src="pdfimages.js"></script>

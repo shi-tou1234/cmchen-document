@@ -25,12 +25,21 @@
   if (!Cite) throw new Error('bib.js 依赖 cite.js');
 
   const NUMERIC_STYLES = new Set(['gbt7714', 'ieee']);
-  const STYLE_IDS = new Set((Cite.STYLES || []).map((s) => s.id));
   const str = (v) => String(v == null ? '' : v).trim();
+
+  // 样式列表里有 CSL 用户样式（渲染进程启动后才注册），所以不能在建模块时拍死一份 id 集合。
+  function isKnownStyle(id) {
+    const s = str(id);
+    if (!s) return false;
+    if (typeof Cite.isCslStyle === 'function' && Cite.isCslStyle(s)) return true;
+    if ((Cite.STYLES || []).some((x) => x.id === s)) return true;
+    const list = typeof Cite.styleList === 'function' ? Cite.styleList() : [];
+    return list.some((x) => x.id === s);
+  }
 
   function normalizeStyle(style) {
     const s = str(style);
-    return STYLE_IDS.has(s) ? s : 'gbt7714';
+    return isKnownStyle(s) ? s : 'gbt7714';
   }
 
   let collator = null;
@@ -57,7 +66,9 @@
   }
 
   function isNumeric(style) {
-    return NUMERIC_STYLES.has(normalizeStyle(style));
+    const s = normalizeStyle(style);
+    if (typeof Cite.isNumericStyle === 'function') return Cite.isNumericStyle(s);
+    return NUMERIC_STYLES.has(s);
   }
 
   function defaultOrder(style) {
@@ -96,10 +107,16 @@
     return out;
   }
 
-  function sortItems(items, style, order) {
+  function sortItems(items, style, order, auto) {
     const list = (Array.isArray(items) ? items : []).slice();
     const mode = (order === 'entry' || order === 'author') ? order : defaultOrder(style);
     if (mode === 'entry') return list;
+    // CSL 样式自带 <sort> 时优先按它排；用户显式选了「当前条目顺序」时上面已经返回，
+    // 显式选「作者字母序」也尊重用户，不再让样式的 sort 覆盖。
+    if (auto && typeof Cite.cslSort === 'function') {
+      const cslSorted = Cite.cslSort(style, list);
+      if (cslSorted) return cslSorted;
+    }
     list.sort((a, b) => {
       const byAuthor = cmpText(authorSortKey(a), authorSortKey(b));
       if (byAuthor) return byAuthor;
@@ -163,6 +180,7 @@
     const style = normalizeStyle(o.style);
     const numeric = isNumeric(style);
     const order = (o.order === 'entry' || o.order === 'author') ? o.order : defaultOrder(style);
+    const autoOrder = o.order !== 'entry' && o.order !== 'author';
     const markdown = !!o.markdown;
 
     let skipped = 0;
@@ -170,14 +188,17 @@
       if (!str(it.title) || (Number(it.deletedAt) || 0) > 0) { skipped++; return false; }
       return true;
     });
-    list = sortItems(list, style, order);
+    list = sortItems(list, style, order, autoOrder);
     if (!numeric) list = withYearSuffixes(list, style);
 
     const keys = (o.citekeys instanceof Map) ? o.citekeys : Cite.citekeys(list);
     const entries = list.map((it, i) => {
       const n = i + 1;
       let body = Cite.format(it, style, n);
-      if (numeric && style !== 'ieee') body = '[' + n + '] ' + body;
+      // CSL 样式自己决定编号怎么写（citation-number），别再套一层 [n]
+      if (numeric && style !== 'ieee' && !(typeof Cite.isCslStyle === 'function' && Cite.isCslStyle(style))) {
+        body = '[' + n + '] ' + body;
+      }
       if (o.includeKeys) {
         const key = keys.get(it.key) || Cite.citekey(it);
         if (key) body += markdown ? ' `[@' + key + ']`' : '  [@' + key + ']';

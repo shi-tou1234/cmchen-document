@@ -128,12 +128,27 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     fetchMetadata: (identifier) => ipcRenderer.invoke('lib-fetch-metadata', { identifier }),
     // v9：抓 PDF 全文
     fetchPdf: (key, url) => ipcRenderer.invoke('lib-fetch-pdf', { key, url }),
+    // v31：批量抓取 + 进度订阅 + 网页快照
+    fetchPdfBatch: (keys, opts) => ipcRenderer.invoke('lib-fetch-pdf-batch',
+      Object.assign({ keys: Array.isArray(keys) ? keys : [] }, opts || {})),
+    cancelFetchPdfBatch: () => ipcRenderer.invoke('lib-fetch-pdf-batch-cancel'),
+    onFetchPdfProgress: (cb) => {
+      const h = (_e, payload) => { try { cb(payload); } catch (_) {} };
+      ipcRenderer.on('lib-fetch-pdf-progress', h);
+      return () => ipcRenderer.removeListener('lib-fetch-pdf-progress', h);
+    },
+    snapshotPage: (key, url) => ipcRenderer.invoke('lib-snapshot', { key, url }),
+    openSnapshot: (key) => ipcRenderer.invoke('lib-open-snapshot', { key }),
     // 同时兼容 importRefs(text, name) 与 importRefs({ text, name })；
     // 无参调用表示“弹系统文件对话框”，由主进程判断。
     importRefs: (text, name) => ipcRenderer.invoke('lib-import-refs',
       (text && typeof text === 'object') ? text : { text, name }),
     exportRefs: (outPath) => ipcRenderer.invoke('lib-export-refs',
       (outPath && typeof outPath === 'object') ? outPath : { outPath }),
+    // v32：CSL 样式（<数据目录>/styles/*.csl）
+    cslStyles: () => ipcRenderer.invoke('csl-styles'),
+    cslImport: () => ipcRenderer.invoke('csl-import'),
+    cslRemove: (id) => ipcRenderer.invoke('csl-remove', { id }),
     duplicates: () => ipcRenderer.invoke('lib-duplicates'),
     mergeItems: (keepKey, otherKeys) => ipcRenderer.invoke('lib-merge-items', { keepKey, otherKeys }),
     bulkUpdate: (keys, patch) => ipcRenderer.invoke('lib-bulk-update', { keys, patch }),

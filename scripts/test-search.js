@@ -80,6 +80,53 @@ function check(name, ok, detail) {
     && Q.matchNone('clean text', [{ t: 'methods', phrase: false }]) === true);
 }
 
+// ---------- A2b. OR / 括号 / 显式 AND（2026-10-22 报告遗留项） ----------
+{
+  const it = {
+    title: 'Deep Learning for NLP', itemType: 'journalArticle',
+    creators: [{ firstName: 'John', lastName: 'Smith', creatorType: 'author' }],
+    year: 2024, publication: 'Nature Machine Intelligence', tags: ['方法', 'survey'],
+    abstract: 'We study café models and machine translation.',
+    notes: [{ id: 'n1', title: '读后感', text: '值得复读的深度学习综述' }],
+    attachment: { path: 'C:/x/dl.pdf', name: 'dl-nlp-2024.pdf' },
+  };
+  const m = (q) => Q.matchLibraryItem(it, Q.parseQuery(q));
+
+  check('OR 命中任一分支', m('image OR learning') === true);
+  check('OR 两个分支都不中则 false', m('image OR quantum') === false);
+  check('括号分组 + 隐式 AND', m('(machine OR quantum) learning') === true);
+  check('括号分组不中', m('(quantum OR chemistry) learning') === false);
+  check('整组排除', m('learning -(quantum OR chemistry)') === true);
+  check('整组排除命中则 false', m('learning -(machine OR chemistry)') === false);
+  check('|| 也是 OR', m('quantum || learning') === true);
+  check('| 也是 OR', m('quantum | learning') === true);
+  check('显式 AND 与大写 OR 混用', m('(machine AND learning) OR quantum') === true);
+  check('小写 or 仍当普通词', m('learning or quantum') === false);
+  check('OR 与字段限定', m('title:deep OR title:quantum') === true);
+  check('OR 与字段限定都不中', m('title:quantum OR title:chemistry') === false);
+  check('嵌套括号', m('(learning OR (quantum AND x))') === true);
+  check('嵌套括号不中', m('(quantum AND x) OR chemistry') === false);
+
+  const ast = Q.parseQuery('(title:deep OR title:quantum) learning');
+  check('OR 分支里的字段条件不进 fields（不当硬约束）', Object.keys(ast.fields).length === 0, ast.fields);
+  check('hasOr 标记', ast.hasOr === true && Q.parseQuery('a b').hasOr === false);
+  check('落单括号不炸', Q.parseQuery('((a OR b)').text.length === 2);
+  check('空括号不炸', Q.parseQuery('()').text.length === 0);
+  check('落单 OR 不改变语义（a OR）', m('machine OR') === true && m('quantum OR') === false);
+  check('落单 OR 不改变语义（OR b）', m('OR machine') === true && m('OR quantum') === false);
+
+  check('matchText 支持 OR', Q.matchText(Q.fold('survey on deep learning'), Q.parseQuery('survey OR quantum')) === true);
+  check('matchText 支持整组排除', Q.matchText(Q.fold('deep learning'), Q.parseQuery('learning -(quantum OR chemistry)')) === true);
+  check('matchText 排除命中则 false', Q.matchText(Q.fold('deep learning methods'), Q.parseQuery('learning -methods')) === false);
+  check('matchFields 只看字段部分', Q.matchFields(it, Q.parseQuery('title:deep OR title:quantum')) === true
+    && Q.matchFields(it, Q.parseQuery('title:quantum OR title:chemistry')) === false);
+  check('无 OR 时排除词仍过滤条目', Q.matchFieldsNot(it, Q.parseQuery('deep -learning')) === false);
+  check('有 OR 时排除词不误杀分支', Q.matchFieldsNot(it, Q.parseQuery('(quantum -learning) OR deep')) === true);
+  const et = Q.evalText(Q.fold('alpha beta gamma'), Q.parseQuery('(beta -gamma) OR alpha'));
+  check('否定分支的词不进命中集合', et.ok === true && !Array.from(et.hits.keys()).some((t) => t.t === 'gamma'),
+    Array.from(et.hits.keys()).map((t) => t.t));
+}
+
 // ---------- A3. fulltext.search 评分排序（真实索引文件） ----------
 {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'trove-search-'));
@@ -127,6 +174,20 @@ function check(name, ok, detail) {
 
   const r5 = fulltext.search('title:whatever');
   check('只有字段限定时全文索引返回空（条目级在 main 层过滤）', r5.results.length === 0, r5.results.length);
+
+  // OR：只命中一个分支的页也要出来，评分只按实际命中的词算
+  const r6 = fulltext.search('learning OR methods');
+  check('全文 OR 命中并集', r6.results.length === 3, r6.results.length);
+  const r7 = fulltext.search('(deep OR quantum) learning');
+  check('全文括号分组', r7.results.length === 3, r7.results.length);
+  const pOr = mk('g-or.pdf', null);
+  write(pOr, ['quantum computing only']);
+  const r8 = fulltext.search('learning OR quantum');
+  check('OR 分支二单独命中', r8.results.some((r) => r.path === pOr), r8.results.map((r) => r.path));
+  const r9 = fulltext.search('learning | quantum');
+  check('| 在全文检索里也生效', r9.results.some((r) => r.path === pOr), r9.results.map((r) => r.path));
+  const r10 = fulltext.search('(methods OR quantum) learning');
+  check('全文括号组只保留同时满足的分支', r10.results.length === 1 && r10.results[0].page === 2, r10.results.map((r) => r.page + ':' + r.path));
 
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
 }

@@ -285,7 +285,10 @@ module.exports = `(async () => {
     $('#lib-bib').click();
     await waitFor(() => !document.getElementById('bib-modal').hidden, 3000);
     push('参考文献弹层打开', !document.getElementById('bib-modal').hidden);
-    push('样式下拉有 5 种', $$('#bib-style option').length === 5, 'options=' + $$('#bib-style option').length);
+    const styleCount = $$('#bib-style option').length;
+    push('样式下拉含 5 种内置 + 3 种 CSL', styleCount === 8, 'options=' + styleCount);
+    push('样式下拉按来源分组', $$('#bib-style optgroup').length >= 2, 'groups=' + $$('#bib-style optgroup').length);
+    push('有导入 CSL 入口', !!document.getElementById('bib-csl-import'));
     const bibText = $('#bib-preview').value;
     push('默认按当前列表生成两条（GB/T）', bibText.indexOf('## 参考文献') === 0 && bibText.indexOf('[1] ') > 0 &&
       bibText.indexOf('Beta') > 0 && bibText.indexOf('Alpha') > 0, bibText.slice(0, 120));

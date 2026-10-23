@@ -27,9 +27,12 @@ module.exports = `(async () => {
 
   // ---------- 2. 引用样式扩充 ----------
   const styleSel = $('#ld-cite-style');
-  push('引用样式有 5 种', !!styleSel && styleSel.options.length === 5, styleSel ? String(styleSel.options.length) : 'null');
+  push('引用样式有 8 种（5 内置 + 3 CSL）', !!styleSel && styleSel.options.length === 8, styleSel ? String(styleSel.options.length) : 'null');
   const expect = {
     gbt7714: '[J]', apa: '(2017)', chicago: '2017.', ieee: '[1]', mla: '"',
+    'csl:vancouver': 'Vaswani A, Shazeer N.',
+    'csl:nature': '(2017)',
+    'csl:harvard-cite-them-right': 'Vaswani, A. and Shazeer, N.',
   };
   // 打开条目的详情面板（引用预览在这里）
   const opened = await (async () => {

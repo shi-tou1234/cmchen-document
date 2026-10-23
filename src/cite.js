@@ -1,12 +1,14 @@
 'use strict';
 /*
  * 引用格式化：把文献库条目排成能直接粘进论文的引用串。
- * 支持 5 种样式：gbt7714 / apa / chicago / ieee / mla。
+ * 支持 5 种内置样式（gbt7714 / apa / chicago / ieee / mla），以及 csl.js
+ * 的 CSL 子集样式（`csl:` 前缀，含 3 份内置 CSL 与用户导入的 .csl）。
  *
  * 已知边界（写在这里以免被当成完整 CSL 实现）：
  *   - 作者结构化（v6）后能做姓 / 名 / 角色拆分，APA 能出 "Smith, J."、
- *     GB/T 能出 "SMITH J"；但没有引文数据库：页码定位符、语言本地化、
- *     样式自定义都做不了，要完整 CSL 能力得引 citeproc-js + 样式库。
+ *     GB/T 能出 "SMITH J"。
+ *   - CSL 只渲染参考文献表布局，没有文内引注的定位符 / 同上 / 消歧；
+ *     完整 CSL 能力仍需 citeproc-js + 官方样式库。
  *   - 后缀（Jr. / III）没有单独字段，会并进名字里。
  *   - 出版地、机构、出版日期这些字段本项目的数据模型里没有，只能省略。
  *
@@ -16,10 +18,12 @@
  */
 (function (root, factory) {
   const Creators = (root && root.Creators) || (typeof require === 'function' ? require('./creators.js') : null);
-  const api = factory(Creators);
+  const Csl = (root && root.Csl) || (typeof require === 'function' ? require('./csl.js') : null);
+  const CslStyles = (root && root.CslStyles) || (typeof require === 'function' ? require('./csl-styles.js') : null);
+  const api = factory(Creators, Csl, CslStyles);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.Cite = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Creators) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Creators, Csl, CslStyles) {
   // GB/T 7714-2015 的文献类型标识码。
   // v27：补齐文献库 v5 的 37 类条目，避免新类型全被排成 [Z]。
   const TYPE_CODE = {
@@ -109,6 +113,12 @@
     { id: 'ieee', label: 'IEEE' },
     { id: 'mla', label: 'MLA 9' },
   ];
+
+  // v32：CSL 子集引擎。内置三份手写样式在这里注册一次，渲染层引入 csl.js /
+  // csl-styles.js 后即可直接用；用户导入的样式由主进程扫描后调用 registerCslStyles。
+  if (Csl && CslStyles) {
+    try { Csl.registerMany(CslStyles.styles); } catch (_) { /* 单份坏样式不应拖垮引用功能 */ }
+  }
 
   const str = (v) => String(v == null ? '' : v).trim();
   const CJK = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
@@ -532,10 +542,13 @@
     return k ? '[@' + k + ']' : '';
   }
 
-  // 统一入口：style 走对应样式，其它一律按 GB/T 处理。
-  // num 只影响 IEEE 的序号；单条引用不传时保持 [1]。
+  // 统一入口：先看是不是 CSL 样式（csl: 前缀），否则走 5 种内置样式。
+  // num 只影响编号制样式（IEEE 的 [n]、CSL 的 citation-number）。
   function format(it, style, num) {
     if (!it) return '';
+    if (Csl && Csl.isCslStyle(style)) {
+      return Csl.render(style, it, { number: num, citekey: citekey(it) });
+    }
     if (style === 'apa') return apa(it);
     if (style === 'chicago') return chicago(it);
     if (style === 'ieee') return ieee(it, num);
@@ -543,9 +556,61 @@
     return gbt(it);
   }
 
+  // 样式下拉的数据源：5 种内置 + 已注册的 CSL 样式（含用户导入）。
+  function styleList() {
+    const out = STYLES.map((s) => ({
+      id: s.id, label: s.label, group: '内置样式',
+      numeric: s.id === 'gbt7714' || s.id === 'ieee', kind: 'builtin',
+    }));
+    if (Csl) {
+      for (const s of Csl.list()) {
+        out.push({
+          id: s.id, label: s.label,
+          group: s.source === 'user' ? '导入的 CSL 样式' : 'CSL 样式（内置）',
+          numeric: !!s.numeric, kind: s.source, warnings: s.warnings,
+        });
+      }
+    }
+    return out;
+  }
+
+  function isNumericStyle(id) {
+    if (Csl && Csl.isCslStyle(id)) return Csl.isNumeric(id);
+    return id === 'gbt7714' || id === 'ieee';
+  }
+
+  function isCslStyle(id) {
+    return !!(Csl && Csl.isCslStyle(id));
+  }
+
+  // 主进程把 <dataDir>/styles 下的用户样式整批发过来：先清掉旧的用户样式再注册，
+  // 避免删了文件后下拉里还留着幽灵条目。
+  function registerCslStyles(list) {
+    if (!Csl) return [];
+    return Csl.setUserStyles(Array.isArray(list) ? list : []);
+  }
+
+  function cslStyleInfo(id) {
+    if (!isCslStyle(id)) return null;
+    const style = Csl.resolve(id);
+    if (!style) return null;
+    return { id: style.id, label: style.label, source: style.source, warnings: style.warnings.slice() };
+  }
+
+  // 参考文献表排序：样式自带 <sort> 时交给引擎，返回 null 表示「按老规则排」。
+  function cslSort(style, items) {
+    if (!isCslStyle(style)) return null;
+    try { return Csl.sortItems(style, items); } catch (_) { return null; }
+  }
+
   function styleLabel(id) {
     const hit = STYLES.find((x) => x.id === id);
-    return hit ? hit.label : (id || '');
+    if (hit) return hit.label;
+    if (isCslStyle(id)) {
+      const style = Csl.resolve(id);
+      if (style) return style.label;
+    }
+    return id || '';
   }
 
   function typeLabel(it) {
@@ -555,6 +620,7 @@
   return {
     format, gbt, apa, chicago, ieee, mla, authorsOf, authorNames, styleLabel, typeLabel,
     citekey, citekeys, atCitation,
+    styleList, isNumericStyle, isCslStyle, registerCslStyles, cslStyleInfo, cslSort,
     STYLES, TYPE_CODE, TYPE_NAME,
   };
 });

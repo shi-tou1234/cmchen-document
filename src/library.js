@@ -334,6 +334,14 @@ function migrateItem(it) {
   x.attachment = (src.attachment && src.attachment.path)
     ? { path: String(src.attachment.path), name: String(src.attachment.name || path.basename(String(src.attachment.path))) }
     : null;
+  x.snapshot = (src.snapshot && src.snapshot.path)
+    ? {
+      path: String(src.snapshot.path),
+      png: String(src.snapshot.png || ''),
+      url: String(src.snapshot.url || ''),
+      at: Number.isFinite(+src.snapshot.at) ? +src.snapshot.at : 0,
+    }
+    : null;
   x.page = Number.isFinite(+src.page) ? Math.max(0, Math.floor(+src.page)) : 0;
   x.created = Number.isFinite(+src.created) ? +src.created : 0;
   x.updated = Number.isFinite(+src.updated) ? +src.updated : 0;
@@ -744,6 +752,21 @@ function setAttachment(key, filePathArg) {
   it.updated = now(); save(); return it;
 }
 
+// 网页快照：{ path, png, url, at }。文件本体在 dataDir/snapshots，索引里只存引用。
+function setSnapshot(key, snap) {
+  const it = findItem(key); if (!it) return null;
+  if (!snap || !snap.path) { delete it.snapshot; }
+  else {
+    it.snapshot = {
+      path: String(snap.path),
+      png: String(snap.png || ''),
+      url: String(snap.url || ''),
+      at: Number.isFinite(+snap.at) ? +snap.at : now(),
+    };
+  }
+  it.updated = now(); save(); return it;
+}
+
 // 供 set-page / 打开时定位条目
 function findItemByPath(p) {
   if (!p) return null;
@@ -777,6 +800,11 @@ function publicItem(it, collIds) {
     deletedAt: it.deletedAt || 0,
     hasFile: !!(it.attachment && fs.existsSync(it.attachment.path)),
     attachment: it.attachment,
+    snapshot: it.snapshot && it.snapshot.path ? {
+      path: it.snapshot.path, png: it.snapshot.png || '',
+      url: it.snapshot.url || '', at: it.snapshot.at || 0,
+      hasFile: fs.existsSync(it.snapshot.path),
+    } : null,
   };
 }
 
@@ -1288,7 +1316,7 @@ module.exports = {
   addTag, removeTag, renameTag, removeTagEverywhere, mergeTags, setTagColor,
   addRelation, removeRelation,
   addNote, updateNote, removeNote,
-  addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment,
+  addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment, setSnapshot,
   addSearch, removeSearch,
   setAnnoTags, addAnnoTags, removeAnnoTag,
   annoMetaOf, annoTagsOf, updateAnno, linkAnnoToItem, unlinkAnno, remapAnnoTags,

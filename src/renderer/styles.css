@@ -392,7 +392,18 @@ body.theme-dark.invert-pages .page .textlayer { filter: invert(1) hue-rotate(180
 
 /* ---------- 阅读区 ---------- */
 #viewer { flex: 1 1 auto; overflow: auto; scroll-behavior: auto; padding: 22px 20px 40px; background: var(--paper); position: relative; }
-#pages { display: flex; flex-direction: column; align-items: center; gap: 18px; min-height: 100%; }
+/* 页面比视口窄时居中；比视口宽（放大后）时改成左对齐 ——
+   纯 center 会让超宽页向左右两侧各溢出一半，而左侧溢出是滚不到的，
+   结果就是放大后页面左半边永远看不见。safe center 在溢出时退回 start，
+   多出来的部分全部落在右侧，滚动条够得着。不支持 safe 的浏览器会忽略第二行。 */
+#pages { display: flex; flex-direction: column; align-items: center; align-items: safe center; gap: 18px; min-height: 100%; }
+
+/* 放大模式（Z 键切换）：光标提示 + 空格拖动时的抓手。
+   拖动期间禁掉选中，否则手形平移会顺带刷蓝一片文字 */
+body.zoom-mode #viewer { cursor: zoom-in; }
+body.zoom-mode #viewer * { cursor: zoom-in !important; }
+body.zoom-pan #viewer * { cursor: grabbing !important; user-select: none !important; }
+
 .page {
   position: relative; background: #fff; overflow: hidden;
   box-shadow: var(--shadow-page); border-radius: 1px;

@@ -11,6 +11,7 @@ const fetchpdf = require('./fetchpdf.js');
 const pdfmeta = require('./pdfmeta.js');
 const docconvert = require('./docconvert.js');
 const Cite = require('./cite.js');
+const Csl = require('./csl.js');
 const Creators = require('./creators.js');
 const query = require('./query.js');
 
@@ -887,8 +888,32 @@ ipcMain.handle('lib-update-item', (_e, info) => (info ? library.updateItem(info.
 ipcMain.handle('lib-remove-item', (_e, info) => (info ? library.trashItem(info.key) : null));
 ipcMain.handle('lib-trash-item', (_e, info) => (info ? library.trashItem(info.key) : null));
 ipcMain.handle('lib-restore-item', (_e, info) => (info ? library.restoreItem(info.key) : null));
-ipcMain.handle('lib-delete-item', (_e, info) => (info ? library.deleteItemForever(info.key) : false));
-ipcMain.handle('lib-empty-trash', () => ({ removed: library.emptyTrash(), filesKept: true }));
+
+// 快照是 app 自己在数据目录里生成的，条目永久删除时顺手清掉；用户的 PDF 仍然一个不动。
+function dropSnapshotFiles(snap) {
+  if (!snap || !snap.path) return;
+  try {
+    if (fs.existsSync(snap.path)) fs.unlinkSync(snap.path);
+    const filesDir = String(snap.path).replace(/\.(m?html)$/i, '_files');
+    if (filesDir !== snap.path && fs.existsSync(filesDir)) fs.rmSync(filesDir, { recursive: true, force: true });
+    if (snap.png && fs.existsSync(snap.png)) fs.unlinkSync(snap.png);
+  } catch (_) {}
+}
+ipcMain.handle('lib-delete-item', (_e, info) => {
+  if (!info || !info.key) return false;
+  const it = library.findItem(info.key);
+  const ok = library.deleteItemForever(info.key);
+  if (ok && it) dropSnapshotFiles(it.snapshot);
+  return ok;
+});
+ipcMain.handle('lib-empty-trash', () => {
+  const snaps = library.summary().items
+    .filter((x) => x.deletedAt && x.snapshot)
+    .map((x) => x.snapshot);
+  const removed = library.emptyTrash();
+  for (const s of snaps) dropSnapshotFiles(s);
+  return { removed, filesKept: true };
+});
 ipcMain.handle('lib-add-collection', (_e, info) => library.addCollection(info && info.name, info && info.parentId));
 ipcMain.handle('lib-remove-collection', (_e, info) => (info ? library.removeCollection(info.id) : false));
 // v27：收藏集重命名 / 颜色、标签颜色
@@ -1011,7 +1036,7 @@ function annotationResults(q, ast) {
         const text = [sh.text, sh.comment].filter(Boolean).join(' ').trim();
         if (!text) continue;
         const hay = query.fold(text);
-        if (!query.matchTokens(hay, A.text)) continue;   // 短语/排除都在这
+        if (!query.matchText(hay, A)) continue;   // 短语 / 排除 / OR / 括号都在这
         out.push({
           key: it.key, title: it.title || '(无标题)', page: pg.page || 1,
           type: 'annotation', label: sh.comment ? '批注' : '摘录',
@@ -1031,7 +1056,7 @@ function noteResults(q, ast) {
     for (const n of it.notes || []) {
       const hay = [n.title, n.text].filter(Boolean).join(' ');
       if (!hay) continue;
-      if (!query.matchTokens(query.fold(hay), A.text)) continue;
+      if (!query.matchText(query.fold(hay), A)) continue;
       out.push({
         key: it.key, title: it.title || '(无标题)', page: it.page || 1,
         type: 'note', label: '笔记', noteId: n.id,
@@ -1049,7 +1074,7 @@ function fulltextResults(queryRaw) {
   const seen = new Set();
   // 带字段限定（title:/author:/tag:…）时，正文命中还要过一遍条目字段；
   // 只有字段限定、没有正文词时，直接按条目级字段过滤出结果。
-  const hasFields = Object.keys(ast.fields || {}).length > 0;
+  const hasFields = ((ast.fieldTokens && ast.fieldTokens.length) || Object.keys(ast.fields || {}).length) > 0;
   const filterItem = (it) => query.matchFieldsNot(it, ast);
   if (hasFields && !ast.text.length) {
     for (const it of library.summary().items) {
@@ -1159,6 +1184,192 @@ ipcMain.handle('lib-fetch-pdf', async (_e, info) => {
   }
   return { ok: true, path: r.path, source: r.source, bytes: r.bytes, tried: r.tried };
 });
+
+// v31：批量抓取。选中多条 → 依次抓，进度实时回传渲染层；可中途取消。
+let fetchBatchAbort = false;
+ipcMain.handle('lib-fetch-pdf-batch-cancel', () => {
+  fetchBatchAbort = true;
+  return { ok: true };
+});
+
+ipcMain.handle('lib-fetch-pdf-batch', async (_e, info) => {
+  const keys = Array.isArray(info && info.keys)
+    ? info.keys.map((k) => String(k == null ? '' : k)).filter(Boolean)
+    : [];
+  if (!keys.length) return { ok: false, error: '没有选中条目' };
+  const force = !!(info && info.force);
+  const email = (settings.get().fetchEmail || '').trim();
+  const dir = path.join(currentDataDir(), 'attachments');
+  fetchBatchAbort = false;
+
+  const total = keys.length;
+  const results = [];
+  let done = 0, fetched = 0, failed = 0, skipped = 0, aborted = false;
+
+  const emit = (rec) => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      win.webContents.send('lib-fetch-pdf-progress',
+        Object.assign({ done, total, fetched, failed, skipped }, rec));
+    } catch (_) {}
+  };
+
+  for (let i = 0; i < keys.length; i++) {
+    if (fetchBatchAbort) { aborted = true; break; }
+    const key = keys[i];
+    const it = library.findItem(key);
+    const rec = { key, index: i + 1, total, title: (it && it.title) || '' };
+
+    if (!it) {
+      rec.status = 'failed'; rec.error = '条目不存在'; failed++;
+    } else if (it.deletedAt) {
+      rec.status = 'skipped'; rec.error = '回收站里的条目'; skipped++;
+    } else if (!force && it.attachment && it.attachment.path && fs.existsSync(it.attachment.path)) {
+      rec.status = 'skipped'; rec.error = '已有附件'; skipped++;
+    } else {
+      const src = {
+        doi: it.doi || '',
+        arxivId: fetchpdf.arxivIdFromUrl((it.fields && it.fields.arxivId) || it.url || ''),
+        url: it.url || '',
+        email,
+      };
+      if (!src.doi && !src.arxivId && !src.url) {
+        rec.status = 'skipped'; rec.error = '没有 DOI / arXiv / 链接'; skipped++;
+      } else {
+        let r;
+        try {
+          r = await fetchpdf.fetchToFile(src, path.join(dir, key + '.pdf'), {});
+        } catch (err) {
+          r = { ok: false, error: String(err && err.message ? err.message : err) };
+        }
+        if (r.ok) {
+          try {
+            library.setAttachment(key, r.path);
+            rec.status = 'ok'; rec.source = r.source; rec.bytes = r.bytes; fetched++;
+          } catch (err) {
+            rec.status = 'failed';
+            rec.error = '下载成功但挂载失败：' + (err && err.message ? err.message : err);
+            failed++;
+          }
+        } else {
+          rec.status = 'failed'; rec.error = r.error || '抓取失败'; failed++;
+        }
+      }
+    }
+    done++;
+    results.push(rec);
+    emit(rec);
+  }
+
+  if (fetched && win && !win.isDestroyed()) win.webContents.send('lib-changed');
+  return { ok: true, total, done, fetched, failed, skipped, aborted, results };
+});
+
+// v31：网页快照。把条目网址在隐藏窗口里打开，存成 HTML + 首屏 PNG，链接烂了也能回看。
+ipcMain.handle('lib-snapshot', async (_e, info) => {
+  const key = String((info && info.key) || '').trim();
+  const it = key ? library.findItem(key) : null;
+  if (!it) return { ok: false, error: '条目不存在' };
+  const url = String((info && info.url) || it.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: '这条文献没有可以快照的网址（先在详情里填 URL）' };
+
+  const dir = path.join(currentDataDir(), 'snapshots');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  const htmlPath = path.join(dir, key + '.html');
+  const pngPath = path.join(dir, key + '.png');
+
+  const snapWin = new BrowserWindow({
+    show: false, width: 1280, height: 900,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      partition: 'trove-snapshot',
+      images: true,
+      javascript: true,
+    },
+  });
+  try {
+    snapWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    try {
+      snapWin.webContents.session.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+    } catch (_) {}
+    let loadTimer = null;
+    try {
+      await Promise.race([
+        snapWin.loadURL(url),
+        new Promise((_, reject) => {
+          loadTimer = setTimeout(() => reject(new Error('打开网页超时（30 秒）')), 30000);
+        }),
+      ]);
+    } finally {
+      if (loadTimer) clearTimeout(loadTimer);
+    }
+    await new Promise((r) => setTimeout(r, 1200));   // 给动态内容一点渲染时间
+
+    // Electron 31 的 webContents.savePage 在隐藏窗口里会静默返回 false（三种格式都失败），
+    // 改用 DevTools 协议的 Page.captureSnapshot 拿单文件 MHTML；再退一步只存 DOM HTML。
+    let saved = false, saveErr = '', savePath = '';
+    const mhtmlPath = path.join(dir, key + '.mhtml');
+    try {
+      const dbg = snapWin.webContents.debugger;
+      try {
+        if (!dbg.isAttached()) dbg.attach('1.3');
+        await dbg.sendCommand('Page.enable');
+        const shot = await dbg.sendCommand('Page.captureSnapshot', { format: 'mhtml' });
+        if (shot && shot.data && shot.data.length > 20) {
+          fs.writeFileSync(mhtmlPath, shot.data, 'utf8');
+          saved = true;
+          savePath = mhtmlPath;
+        }
+      } finally {
+        try { if (dbg.isAttached()) dbg.detach(); } catch (_) {}
+      }
+    } catch (err) {
+      saveErr = String(err && err.message ? err.message : err);
+    }
+    if (!saved) {
+      try {
+        const html = await snapWin.webContents.executeJavaScript('document.documentElement.outerHTML', true);
+        if (html && html.length > 50) {
+          fs.writeFileSync(htmlPath, html, 'utf8');
+          saved = true;
+          savePath = htmlPath;
+        }
+      } catch (err) {
+        saveErr = saveErr || String(err && err.message ? err.message : err);
+      }
+    }
+    let png = '';
+    try {
+      const img = await snapWin.webContents.capturePage();
+      if (img && !img.isEmpty()) { fs.writeFileSync(pngPath, img.toPNG()); png = pngPath; }
+    } catch (_) {}
+
+    if (!saved) {
+      return { ok: false, error: '快照没写下来' + (saveErr ? '：' + saveErr : '（页面内容为空）') };
+    }
+    const snapshot = { path: savePath, png, url, at: Date.now() };
+    library.setSnapshot(key, snapshot);
+    if (win && !win.isDestroyed()) win.webContents.send('lib-changed');
+    return { ok: true, snapshot };
+  } catch (err) {
+    return { ok: false, error: '快照失败：' + (err && err.message ? err.message : err) };
+  } finally {
+    try { snapWin.destroy(); } catch (_) {}
+  }
+});
+
+// 用系统默认程序打开快照（.mhtml 归浏览器管；不能走 open-path，那条只认应用自己支持的文档格式）
+ipcMain.handle('lib-open-snapshot', async (_e, info) => {
+  const key = String((info && info.key) || '').trim();
+  const it = key ? library.findItem(key) : null;
+  const p = it && it.snapshot && it.snapshot.path ? it.snapshot.path : '';
+  if (!p || !fs.existsSync(p)) return { ok: false, error: '快照文件不存在（可能被清理了）' };
+  const err = await shell.openPath(p);
+  return err ? { ok: false, error: err } : { ok: true };
+});
+
 ipcMain.handle('lib-import-refs', (_e, info) => {
   if (info && typeof info.text === 'string') {
     try {
@@ -1173,6 +1384,89 @@ ipcMain.handle('lib-import-refs', (_e, info) => {
 ipcMain.handle('lib-export-refs', (_e, info) => {
   if (info && info.outPath) return exportRefsTo(info.outPath);
   return exportRefsViaDialog();
+});
+
+// ---------- CSL 用户样式（v32） ----------
+// 放在 <数据目录>/styles/*.csl：导入时复制一份过去，启动时扫描，换数据目录也能跟着走。
+function cslStyleDir() { return path.join(currentDataDir(), 'styles'); }
+
+function cslSafeId(value) {
+  return String(value == null ? '' : value)
+    .replace(/^csl:/i, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 64);
+}
+
+// 只返回能解析、且有 bibliography 的样式；坏文件跳过，避免一份坏样式让整张列表消失。
+function listUserCslStyles() {
+  const dir = cslStyleDir();
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => /\.csl$/i.test(f)).sort(); }
+  catch (_) { return { ok: true, styles: [] }; }
+  const styles = [];
+  for (const file of files) {
+    try {
+      const xml = fs.readFileSync(path.join(dir, file), 'utf8');
+      const style = Csl.parseStyle(xml, { id: file.replace(/\.csl$/i, '') });
+      if (!style.bibliography) continue;
+      styles.push({ id: style.id, label: style.label, xml, warnings: style.warnings });
+    } catch (err) {
+      console.warn('[csl] 跳过无效样式', file, err && err.message ? err.message : err);
+    }
+  }
+  return { ok: true, styles };
+}
+
+ipcMain.handle('csl-styles', () => listUserCslStyles());
+
+ipcMain.handle('csl-import', async () => {
+  if (!win) return { ok: false, error: '窗口不可用' };
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: '导入 CSL 样式',
+    filters: [{ name: 'CSL 样式', extensions: ['csl'] }],
+    properties: ['openFile'],
+    defaultPath: appState.lastDir || undefined,
+  });
+  if (canceled || !filePaths.length) return { ok: false, canceled: true };
+  const src = filePaths[0];
+  let xml;
+  try {
+    const st = fs.statSync(src);
+    if (st.size > 5 * 1024 * 1024) return { ok: false, error: '文件过大（超过 5 MB）' };
+    xml = fs.readFileSync(src, 'utf8');
+  } catch (err) { return { ok: false, error: '读取失败：' + (err && err.message ? err.message : err) }; }
+
+  let style;
+  try { style = Csl.parseStyle(xml); }
+  catch (err) { return { ok: false, error: '不是有效的 CSL：' + (err && err.message ? err.message : err) }; }
+  if (!style.bibliography) return { ok: false, error: '该样式没有 bibliography 定义，不能生成参考文献表' };
+
+  const id = cslSafeId(style.id) || ('style-' + Date.now().toString(36));
+  const dir = cslStyleDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, id + '.csl'), xml, 'utf8');
+  } catch (err) {
+    return { ok: false, error: '保存失败：' + (err && err.message ? err.message : err) };
+  }
+  appState.lastDir = path.dirname(src);
+  saveWindowState(appState);
+  return Object.assign({ ok: true, id, label: style.label, warnings: style.warnings }, listUserCslStyles());
+});
+
+// 删除用户样式（目前界面只在数据目录里手动删，IPC 留给脚本/后续入口用）
+ipcMain.handle('csl-remove', (_e, info) => {
+  const id = cslSafeId(info && info.id);
+  if (!id) return { ok: false, error: '无效的样式 id' };
+  try { fs.unlinkSync(path.join(cslStyleDir(), id + '.csl')); }
+  catch (err) {
+    if (!err || err.code !== 'ENOENT') {
+      return { ok: false, error: '删除失败：' + (err && err.message ? err.message : err) };
+    }
+  }
+  return Object.assign({ ok: true }, listUserCslStyles());
 });
 // 渲染层已经拼好的文本（目前是参考文献表）落盘。
 // 文件对话框留在主进程，渲染层只传 text / format / 建议文件名。

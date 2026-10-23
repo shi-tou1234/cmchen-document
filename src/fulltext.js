@@ -199,9 +199,10 @@ function search(queryStr) {
   if (!raw) return { ok: true, query: '', results: [], stats: stats() };
   const ast = query.parseQuery(raw);
   const tokens = ast.text;
+  const free = (ast.freeTokens && ast.freeTokens.length) ? ast.freeTokens : tokens;
   // 只有字段限定、没有正文词时，全文索引没有可搜的东西；由 main.js 的
   // fulltextResults 走条目级字段过滤，这里直接返回空。
-  if (!tokens.length) return { ok: true, query: raw, results: [], stats: stats(), ast };
+  if (!free.length) return { ok: true, query: raw, results: [], stats: stats(), ast };
   const results = [];
   let files = [];
   try { files = fs.readdirSync(dirPath()).filter((f) => /^[a-f0-9]{24}\.json$/.test(f)); } catch (_) {}
@@ -222,26 +223,30 @@ function search(queryStr) {
       const hay = query.fold(orig);
       if (!hay) continue;
       if (!query.matchNone(hay, ast.not)) continue;   // 排除词：任一命中即弃
+      // 按语法树匹配（支持 OR / 括号 / 取反）；字段词在这一层不参与，交给条目级过滤
+      const m = query.evalText(hay, ast);
+      if (!m.ok) continue;
       // 评分：命中次数 × 词重（短语 ×3），再加密度加成（同样命中数，短页更相关；
       // 最短按 60 字算，避免极短页权重爆炸）
-      let score = 0, totalHits = 0, hit = true;
-      for (const tok of tokens) {
-        const c = query.countToken(hay, tok.t);
-        if (!c) { hit = false; break; }
+      let score = 0, totalHits = 0;
+      const hitTokens = [];
+      for (const [tok, c] of m.hits) {
         totalHits += c;
+        hitTokens.push(tok);
         score += c * (tok.phrase ? 3 : 1);
       }
-      if (!hit) continue;
+      if (!totalHits) continue;                        // 只满足字段条件、正文没命中：不算这一页
       score += totalHits * 1000 / Math.max(60, hay.length);
       // snippet 锚点：短语优先。位置要在原文上取（fold 会归并空白、长度可能变），
       // 原文锚不上（查询带变音折叠等）才退回 fold 文本
       const origLower = orig.toLowerCase();
+      const anchorPool = hitTokens.length ? hitTokens : free;
       let anchorTok = null;
-      for (const tok of tokens) { if (tok.phrase) { anchorTok = tok; break; } }
-      if (!anchorTok) anchorTok = tokens[0];
+      for (const tok of anchorPool) { if (tok.phrase) { anchorTok = tok; break; } }
+      if (!anchorTok) anchorTok = anchorPool[0];
       let at = origLower.indexOf(anchorTok.t);
       let inHay = at < 0;
-      if (inHay) at = Math.max(0, query.firstHit(hay, tokens));
+      if (inHay) at = Math.max(0, query.firstHit(hay, anchorPool));
       const atLen = anchorTok.t.length;
       const start = Math.max(0, at - 46);
       const end = Math.min((inHay ? hay : orig).length, at + atLen + 62);

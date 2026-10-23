@@ -1912,6 +1912,60 @@ function syncScaleSelect(scale) {
   sel.value = opt.value;
 }
 
+// ---------- 放大模式（Z 键切换） ----------
+/*
+ * 按 Z 进入放大模式：此时滚轮 = 连续缩放，锚点始终是鼠标指向的那一点；
+ * 再按 Z 或 Esc 退出，滚轮恢复翻页。
+ *
+ * 为什么用「模式」而不是给滚轮加修饰键：Ctrl+滚轮虽然也能缩放，但那只改缩放、
+ * 不会把光标下那一点锁住，看小字/图表时要反复调。进模式后滚轮专职缩放，
+ * 想看别处就空格 + 左键拖动（Acrobat 的手形工具），职责清楚、肌肉记忆也好建立。
+ *
+ * 锚点模型：改缩放前记下「光标下那一点在哪一页、页内什么位置」（单位坐标），
+ * applyLayout() 之后把这一点挪回光标处 —— 于是连续缩放时视线中心始终不跑。
+ * 走真实重渲染而不是 CSS 拉伸：把已渲染位图拉大会发虚，而放大就是为了看清细节。
+ */
+const zoomMode = { on: false, space: false, panning: false, px: 0, py: 0 };
+
+// 以 (clientX, clientY) 为锚点把缩放改到 next
+function zoomAtPoint(next, clientX, clientY) {
+  const s = App.state;
+  const want = Math.min(6, Math.max(0.2, next));
+  if (Math.abs(want - (s.scale || 1)) < 0.0005) return;
+  const host = document.elementFromPoint(clientX, clientY);
+  const pageEl = (host && host.closest) ? host.closest('.page, .doc-page') : null;
+  if (!pageEl || !pageEl.dataset || !pageEl.dataset.page) { setNumericScale(want); return; }
+  const s0 = s.scale || 1;
+  const r0 = pageEl.getBoundingClientRect();
+  const ux = (clientX - r0.left) / s0;
+  const uy = (clientY - r0.top) / s0;
+
+  s.scaleMode = String(want);
+  applyLayout();
+
+  const r1 = pageEl.getBoundingClientRect();
+  const s1 = s.scale || 1;
+  const v = App.els.viewer;
+  if (v) {
+    v.scrollLeft += (r1.left + ux * s1) - clientX;
+    v.scrollTop += (r1.top + uy * s1) - clientY;
+  }
+  syncScaleSelect(s.scale);
+}
+
+function setZoomMode(on) {
+  zoomMode.on = !!on;
+  zoomMode.space = false;
+  zoomMode.panning = false;
+  document.body.classList.toggle('zoom-mode', zoomMode.on);
+  document.body.classList.remove('zoom-pan');
+  if (zoomMode.on && window.App && App.toast) {
+    App.toast('放大模式：滚轮缩放 · 空格+左键拖动平移 · Z 或 Esc 退出', 4000);
+  }
+}
+App.zoomModeState = () => ({ on: zoomMode.on, space: zoomMode.space, panning: zoomMode.panning });
+
+
 // ---------- 状态栏 ----------
 function setStatus(t) { App.els.status.textContent = t; }
 
@@ -1963,11 +2017,12 @@ async function doSave() {
 
 // ---------- toast ----------
 let toastTimer = null;
-function toast(msg) {
+function toast(msg, ms) {
   let t = $('toast');
   if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
   t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), Math.max(1200, +ms || 1800));
 }
 App.toast = toast;
 
@@ -2308,6 +2363,13 @@ function bind() {
       if (k === 'p') { App.printCurrent(); e.preventDefault(); return; }   // v9：打印当前文档
       if (k === 'i' && e.shiftKey) { window.pdfBridge.openDevTools && window.pdfBridge.openDevTools(); e.preventDefault(); return; }
     }
+    // Z：放大模式开关。滚轮在这模式下专职缩放（锚点跟光标），空格+左键拖动平移。
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'z' || e.key === 'Z')) {
+      setZoomMode(!zoomMode.on);
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'Escape' && zoomMode.on) { setZoomMode(false); e.preventDefault(); return; }
     // 工具快捷键：v 看图 / p 画笔 / h 荧光 / l 直线 / r 矩形 / a 箭头 / t 文字 / n 便签 / e 橡皮
     if (!e.ctrlKey && !e.altKey && !e.metaKey && App.state.mode !== 'rich') {
       const tool = TOOL_KEYS[e.key.toLowerCase()];
@@ -2329,7 +2391,12 @@ function bind() {
     if (e.key === 'F3') { gotoSearchHit(e.shiftKey ? -1 : 1); e.preventDefault(); return; }
     switch (e.key) {
       case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;
-      case 'ArrowRight': case 'PageDown': case ' ': nextPage(); e.preventDefault(); break;
+      case 'ArrowRight': case 'PageDown': nextPage(); e.preventDefault(); break;
+      case ' ':
+        // 放大模式下空格是「手形工具」的修饰键，不能拿去翻页
+        if (zoomMode.on) { zoomMode.space = true; e.preventDefault(); break; }
+        nextPage(); e.preventDefault();
+        break;
       case 'Home': scrollToPage(1); e.preventDefault(); break;
       case 'End': scrollToPage(App.state.numPages); e.preventDefault(); break;
       case '+': case '=': if (e.ctrlKey) { setNumericScale(App.state.scale * 1.25); e.preventDefault(); } break;
@@ -2338,31 +2405,71 @@ function bind() {
     }
   });
 
-  // Ctrl+滚轮缩放；普通滚轮保持原生连续滚动（不劫持）
-  // 触控板捏合会连发几十个 ctrl+wheel 事件；每个事件都走一次 applyLayout（重排 + 重渲染所有页）
+  // Ctrl+滚轮缩放；普通滚轮保持原生连续滚动（不劫持）。
+  // 放大模式下不用按 Ctrl，滚轮直接就是缩放，并且锚点跟着光标走。
+  // 触控板捏合会连发几十个 wheel 事件；每个事件都走一次 applyLayout（重排 + 重渲染所有页）
   // 会明显卡顿甚至看着闪。所以先把 delta 攒起来，最多每 16ms 应用一次，并用真实 delta 大小。
   // （不用 requestAnimationFrame：窗口隐藏时 rAF 不触发。）
   let zoomAcc = 0;
   let zoomLast = 0;
   let zoomTimer = null;
+  let zoomPt = { x: 0, y: 0 };
   const applyZoomAcc = () => {
     zoomLast = Date.now();
     const acc = zoomAcc;
     zoomAcc = 0;
     if (!acc) return;
-    setNumericScale(App.state.scale * Math.exp(-acc * 0.0016));
+    const next = App.state.scale * Math.exp(-acc * 0.0016);
+    if (zoomMode.on) zoomAtPoint(next, zoomPt.x, zoomPt.y);
+    else setNumericScale(next);
   };
   E.viewer.addEventListener('wheel', (e) => {
-    if (!e.ctrlKey || (!App.state.pdfDoc && App.state.mode !== 'rich')) return;
+    const wantZoom = e.ctrlKey || zoomMode.on;
+    if (!wantZoom || (!App.state.pdfDoc && App.state.mode !== 'rich')) return;
     e.preventDefault();
     const unit = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? 400 : 1);
     const d = e.deltaY * unit;
     if (!d) return;
     zoomAcc += d;
+    zoomPt = { x: e.clientX, y: e.clientY };
     const now = Date.now();
     if (now - zoomLast >= 16) applyZoomAcc();
     else if (!zoomTimer) zoomTimer = setTimeout(() => { zoomTimer = null; applyZoomAcc(); }, 16);
   }, { passive: false });
+
+  document.addEventListener('keyup', (e) => {
+    if (e.key !== ' ' || !zoomMode.space) return;
+    zoomMode.space = false;
+    zoomMode.panning = false;
+    document.body.classList.remove('zoom-pan');
+  });
+
+  // 放大模式下的平移：空格 + 左键拖动（Acrobat 的手形工具）
+  // 捕获阶段拦下，否则左键按下会被文字选择 / 标注层吃掉，拖出来是一片蓝
+  E.viewer.addEventListener('mousedown', (e) => {
+    if (!zoomMode.on || !zoomMode.space || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    zoomMode.panning = true;
+    zoomMode.px = e.clientX;
+    zoomMode.py = e.clientY;
+    document.body.classList.add('zoom-pan');
+  }, true);
+  window.addEventListener('mousemove', (e) => {
+    if (!zoomMode.panning) return;
+    const v = App.els.viewer;
+    if (v) {
+      v.scrollLeft -= (e.clientX - zoomMode.px);
+      v.scrollTop -= (e.clientY - zoomMode.py);
+    }
+    zoomMode.px = e.clientX;
+    zoomMode.py = e.clientY;
+  }, true);
+  window.addEventListener('mouseup', () => {
+    if (!zoomMode.panning) return;
+    zoomMode.panning = false;
+    document.body.classList.remove('zoom-pan');
+  }, true);
 
   // 看图模式：点页面里的图片 → 灯箱放大看原图
   E.pages.addEventListener('click', (e) => {

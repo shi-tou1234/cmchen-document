@@ -383,7 +383,7 @@ window.LibraryUI = (function () {
     // placeholder 别塞语法说明：输入框只有 190px 宽，长文案会被截断（用户看到的"文字被切断"）
     if (el.search) {
       el.search.placeholder = isAnnoScope() ? '搜索标注文字…' : '搜索标题 / 作者 / 全文…';
-      el.search.title = '检索语法："短语" 精确匹配 · -词 排除 · title:/author:/tag:/year: 等字段限定';
+      el.search.title = '检索语法："短语" 精确匹配 · -词 排除 · OR（或）· ( ) 分组 · title:/author:/tag:/year: 等字段限定';
     }
     const keepTop = el.grid.scrollTop;
     el.grid.innerHTML = list.map((it) => cardHtml(it)).join('');
@@ -715,6 +715,7 @@ window.LibraryUI = (function () {
     if (el.bulkEdit) el.bulkEdit.hidden = anno;
     if (el.bulkBib) el.bulkBib.hidden = anno;
     if (el.bulkTrash) el.bulkTrash.hidden = anno;
+    if (el.bulkFetch) el.bulkFetch.hidden = anno;
     const bulkRename = $('lib-bulk-rename');
     if (bulkRename) bulkRename.hidden = anno;
     if (el.annoTools) el.annoTools.hidden = !anno;
@@ -1315,6 +1316,10 @@ window.LibraryUI = (function () {
     el.ld.del.hidden = !trashed;
     if (el.ld.fetch) el.ld.fetch.disabled = trashed;
     if (el.ld.fetchStatus) el.ld.fetchStatus.textContent = trashed ? '回收站条目不能抓取' : '';
+    if (el.ld.snapshot) el.ld.snapshot.disabled = trashed;
+    if (el.ld.snapshotOpen) {
+      el.ld.snapshotOpen.hidden = !(it.snapshot && it.snapshot.path && it.snapshot.hasFile !== false);
+    }
 
     const added = it.created ? new Date(it.created).toLocaleString('zh-CN', { hour12: false }) : '未知';
     const modified = it.updated ? new Date(it.updated).toLocaleString('zh-CN', { hour12: false }) : '未知';
@@ -1710,6 +1715,8 @@ window.LibraryUI = (function () {
     if (!r.ok) { setSettingsStatus('切换失败：' + (r.error || '未知错误')); return; }
     state.settings.dataDir = r.dataDir;
     if (el.setDataDir) el.setDataDir.textContent = r.dataDir;
+    await loadCslStyles();
+    fillStyleSelects();
     await refresh();
     setSettingsStatus('存储位置已切换；旧位置已自动备份');
     window.App && window.App.toast && window.App.toast('存储位置已切换');
@@ -1826,6 +1833,98 @@ window.LibraryUI = (function () {
     el.ld.fetchStatus.textContent = '已下载（' + kb + ' KB · 来源 ' + String(r.source || '')
       + '），可以直接双击阅读';
     window.App && window.App.toast && window.App.toast('PDF 已挂到条目上');
+  }
+
+  // v31：批量抓取。选中多条 → 依次抓，进度实时显示在批量条上；再点一次可请求取消。
+  let fetchBatchRunning = false;
+  async function bulkFetchPdfs() {
+    if (fetchBatchRunning) {
+      if (L() && L().cancelFetchPdfBatch) await L().cancelFetchPdfBatch();
+      window.App && window.App.toast && window.App.toast('已请求取消，当前这条抓完就停');
+      return;
+    }
+    if (!L() || !L().fetchPdfBatch) {
+      window.App && window.App.toast && window.App.toast('当前环境不支持批量抓取');
+      return;
+    }
+    const keys = Array.from(state.selectedKeys)
+      .filter((k) => state.items.some((x) => x.key === k && !x.deletedAt));
+    if (!keys.length) {
+      window.App && window.App.toast && window.App.toast('先选条目再抓取');
+      return;
+    }
+    fetchBatchRunning = true;
+    if (el.bulkFetch) { el.bulkFetch.textContent = '取消抓取'; el.bulkFetch.title = '再点一次：当前这条抓完就停'; }
+    const off = L().onFetchPdfProgress ? L().onFetchPdfProgress((p) => {
+      if (el.bulkCount) {
+        el.bulkCount.textContent = '抓取中 ' + p.done + '/' + p.total
+          + ' · 成功 ' + p.fetched + ' · 失败 ' + p.failed + ' · 跳过 ' + p.skipped;
+      }
+    }) : null;
+    let r = null;
+    try { r = await L().fetchPdfBatch(keys); } catch (err) {
+      r = { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+    if (off) off();
+    fetchBatchRunning = false;
+    if (el.bulkFetch) { el.bulkFetch.textContent = '抓 PDF'; el.bulkFetch.title = '给选中的条目批量抓取开放获取 PDF（arXiv / Unpaywall / 直链）'; }
+    if (el.bulkCount) el.bulkCount.textContent = '已选 ' + state.selectedKeys.size + ' 项';
+    if (!r || !r.ok) {
+      window.App && window.App.toast && window.App.toast('批量抓取失败：' + ((r && r.error) || '未知错误'));
+      return;
+    }
+    await reloadItemsQuiet();
+    await refresh();
+    let msg = '抓取完成：成功 ' + (r.fetched || 0) + '，失败 ' + (r.failed || 0) + '，跳过 ' + (r.skipped || 0);
+    if (r.aborted) msg += '（已取消）';
+    const bad = (r.results || []).filter((x) => x.status === 'failed');
+    if (bad.length) msg += '；' + (bad[0].title || bad[0].key) + '：' + (bad[0].error || '');
+    window.App && window.App.toast && window.App.toast(msg, bad.length ? 6000 : 3500);
+  }
+
+  // v31：网页快照——把条目网址存成本地单文件 MHTML + 首屏 PNG
+  async function snapshotPage() {
+    const it = selectedItem();
+    if (!it || it.deletedAt) return;
+    if (!L() || !L().snapshotPage) { el.ld.fetchStatus.textContent = '当前环境不支持快照'; return; }
+    const url = (el.ld.url.value || '').trim() || it.url || '';
+    if (!/^https?:\/\//i.test(url)) {
+      el.ld.fetchStatus.textContent = '先填链接（http/https）再快照';
+      return;
+    }
+    if (el.ld.snapshot) { el.ld.snapshot.disabled = true; el.ld.snapshot.textContent = '快照中…'; }
+    el.ld.fetchStatus.textContent = '正在打开网页并保存快照…（最长 30 秒）';
+    let r = null;
+    try { r = await L().snapshotPage(it.key, url); } catch (err) {
+      r = { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+    if (el.ld.snapshot) { el.ld.snapshot.disabled = false; el.ld.snapshot.textContent = '网页快照'; }
+    if (!r || !r.ok) {
+      el.ld.fetchStatus.textContent = '快照失败：' + ((r && r.error) || '未知错误');
+      return;
+    }
+    await reloadItemsQuiet();
+    await refresh();
+    if (el.ld.fetchStatus) el.ld.fetchStatus.textContent = '快照已保存，点「打开快照」回看';
+    if (el.ld.snapshotOpen) el.ld.snapshotOpen.hidden = false;
+    window.App && window.App.toast && window.App.toast('网页快照已保存');
+  }
+
+  async function openSnapshot() {
+    const it = selectedItem();
+    const p = it && it.snapshot && it.snapshot.path;
+    if (!p) { if (el.ld.fetchStatus) el.ld.fetchStatus.textContent = '还没有快照'; return; }
+    // .mhtml 归系统浏览器管，走专门的 IPC；open-path 只认应用自己支持的文档格式
+    if (L() && L().openSnapshot) {
+      const r = await L().openSnapshot(it.key);
+      if (!r || !r.ok) {
+        if (el.ld.fetchStatus) {
+          el.ld.fetchStatus.textContent = '打开失败：' + ((r && r.error) || '系统没有关联 .mhtml 的程序');
+        }
+      }
+      return;
+    }
+    if (window.pdfBridge && window.pdfBridge.openPath) window.pdfBridge.openPath(p);
   }
 
   // ---------- 查重 ----------
@@ -1965,6 +2064,77 @@ window.LibraryUI = (function () {
   // ---------- 参考文献表 ----------
   // 只在渲染层拼装：条目数据已经在 state 里，不需要主进程再读一次库。
   // 范围三种：当前列表（含搜索/收藏集/标签筛选与当前排序）/ 选中条目 / 整库。
+  //
+  // v32：样式来源有三类（5 种内置、内置 CSL、用户导入的 .csl），列表统一由
+  // Cite.styleList() 生成，这里只负责填下拉和把用户样式送进引擎。
+  function styleExists(id) {
+    return !!(window.Cite && Cite.styleList && Cite.styleList().some((x) => x.id === id));
+  }
+
+  function styleOptionsHtml() {
+    if (!window.Cite || !Cite.styleList) return '';
+    const groups = new Map();
+    for (const s of Cite.styleList()) {
+      const group = s.group || '内置样式';
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(s);
+    }
+    let html = '';
+    for (const [group, list] of groups) {
+      html += '<optgroup label="' + esc(group) + '">' +
+        list.map((s) => '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('') +
+        '</optgroup>';
+    }
+    return html;
+  }
+
+  function fillStyleSelects() {
+    const html = styleOptionsHtml();
+    if (!html) return;
+    for (const sel of [el.ld && el.ld.citeStyle, el.bib && el.bib.style]) {
+      if (!sel) continue;
+      const keep = sel.value || state.citeStyle;
+      sel.innerHTML = html;
+      sel.value = styleExists(keep) ? keep : 'gbt7714';
+    }
+    if (!styleExists(state.citeStyle)) state.citeStyle = 'gbt7714';
+  }
+
+  // 用户样式在 <数据目录>/styles；启动 / 换目录时整批读回来，避免下拉里留幽灵项。
+  async function loadCslStyles() {
+    if (!L() || !L().cslStyles || !window.Cite || !Cite.registerCslStyles) return;
+    try {
+      const r = await L().cslStyles();
+      if (r && r.ok) Cite.registerCslStyles(r.styles || []);
+    } catch (err) {
+      console.warn('[library] csl styles unavailable:', err && err.message ? err.message : err);
+    }
+  }
+
+  async function importCslStyle() {
+    if (!L() || !L().cslImport) return;
+    let r;
+    try { r = await L().cslImport(); }
+    catch (err) { r = { ok: false, error: err && err.message ? err.message : String(err) }; }
+    if (!r || r.canceled) return;
+    if (!r.ok) {
+      window.App && App.toast && App.toast('导入失败：' + (r.error || '未知错误'), 5000);
+      return;
+    }
+    if (window.Cite && Cite.registerCslStyles) Cite.registerCslStyles(r.styles || []);
+    state.citeStyle = 'csl:' + r.id;
+    fillStyleSelects();
+    if (el.bib && el.bib.style) el.bib.style.value = state.citeStyle;
+    if (el.ld && el.ld.citeStyle) el.ld.citeStyle.value = state.citeStyle;
+    if (el.bib && el.bib.modal && !el.bib.modal.hidden) renderBib();
+    if (el.detail && !el.detail.hidden) renderDetail();
+    const missing = (r.warnings || []).slice(0, 3);
+    const extra = missing.length
+      ? '（样式含未支持特性：' + missing.join('、') + '，个别字段可能缺失）'
+      : '';
+    window.App && App.toast && App.toast('已导入样式：' + (r.label || r.id) + extra, 6000);
+  }
+
   function bibStyleId() {
     return (el.bib && el.bib.style.value) || state.citeStyle || 'gbt7714';
   }
@@ -2018,10 +2188,7 @@ window.LibraryUI = (function () {
       window.App && window.App.toast && window.App.toast('库里还没有条目');
       return;
     }
-    if (el.bib.style && !el.bib.style.options.length && window.Cite) {
-      el.bib.style.innerHTML = Cite.STYLES.map((s) =>
-        '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('');
-    }
+    if (el.bib.style && !el.bib.style.options.length) fillStyleSelects();
     const sel = state.selectedKeys.size;
     const opt = el.bib.scope.querySelector('option[value="selected"]');
     if (opt) {
@@ -2379,6 +2546,7 @@ window.LibraryUI = (function () {
       ft: $('lib-ft'), bulk: $('lib-bulk'), bulkCount: $('lib-bulk-count'), selectAll: $('lib-select-all'),
       columns: document.querySelector('#lib-main .lib-columns'),
       bulkEdit: $('lib-bulk-edit'), bulkBib: $('lib-bulk-bib'), bulkTrash: $('lib-bulk-trash'),
+      bulkFetch: $('lib-bulk-fetch'),
       annoTools: $('lib-anno-tools'), annoTagInput: $('lib-anno-tag-input'),
       annoTagAdd: $('lib-anno-tag-add'), annoExport: $('lib-anno-export'), annoNote: $('lib-anno-note'),
       dup: $('lib-dup'), importRefs: $('lib-import-refs'), exportRefs: $('lib-export-refs'),
@@ -2402,6 +2570,7 @@ window.LibraryUI = (function () {
         tags: $('ld-tags'), tagInput: $('ld-tag-input'), tagAdd: $('ld-tag-add'),
         colls: $('ld-colls'), attach: $('ld-attach'), dates: $('ld-dates'), status: $('ld-status'),
         fetch: $('ld-fetch'), fetchPdf: $('ld-fetch-pdf'), fetchStatus: $('ld-fetch-status'),
+        snapshot: $('ld-snapshot'), snapshotOpen: $('ld-snapshot-open'),
         save: $('ld-save'), trash: $('ld-trash'), restore: $('ld-restore'),
         del: $('ld-delete'), close: $('ld-close'),
         citeStyle: $('ld-cite-style'), citeCopy: $('ld-cite-copy'),
@@ -2415,6 +2584,7 @@ window.LibraryUI = (function () {
         order: $('bib-order'), format: $('bib-format'), keys: $('bib-keys'),
         title: $('bib-title'), preview: $('bib-preview'), count: $('bib-count'),
         copy: $('bib-copy'), save: $('bib-save'), status: $('bib-status'),
+        cslImport: $('bib-csl-import'),
         close: $('bib-close'), close2: $('bib-close2'),
       },
     };
@@ -2772,6 +2942,7 @@ window.LibraryUI = (function () {
       el.bib.keys.addEventListener('change', renderBib);
       el.bib.copy.addEventListener('click', copyBibliography);
       el.bib.save.addEventListener('click', saveBibliography);
+      if (el.bib.cslImport) el.bib.cslImport.addEventListener('click', importCslStyle);
     }
 
     // 设置弹层
@@ -2822,6 +2993,7 @@ window.LibraryUI = (function () {
       $('lib-bulk-trash').addEventListener('click', bulkTrash);
       const bulkRename = $('lib-bulk-rename');
       if (bulkRename) bulkRename.addEventListener('click', bulkRenameFiles);
+      if (el.bulkFetch) el.bulkFetch.addEventListener('click', bulkFetchPdfs);
       $('lib-bulk-clear').addEventListener('click', () => { state.selectedKeys.clear(); renderGrid(); renderBulk(); });
       // 标注视图的批量动作
       if (el.annoTagAdd) el.annoTagAdd.addEventListener('click', tagSelectedAnnos);
@@ -2837,6 +3009,8 @@ window.LibraryUI = (function () {
     // 详情：DOI/arXiv 抓取
     if (el.ld.fetch) el.ld.fetch.addEventListener('click', fetchMetadata);
     if (el.ld.fetchPdf) el.ld.fetchPdf.addEventListener('click', fetchPdfFull);
+    if (el.ld.snapshot) el.ld.snapshot.addEventListener('click', snapshotPage);
+    if (el.ld.snapshotOpen) el.ld.snapshotOpen.addEventListener('click', openSnapshot);
 
     // 侧栏：集合选择 / 删除（事件委托）
     el.collections.addEventListener('click', async (e) => {
@@ -3384,7 +3558,10 @@ window.LibraryUI = (function () {
     if (window.pdfBridge && window.pdfBridge.onLibChanged) {
       window.pdfBridge.onLibChanged(() => { if (isOpen()) refresh(); });
     }
-    loadSettings().then(() => refresh());
+    fillStyleSelects();
+    loadCslStyles()
+      .then(() => loadSettings())
+      .then(() => { fillStyleSelects(); refresh(); });
   }
 
   // annoMarkdown 暴露出来：回归脚本要能直接验「标注 → 笔记」的排版
