@@ -610,6 +610,9 @@
           <label class="ld-row"><span class="ld-lbl">格式</span><select id="bib-format">
             <option value="markdown">Markdown</option>
             <option value="text">纯文本</option>
+            <option value="html">HTML</option>
+            <option value="word">Word（.doc）</option>
+            <option value="rtf">RTF（粘进 Word 最稳）</option>
           </select></label>
         </div>
         <label class="ld-row"><span class="ld-lbl">标题（留空不加）</span><input id="bib-title" type="text" value="参考文献" /></label>
@@ -618,9 +621,11 @@
           <span id="bib-count" class="ld-hint"></span>
           <span class="grow"></span>
           <button id="bib-csl-import" class="ld-mini" title="导入 Zotero / CSL 样式库的 .csl 文件">导入 CSL…</button>
+          <button id="bib-csl-manage" class="ld-mini" title="删除已导入的 CSL 样式">管理样式</button>
           <button id="bib-copy" class="ld-mini">复制</button>
           <button id="bib-save" class="ld-mini">保存为文件…</button>
         </div>
+        <div id="csl-manager" class="csl-manager" hidden></div>
         <textarea id="bib-preview" class="bib-preview" readonly spellcheck="false"></textarea>
         <div id="bib-status" class="set-status"></div>
       </div>
@@ -689,6 +694,7 @@
   <script src="docswitch.js"></script>
   <script src="annotations.js"></script>
   <script src="selection.js"></script>
+  <script src="native-annos.js"></script>
   <script src="modeswitch.js"></script>
   <script src="library-ui.js"></script>
   <script src="renderer.js"></script>

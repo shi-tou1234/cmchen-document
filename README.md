@@ -36,13 +36,14 @@
 - **多条阅读笔记**：一条文献可以挂任意多条笔记，各自有标题和正文（Zotero 的 item / child-item 模型）；也可以新建**独立笔记**条目（不挂文献），双击进全屏 Markdown 编辑器。
 - **标签与收藏集**：标签可重命名、合并、全局移除、设颜色；收藏集支持多级嵌套和颜色；还有保存搜索条件的**智能收藏集**。
 - **整理**：回收站与还原、查重合并、批量编辑、拖入收藏集、表头排序、Ctrl / Shift 多选、`↑` `↓` + `Enter` 打开。
+- 大库列表只挂载视口附近的行，滚动、选择、双击和键盘操作保持一致。
 - **撤销 / 重做**：库里的写操作（删、回收站、标签、收藏集、批量编辑、导入、合并、关联……）可撤销，栈深 20 步；`Ctrl+Z` / `Ctrl+Y`，工具栏也有 ↶ ↷。
 - **标注也是库里的东西**：侧栏「标注」把所有文档的批注汇成一张表，可搜索、可打标签、可批量导出成 Markdown 笔记（Zotero 的「标注 → 笔记」闭环）。
 - **标注是对象，不是坐标**：每条标注有稳定 id，库里存它的文字 / 标签 / 所属条目 / 生成的笔记；可编辑、可与条目双向关联；批量「生成笔记」会按标注包围盒截图存进 `snapshots/` 并生成带图笔记。
 - **按条目重命名附件**：规则 `作者 - 年份 - 标题`，非法字符自动清理、重名加 `(2)`；**标注文件与全文索引跟着搬家**，不会"文件改了、标注全丢"。
 - **导入导出**：BibTeX / RIS / CSL-JSON / EndNote（`.enw`）/ RefWorks（tagged），导入时按 DOI 或"标准化标题 + 年份"去重；DOI / arXiv 元数据抓取。
 - **抓 PDF 全文**：arXiv → Unpaywall → doi.org 依次尝试，把开放获取的 PDF 直接挂到条目上；网页冒充 PDF、超大文件、付费墙都会挡下来并给出可读原因。支持**批量抓取**（多选条目 → 抓 PDF，逐条回传进度、可中途取消、已有附件自动跳过）；**网页快照**把条目网址存成本地单文件 MHTML + 首屏 PNG，原链接失效后还能回看。
-- **引用**：5 种内置样式（GB/T 7714-2015、APA 7、Chicago 17、IEEE、MLA 9）+ 3 种内置 CSL 样式（Vancouver、Nature、Harvard–Cite Them Right），也可以导入 Zotero 样式库的任意 `.csl`；自研 CSL 1.0.2 子集支持 macro / group / choose / names / date / number / label / sort / locale terms / et-al / 页码范围，导入的样式存在 `<数据目录>/styles/`，启动自动加载，同名可覆盖内置；作者结构化（姓 / 名 / 角色分开存，APA 能出 `Smith, J.`、GB/T 能出 `SMITH J`）；确定性 citekey 与 `[@key]`；相关条目双向关联；按选中条目 / 当前列表 / 整库生成 Markdown 或纯文本参考文献表，可附 citekey。
+- **引用**：5 种内置样式（GB/T 7714-2015、APA 7、Chicago 17、IEEE、MLA 9）+ 3 种内置 CSL 样式（Vancouver、Nature、Harvard–Cite Them Right），也可以导入 Zotero 样式库的任意 `.csl`；自研 CSL 1.0.2 子集支持 macro / group / choose / names / date / number / label / sort / locale terms / et-al / 页码范围，导入的样式存在 `<数据目录>/styles/`，启动自动加载，同名可覆盖内置；作者结构化（姓 / 名 / 角色分开存，APA 能出 `Smith, J.`、GB/T 能出 `SMITH J`）；确定性 citekey 与 `[@key]`；相关条目双向关联；按选中条目 / 当前列表 / 整库生成参考文献表，可导出 **Markdown / 纯文本 / HTML / Word（.doc）/ RTF**（Word 那份就是带最小排版的 HTML，打开即带编号与缩进；RTF 是粘进 Word / WPS 最稳的一种，中文按 `\uN?` 转义不会乱码）；已导入的 `.csl` 可以在界面里直接删除；可附 citekey。
 
 ### 阅读
 
@@ -62,6 +63,7 @@
 
 - 画笔、荧光笔、直线、矩形、箭头、文字、便签、橡皮擦；撤销 / 清除本页。
 - 选中文字高亮、**下划线**、写评论、**摘录**（quote），批注可加标签、可搜索；下划线与 Zotero 一致（每行一条细线，不整块填充）。
+- **导入 PDF 自带批注**：打开带标准批注的 PDF 会提示，批注面板「导入 PDF 批注」把高亮 / 下划线 / 波浪线 / 删除线 / 便签 / 文字框 / 手绘 / 方框 / 直线读进当前标注层，带原文、评论、作者和颜色；按原生 id 去重，重复点不会生成副本。
 - **图片标注**：看图模式里「存为标注」把这块图存进 `snapshots/`，页面上画虚线框，可搜 / 可打标签 / 可生成笔记。
 - **富文档也能标**：Word / PPT / Excel / Markdown / EPUB 都有和 PDF 同一套标注层，高亮、下划线、评论、画笔、文字批注、便签都能用，重开文档原样恢复。
 - 复制正文自动附出处（文档名 + 页码）。
@@ -75,7 +77,7 @@
 - 库级全文索引在后台建，可随时重建；索引按路径哈希存 JSON，不进备份。
 - 搜索同时覆盖**正文、批注、摘录、阅读笔记**，结果带来源徽标、页码和片段，点一下直接跳页。
 - **统一检索语法**：库内、全文、批注、摘录、笔记共用一套解析器——`"短语"`、`-排除`、`OR` / `|`（或）、`( )` 分组、显式 `AND`、`title:` / `author:` / `year:` / `tag:` / `doi:` 等 14 个字段限定、`cafe` 能命中 `café`。
-- 全文结果按**相关性**排序（命中次数 + 词重 + 每千字密度），不再按文件路径堆。
+- 全文、标注、笔记合并后按**相关性**排序（命中次数 + 词重 + 每千字密度）；最多返回 120 条，达到上限时保留每类来源的最佳命中。
 - AND 多关键词、子串匹配；`-(a OR b)` 可整组排除；不做分词（见边界）。
 
 ### 数据
@@ -185,11 +187,13 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 
 默认数据目录就是 Electron 的 userData：`%APPDATA%\trove`。可以在"设置 → 存储位置"里换盘，三种模式：
 
-- **move**：把当前库写到目标目录（目标已有库会被覆盖），索引一并拷过去，设置指向新目录；旧目录的文件保留，不会删。
+- **move**：把当前库及托管资源写到目标目录（目标已有库会被覆盖），设置指向新目录；旧目录的文件保留。全文索引根据自动索引设置重建，也可手动重建。
 - **merge**：读入目标库，再把当前库的条目并进去；同 key 保留目标目录那条，缺的收藏集 / 搜索条件补上。
 - **replace**：用目标目录里已有的库替换当前库（切换前会自动写一份 `pre-move` 快照）。
 
-备份 = 设置 + 库 + 标注，不含 PDF 本体和索引。恢复前会自动写 `pre-restore-*.json`，坏备份不会被应用。
+迁移 / 合并会携带 `snapshots/`、`styles/`、`attachments/`，同步更新库里的资源路径；同名不同内容的资源会避让，外部文档仍引用原路径。写入失败时回滚，完成后才切换当前目录。
+
+备份包含设置、库、标注，以及数据目录内的笔记图片、网页快照、自定义 CSL 和托管附件；不含外部引用的文档和全文索引。单份 JSON 备份的托管资源上限为 60 MB，超过会明确报错并保留已有备份，可改为复制整个数据目录。恢复前自动写 `pre-restore-*.json`，恢复写入失败时回滚，兼容旧版备份。
 
 > **改名前叫 PDF Reader。** 老数据目录是 `%APPDATA%\pdf-reader`（Electron 的 userData 跟着 `package.json` 的 `name` 走，不是 productName）。首次启动 Trove 时会自动把老目录内容搬到 `%APPDATA%\trove`：只补缺、不覆盖、`Singleton*` 锁文件不搬；搬失败就继续用老目录。改名前生成的备份（`app` 字段是 `pdf-reader`）也能直接恢复。
 
@@ -222,7 +226,7 @@ node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 
 ## 测试
 
-62 个 `test-*.js`（另有 41 个 `probe-*.js` 页面内探针），全部以非零退出码表示失败。跑之前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
+69 个 `test-*.js`（另有 41 个 `probe-*.js` 页面内探针），全部以非零退出码表示失败。跑之前先 `Remove-Item Env:\ELECTRON_RUN_AS_NODE`。
 
 **纯 Node（16 个）**
 
@@ -237,7 +241,7 @@ node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 | `test-csl.js` | CSL 子集：XML / 样式解析 / 3 份内置样式 / 姓名 / 日期 / 编号 / 页码范围 / 排序 / 用户样式注册（105） |
 | `test-creators.js` | 作者结构化：姓名拆分 / v5→v6 迁移 / 5 种样式拆分姓与名 / 姓氏排序 / 导入导出往返（44） |
 | `test-anno.js` | 标注标签：v6→v8 迁移 / 打标签 / 批量加标签 / 移除 / 落盘与重载（11） |
-| `test-bib.js` | 参考文献表：编号 / 作者排序 / 拼音 / 同年 a-b / Markdown / citekey（33） |
+| `test-bib.js` | 参考文献表：编号 / 作者排序 / 拼音 / 同年 a-b / Markdown / citekey / HTML / Word / RTF / 转义 / 空表（68） |
 | `test-docconvert.js` | 全格式转换 + sanitize + 图片内联（54） |
 | `test-v23.js` | 多条阅读笔记：v3→v4 迁移 / 增删改 / 导出兼容（20） |
 | `test-export.js` | pdf-lib 导出管线（冒烟，跑完输出 JSON） |
@@ -245,7 +249,7 @@ node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 | `test-fetchpdf.js` | 抓 PDF 全文：arXiv / Unpaywall / doi.org / `%PDF-` 魔数 / 重定向 / 超大 / 404 / 降级（23） |
 | `test-markdown.js` | Markdown 渲染器 + `fromHtml()` 迁移：表格 / 提示框 / 引用卡 / 脚注 / 剧透 / 任务列表（41） |
 
-**真实 Electron（43 个）**
+**真实 Electron（50 个）**
 
 | 脚本 | 覆盖 |
 |---|---|
@@ -257,7 +261,13 @@ node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 | `test-ui-v11.js` | 全文检索 / 智能收藏集 / 批量 / 设置 / 备份（22） |
 | `test-ui-v12.js` | 查重 / 合并 / 详情 / 导入导出 IPC（21） |
 | `test-library-ui.js` | 库界面端到端：Zotero 交互 / citekey / 颜色 / 相关条目 / 排序 / 多选 / 参考文献表 / 结构化作者编辑（78） |
+| `test-large-library.js` | 大库列表：80 行分块挂载、跨块键盘选择、复选框状态、滚动回收、双击打开、引用键重名（7） |
 | `test-export-highlight.js` | 真实选区 → 导出 → 重开，验证高亮烧进 PDF（12） |
+| `test-native-annos.js` | PDF 原生批注导入：高亮 / 下划线 / 波浪线 / 删除线 / 便签 / 文字 / 手绘 / 方框 / 直线，原文提取、原生 id 去重、旋转页与 CropBox、带 kind 导出（32） |
+| `test-save-failures.js` | 写盘失败：条目 / 笔记 / 设置 / 标注不误报成功，旧文件保留，撤销栈可重试 |
+| `test-reliability-ui.js` | 可靠性界面：保存失败提示、未保存 DOI 抓取、标注失败阻止关闭、下载后自动索引、重定位标注迁移（24） |
+| `test-resource-roundtrip.js` | 迁移 / 备份 / 恢复携带图片、MHTML、CSL 与托管附件，路径改写与同名避让 |
+| `test-data-resources.js` | 数据目录资源清单：引用扫描、路径改写、超额资源的明确失败 |
 | `test-backup-restore.js` | 备份 / 恢复 / pre-restore 快照 / 旧备份兼容（36） |
 | `test-datadir.js` | 数据目录 move / merge / replace（34） |
 | `test-reader-plus.js` | 文本层 / 搜索 / 缩略图 / 标注恢复（17） |
@@ -267,7 +277,7 @@ node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 | `test-zoom-mode.js` | 放大模式：Z 进入 / 滚轮连续缩放且锚点不动 / 上下限 / 空格+左键拖动平移 / Z 与 Esc 退出（25） |
 | `test-v18.js` | 工具带常驻 / 工具快捷键 / 快速切换 / 导入读元数据（21） |
 | `test-v19.js` | 首次提示 / 工具分组 / 引用样式 / 批注搜索与标签（26） |
-| `test-csl-ui.js` | CSL 用户样式端到端：扫描 `styles/` / 注册 / 两个下拉 / 详情与参考文献预览 / 删除（12） |
+| `test-csl-ui.js` | CSL 用户样式端到端：扫描 `styles/` / 注册 / 两个下拉 / 详情与参考文献预览 / 管理样式面板 / 界面删除 / 空态与幂等（18） |
 | `test-v20.js` | 专注模式 / 右键菜单 / 批注 Markdown 引用 / 深色反色（20） |
 | `test-v21.js` | 缩放保持位置 / 标签重命名与全局移除 / 导出全部批注（13） |
 | `test-v22.js` | 单页 / 滚动双模式 / 搜索上下跳 / 大纲页码（19） |
@@ -290,6 +300,7 @@ node scripts\test-packaged.js "build\Trove-1.2.0-portable.exe"
 | `test-rich-anno.js` | 富文档文字标注：高亮 / 下划线 / 评论 / 文字批注 / 落盘 / 重开恢复（26） |
 | `test-search-highlight.js` | 从库点全文结果进来：自动高亮 / 跳首个命中 / 回填搜索框（14） |
 | `test-search.js` | 统一检索语法：解析 / 条目匹配 / OR 与括号 / 全文评分排序（74） |
+| `test-search-boundaries.js` | 检索边界：正文饱和时批注 / 笔记不丢、独立笔记字段限定、纯题录不误报附件丢失（8） |
 | `test-undo.js` | 库操作撤销 / 重做：快照栈 / 快捷键 / 不该进栈的操作（34） |
 | `test-packaged.js` | 打包产物冒烟：PDF / 索引 / 搜索 / 导出 / docx（17） |
 
@@ -310,6 +321,8 @@ electron.exe scripts/test-lazy-render.js  # 只滚 scrollTop，验证懒渲染�
 
 ## 已知边界
 
+- **PDF 自带批注导入的范围**：只读标准 `/Annots` 对象。已经扁平化进页面内容的批注无法恢复；回复只保留成评论文本，不建回复树；Circle / Popup / Stamp / Polygon 等第一版跳过并计入跳过数量，不静默丢弃。
+- **PDF 副本文字字体受限**：中文等 Helvetica 无法编码的文字标注仍不能导出；存在遗漏时会显示未导出的数量，请保留原标注数据并核对副本。
 - **没有同步 / 群组库 / 浏览器抓取器 / 自动插入引用**：多设备、协作、网页抓取、在 Word 里自动插引用都做不到。
 - **CSL 是子集，不是 citeproc-js**：支持参考文献表常用的 macro / group / choose / names / date / number / label / sort / locale terms / et-al / 页码范围；不支持文内引注的定位符取值、同上 / 前引、作者消歧、缩写期刊表、整份 locale 自动切换和笔记体引文。遇到未实现的元素会记 warning，不阻断导入。内置 3 份 CSL 样式是手写简化版，投稿要求逐字一致时请从 zotero.org/styles 下载官方 `.csl` 导入（同名会覆盖内置）。中文作者没有拼音库时，citekey 退化为 `item` + 条目 key 前缀。
 - **非 PDF 是"阅读版"而不是原样排版**：复杂分栏、文本框定位、动画、SmartArt、图表不会还原；旧 `.ppt` 不支持，`.doc` 只取纯文本。
@@ -338,7 +351,7 @@ pdf-reader/
 │  ├─ csl.js             # CSL 1.0.2 子集引擎：XML / 样式解析 / 渲染 / 排序
 │  ├─ csl-styles.js      # 3 份内置 CSL 样式（Vancouver / Nature / Harvard）
 │  ├─ creators.js        # 作者结构化：姓 / 名 / 角色拆分与归一化
-│  ├─ bib.js             # 参考文献表：排序 / 编号 / Markdown
+│  ├─ bib.js             # 参考文献表：排序 / 编号 / Markdown / HTML / Word / RTF
 │  ├─ query.js           # 统一检索语法：短语 / 排除 / 字段限定 / 变音折叠
 │  ├─ markdown.js        # Markdown 渲染器（UMD，零依赖）+ fromHtml 迁移器
 │  ├─ richtext.js        # 富文本 HTML 白名单清洗 + 纯文本提取

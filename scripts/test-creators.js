@@ -21,6 +21,8 @@ const ok = (name, cond, detail) => {
   if (cond) console.log('  ok   ' + name);
   else { fail++; console.log('  FAIL ' + name + (detail ? '  <- ' + detail : '')); }
 };
+ok('结构化中文名按姓在前显示', Creators.displayName({ lastName: '陈', firstName: '明' }) === '陈明');
+ok('中文机构名保持原样', Creators.displayName({ lastName: '中国科学院' }) === '中国科学院');
 
 // ---------- 姓名拆分 ----------
 let p = Creators.parseName('Smith, John');

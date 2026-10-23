@@ -293,6 +293,8 @@ async function loadPdf(data, fileName, smoke, meta) {
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide(); // 进入阅读，收起库覆盖层
     restoreAnnos(s.filePath);   // 恢复该文件上次保存的标注（异步，不阻塞首屏）
+    // v29：PDF 自带的批注不自动写入，只提示一次；用户点「导入 PDF 批注」才合并
+    if (window.NativeAnnos) NativeAnnos.hint().catch(() => {});
     refreshSidebar();           // 侧栏若开着，立刻按新文档重建
 
     syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
@@ -493,7 +495,7 @@ function loadTab(tab) {
   });
 }
 
-function switchTab(id, page) {
+async function switchTab(id, page) {
   const t = tabById(id);
   if (!t) return;
   if (id === App.activeTabId) {
@@ -501,7 +503,8 @@ function switchTab(id, page) {
     return;
   }
   syncActiveTab();
-  App.flushAnnos();
+  const previous = App.activeTabId;
+  if (await App.flushAnnos() === false || previous !== App.activeTabId || !tabById(id)) return;
   if (page) t.page = Math.max(1, Math.floor(+page || 1));
   loadTab(t);
 }
@@ -546,11 +549,16 @@ function closeDocument() {
   if (window.LibraryUI && window.pdfBridge.isApp) window.LibraryUI.show();
 }
 
-function closeTab(id) {
-  const idx = App.tabs.findIndex((t) => t.id === id);
+async function closeTab(id) {
+  let idx = App.tabs.findIndex((t) => t.id === id);
   if (idx < 0) return;
   const wasActive = App.tabs[idx].id === App.activeTabId;
-  if (wasActive) { syncActiveTab(); App.flushAnnos(); }
+  if (wasActive) {
+    syncActiveTab();
+    if (await App.flushAnnos() === false || App.activeTabId !== id) return;
+    idx = App.tabs.findIndex(t => t.id === id);
+    if (idx < 0) return;
+  }
   App.tabs.splice(idx, 1);
   if (!App.tabs.length) {
     App.activeTabId = null;
@@ -564,7 +572,7 @@ function closeTab(id) {
 }
 
 // 文献库/菜单/拖拽统一入口。同一路径已经打开时直接切过去，避免开一堆重复标签。
-function openDocument(payload, opts) {
+async function openDocument(payload, opts) {
   const o = opts || {};
   if (!payload || !payload.ok) return;
   if (payload.smoke) { loadPdf(payload.data, payload.fileName, true, payload); return; }
@@ -576,6 +584,11 @@ function openDocument(payload, opts) {
       if (payload.startPage) scrollToPage(payload.startPage);
     } else switchTab(same.id, payload.startPage);
     return;
+  }
+  if (App.state.filePath) {
+    const previous = App.activeTabId;
+    if (await App.flushAnnos() === false || previous !== App.activeTabId) return;
+    syncActiveTab();
   }
   let tab;
   if (!o.newTab && currentTab()) {
@@ -1181,8 +1194,35 @@ function refreshAnnoPane() {
       '<button class="tbtn sb-export-note" data-note-fmt="txt" title="导出为纯文本">TXT</button>' +
       // v26：原来挂在「文件」菜单里，现在放在这儿 —— 汇总所有文档的批注
       '<button class="tbtn sb-export-note" data-note-fmt="all" title="把所有文档的批注汇总成一份 Markdown">全部</button>';
+    // v29：把 PDF 文件里自带的批注（高亮 / 下划线 / 便签 / 手绘）读进当前标注层。
+    // 只在 PDF 模式下出现；重复点不会产生副本（按原生 id 去重）。
+    const nbar = document.createElement('div');
+    nbar.className = 'anno-export-bar anno-native-bar';
+    nbar.innerHTML = '<span class="anno-export-label">PDF 自带</span>' +
+      '<button class="tbtn" id="anno-import-native" title="导入这份 PDF 里已有的标准批注（高亮 / 下划线 / 删除线 / 便签 / 文字 / 手绘 / 方框 / 直线）">导入 PDF 批注</button>' +
+      '<span class="anno-native-state" id="anno-native-state"></span>';
+    nbar.querySelector('#anno-import-native').addEventListener('click', async () => {
+      const btn = nbar.querySelector('#anno-import-native');
+      const state = nbar.querySelector('#anno-native-state');
+      if (!App.state.pdfDoc) { toast('先打开一份 PDF'); return; }
+      btn.disabled = true;
+      state.textContent = '扫描中…';
+      try {
+        const r = window.NativeAnnos ? await window.NativeAnnos.import() : { ok: false };
+        if (!r.ok) { state.textContent = ''; toast(r.error || '导入失败', 4000); return; }
+        if (!r.total) { state.textContent = '没有自带批注'; toast('这份 PDF 没有可导入的标准批注', 3500); return; }
+        state.textContent = r.added ? '已导入 ' + r.added + ' 条' : '已是全部导入';
+        toast(r.added
+          ? '已导入 ' + r.added + ' 条 PDF 原有批注' + (r.skipped ? '，跳过 ' + r.skipped + ' 条（已存在或不支持）' : '')
+          : '没有新批注可导入（已存在 ' + r.skipped + ' 条）', 4500);
+        refreshAnnoPane();
+      } finally {
+        btn.disabled = false;
+      }
+    });
     host.appendChild(search);
     host.appendChild(l);
+    host.appendChild(nbar);
     host.appendChild(bar);
   }
   const s = App.state;
@@ -1193,7 +1233,9 @@ function refreshAnnoPane() {
     shapes.forEach((sh, i) => {
       let label;
       if (sh.tool === 'mark') {
-        label = (sh.kind === 'quote' ? '摘录：' : '') + (sh.text || '选区高亮').slice(0, 90);
+        const kindLabel = sh.kind === 'quote' ? '摘录：' : sh.kind === 'underline' ? '下划线：'
+          : sh.kind === 'strike' ? '删除线：' : sh.kind === 'squiggly' ? '波浪线：' : '';
+        label = kindLabel + (sh.text || '选区高亮').slice(0, 90);
         if (sh.comment) label += ' · 评论：' + sh.comment;
       } else if (sh.tool === 'text' || sh.tool === 'note') {
         label = sh.text || '(空)';
@@ -1778,9 +1820,21 @@ async function saveAnnosNow() {
     for (const sh of shapes) if (!sh.id && window.Anno) sh.id = window.Anno.newAnnoId();
     pages.push({ page: n, shapes: JSON.parse(JSON.stringify(shapes)) });
   }
-  try { await window.pdfBridge.saveAnnos(s.filePath, pages); } catch (_) {}
+  try {
+    const result = await window.pdfBridge.saveAnnos(s.filePath, pages);
+    if (result !== true) throw new Error(result && result.error || '写入失败');
+    return true;
+  } catch (err) {
+    setStatus('标注保存失败：' + err.message);
+    toast('标注尚未保存，请检查磁盘或目录权限后重试', 5000);
+    return false;
+  }
 }
 App.flushAnnos = saveAnnosNow;
+// v29：探针入口 —— 导入 PDF 自带批注（与界面按钮同一条路径）
+App.importNativeAnnos = function (opts) {
+  return window.NativeAnnos ? window.NativeAnnos.import(opts) : Promise.resolve({ ok: false, error: 'NativeAnnos 未加载' });
+};
 App.closeDocument = closeDocument;   // v9：探针/外部关闭文档（顺带停朗读）
 App.notifyAnnoChanged = function () {
   refreshAnnoPane();
@@ -1983,7 +2037,7 @@ App.buildExportPayload = function (outPath) {
       // 便签在导出副本里按「文字」处理（前缀已加 [便签]）
       const g = { tool: sh.tool === 'note' ? 'text' : sh.tool, color: sh.color, width: sh.width };
       if (sh.tool === 'pen' || sh.tool === 'highlight') g.pts = sh.pts.map(conv);
-      else if (sh.tool === 'text' || sh.tool === 'note') { g.at = conv(sh.at); g.size = sh.size; g.text = (sh.tool === 'note' ? '[便签] ' : '') + sh.text; }
+      else if (sh.tool === 'text' || sh.tool === 'note') { g.at = conv(sh.at); g.size = sh.size; g.text = (sh.tool === 'note' ? '[note] ' : '') + sh.text; }
       else if (sh.tool === 'mark') {
         // 单位坐标（左上原点）→ PDF 坐标（左下原点）：两个角都转换后取最小/最大
         g.rects = (sh.rects || []).map((r) => {
@@ -1995,6 +2049,7 @@ App.buildExportPayload = function (outPath) {
           };
         });
         g.text = sh.text || ''; g.comment = sh.comment || '';
+        if (sh.kind) g.kind = sh.kind;   // v29：下划线 / 删除线 / 波浪线 / 摘录要传出图方式
       }
       else { g.a = conv(sh.a); g.b = conv(sh.b); }
       return g;
@@ -2010,7 +2065,11 @@ async function doSave() {
   if (!payload.pages.length) { toast('还没有任何标注'); return; }
   setStatus('导出中…');
   const res = await window.pdfBridge.exportPdf(payload);
-  if (res && res.ok) { setStatus('已导出副本：' + res.path); toast('已保存副本'); }
+  if (res && res.ok) {
+    const partial = res.skipped > 0 ? '；有 ' + res.skipped + ' 条标注未导出（可能包含不支持的文字）' : '';
+    setStatus('已导出副本：' + res.path + partial);
+    toast(partial ? '副本已保存，但有 ' + res.skipped + ' 条标注未导出，请核对' : '已保存副本', partial ? 6000 : 1800);
+  }
   else if (res && res.canceled) setStatus('已取消导出');
   else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));
 }
@@ -2236,6 +2295,7 @@ function bind() {
   }
 
   E.open.addEventListener('click', () => { openViaDialog(); });
+  if (window.pdfBridge.onSaveError) window.pdfBridge.onSaveError(message => { setStatus(message); toast(message, 5000); });
   window.pdfBridge.onPdfOpened((res) => {
     if (!res || !res.ok) return;
     if (res.smoke) loadPdf(res.data, res.fileName, true, res);

@@ -107,6 +107,76 @@ r = Bib.build([{ title: '只有标题' }], { style: 'gbt7714', title: '' });
 ok('缺作者/年份也能排', r.count === 1 && r.entries[0].indexOf('只有标题') > 0, r.entries[0]);
 ok('未知样式退回 GB/T', Bib.build([journal], { style: 'nope' }).entries[0].startsWith('[1] '));
 
+// ---------- HTML / Word 导出 ----------
+// 目的：省掉「粘进 Word 再排版」这一步。编号制用 <ol>，作者-年份制用 <ul>。
+r = Bib.build(items, { style: 'gbt7714', format: 'html', title: '参考文献' });
+ok('html：编号制用有序列表', r.text.indexOf('<ol class="references">') >= 0, r.text.slice(0, 120));
+ok('html：标题是 h2', r.text.indexOf('<h2>参考文献</h2>') === 0, r.text.slice(0, 40));
+ok('html：每条一个 li', (r.text.match(/<li>/g) || []).length === 3, r.text);
+ok('html：条数不变', r.count === 3, 'count=' + r.count);
+ok('html：正文不带 Markdown 的 ## 标题', r.text.indexOf('##') < 0, r.text.slice(0, 80));
+ok('html：entries 仍是纯文本（给 UI 显示用）', !/<li>/.test(r.entries[0]), r.entries[0]);
+
+r = Bib.build(items, { style: 'apa', format: 'html', title: '' });
+ok('作者-年份制用无序列表', r.text.indexOf('<ul class="references">') >= 0 && r.text.indexOf('<ol') < 0, r.text.slice(0, 80));
+ok('不加标题时没有 h2', r.text.indexOf('<h2') < 0, r.text.slice(0, 60));
+
+r = Bib.build([journal], { style: 'gbt7714', format: 'html', includeKeys: true });
+ok('html：引用键用 <code> 包住', /<code>\[@[^\]]+\]<\/code>/.test(r.text), r.text.slice(-160));
+
+// 转义：正文里出现 < & > 时不能把结构破坏掉
+const tricky = { key: 'z1', title: 'A < B & C > D', creators: ['E'], year: '2022' };
+r = Bib.build([tricky], { style: 'gbt7714', format: 'html' });
+ok('html：转义 & 与尖括号', r.text.indexOf('&amp;') > 0 && r.text.indexOf('&lt;') > 0 && r.text.indexOf('B &amp; C') > 0,
+  r.text.slice(0, 200));
+ok('html：转义后仍是 1 个 li', (r.text.match(/<li>/g) || []).length === 1, r.text);
+
+r = Bib.build(items, { style: 'gbt7714', format: 'word', title: '参考文献' });
+ok('word：有 HTML 外壳', /^<!DOCTYPE html>/.test(r.text) && r.text.indexOf('</html>') > 0, r.text.slice(0, 40));
+ok('word：声明 utf-8（中文不乱码的前提）', r.text.indexOf('charset="utf-8"') > 0);
+ok('word：正文里带着条目', r.text.indexOf('<ol class="references">') > 0 && r.text.indexOf('<li>') > 0);
+ok('word：标题进了 <title>', r.text.indexOf('<title>参考文献</title>') > 0);
+ok('word：带排版样式（字体 / 缩进）', /padding-left:2em/.test(r.text) && /font-size:12pt/.test(r.text));
+
+// ---------- RTF 导出 ----------
+// 目的：给「粘进 Word」提供最稳的一条路。RTF 必须是 7-bit 安全 + 结构正确，
+// 否则 Word 打开会报「文件已损坏」或者中文全变问号。
+r = Bib.build(items, { style: 'gbt7714', format: 'rtf', title: '参考文献' });
+ok('rtf：有 RTF 头与结尾', /^\{\\rtf1/.test(r.text) && r.text.trim().endsWith('}'), r.text.slice(0, 40));
+ok('rtf：声明了中文字体（fcharset134）', r.text.indexOf('\\fcharset134') > 0);
+ok('rtf：中文写成 \\uN? 转义', /\\u-?\d+\?/.test(r.text));
+ok('rtf：编号条目用悬挂缩进', r.text.indexOf('\\fi-360') > 0 && r.text.indexOf('\\tab') > 0);
+ok('rtf：每条一行（li 数量对应 \\par）', (r.text.match(/\]\\tab /g) || []).length === 3, r.text);
+ok('rtf：返回结构带 rtf 字段', typeof r.rtf === 'string' && r.rtf === r.text);
+ok('rtf：includeKeys 也带上引用键', /\[@/.test(Bib.build(items, { style: 'gbt7714', format: 'rtf', includeKeys: true }).text));
+
+// 转义：反斜杠和大括号不转义会直接把 RTF 结构弄坏
+r = Bib.build([{ key: 'r1', title: 'A {B} \\ C', creators: ['E'], year: '2022' }], { style: 'gbt7714', format: 'rtf' });
+ok('rtf：大括号与反斜杠被转义',
+  r.text.indexOf('\\{') > 0 && r.text.indexOf('\\}') > 0 && r.text.indexOf('\\\\') > 0);
+// 结构是否配平：把转义过的 \{ \} 去掉后再数，必须一一对应，否则 Word 会报文件损坏
+const bare = r.text.replace(/\\[{}]/g, '');
+ok('rtf：结构大括号配平',
+  (bare.match(/\{/g) || []).length === (bare.match(/\}/g) || []).length, bare);
+
+ok('rtfEscape 对普通 ASCII 原样输出', Bib.rtfEscape('abc 123') === 'abc 123');
+ok('rtfEscape 把换行换成 \\par', Bib.rtfEscape('a\nb').indexOf('\\par') > 0);
+ok('空表 rtf 返回空串', Bib.build([], { style: 'gbt7714', format: 'rtf' }).text === '');
+ok('format=rtf 优先于 markdown',
+  Bib.build(items, { style: 'gbt7714', markdown: true, format: 'rtf' }).text.indexOf('## ') < 0);
+
+// 老调用方传 markdown: true 仍然有效
+ok('老参数 markdown:true 仍然走 Markdown',
+  Bib.build(items, { style: 'gbt7714', markdown: true, title: '参考文献' }).text.indexOf('## 参考文献') === 0);
+ok('format 优先于 markdown',
+  Bib.build(items, { style: 'gbt7714', markdown: true, format: 'text', title: '参考文献' }).text.indexOf('## ') < 0);
+ok('返回结构带 format 字段', Bib.build(items, { style: 'gbt7714', format: 'word' }).format === 'word');
+// 空表：不该导出空壳（主进程靠 text 为空来拦「没有可保存的内容」）
+ok('空表 html 返回空串', Bib.build([], { style: 'gbt7714', format: 'html' }).text === '');
+ok('空表 word 也不给外壳', Bib.build([], { style: 'gbt7714', format: 'word' }).text === '');
+ok('只有删除标记的条目也算空表',
+  Bib.build([{ key: 'd1', title: 'x', deletedAt: 1 }], { style: 'gbt7714', format: 'html' }).text === '');
+
 ok('isNumeric 认识编号制', Bib.isNumeric('gbt7714') && Bib.isNumeric('ieee') && !Bib.isNumeric('apa'));
 ok('defaultOrder 编号制为 entry', Bib.defaultOrder('ieee') === 'entry' && Bib.defaultOrder('apa') === 'author');
 ok('STYLES 与 Cite 共用一份', Bib.STYLES === Cite.STYLES && Bib.STYLES.length === 5);

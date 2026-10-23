@@ -524,12 +524,14 @@
     const rows = (Array.isArray(items) ? items : []).map((it) => ({ it, base: citekey(it) }))
       .sort((a, b) => String(a.it && a.it.key).localeCompare(String(b.it && b.it.key)));
     const used = new Set();
+    const nextSuffix = new Map();
     const out = new Map();
     for (const row of rows) {
       const key = row.it && row.it.key;
       if (!key) continue;
-      let k = row.base, i = 2;
+      let k = row.base, i = nextSuffix.get(row.base) || 2;
       while (used.has(k)) k = row.base + '-' + i++;
+      nextSuffix.set(row.base, i);
       used.add(k);
       out.set(key, k);
     }

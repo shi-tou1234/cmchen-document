@@ -117,7 +117,10 @@
   function displayName(c) {
     const one = normalizeCreator(c);
     if (!one) return '';
-    if (one.firstName && one.lastName) return one.firstName + ' ' + one.lastName;
+    if (one.firstName && one.lastName) {
+      if (/^[\p{Script=Han}·]+$/u.test(one.lastName) && /^[\p{Script=Han}·]+$/u.test(one.firstName)) return one.lastName + one.firstName;
+      return one.firstName + ' ' + one.lastName;
+    }
     return one.lastName || one.firstName;
   }
 

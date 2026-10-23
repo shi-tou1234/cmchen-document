@@ -54,12 +54,31 @@ module.exports = `(async () => {
   const bibText = ($('#bib-preview') || {}).value || '';
   push('参考文献预览使用用户样式', bibText.indexOf('PROBE:Attention Is All You Need') > 0, bibText.slice(0, 140));
 
-  // 5. 删除接口：删掉文件后列表归零
-  const removed = api && api.cslRemove ? await api.cslRemove('probe-style') : null;
-  push('cslRemove 删除样式文件', !!(removed && removed.ok), JSON.stringify(removed && removed.error));
-  const after = api && api.cslStyles ? await api.cslStyles() : null;
-  push('删除后扫描结果为空', !!(after && after.ok && after.styles && after.styles.length === 0),
-    JSON.stringify(after && after.styles));
+  // 5. 界面里删除：管理样式 → 列出导入的 → 点删除
+  const mgr = $('#csl-manager');
+  push('管理面板默认收起', !!(mgr && mgr.hidden));
+  const manageBtn = $('#bib-csl-manage');
+  if (manageBtn) manageBtn.click();
+  await sleep(120);
+  push('点「管理样式」展开面板', !!(mgr && !mgr.hidden));
+  const row = mgr ? mgr.querySelector('.csl-row[data-csl-id="csl:probe-style"]') : null;
+  push('面板列出已导入的样式', !!row, mgr ? mgr.textContent.slice(0, 80) : 'no panel');
+  push('样式标题取自 info/title', !!(row && row.textContent.indexOf('Probe Style') >= 0),
+    row ? row.textContent : '');
+
+  const delBtn = row ? row.querySelector('[data-csl-del]') : null;
+  if (delBtn) delBtn.click();
+  await waitFor(() => !(mgr && mgr.querySelector('.csl-row[data-csl-id="csl:probe-style"]')), 5000);
+  const afterUi = api && api.cslStyles ? await api.cslStyles() : null;
+  push('界面删除后磁盘上的样式没了', !!(afterUi && afterUi.ok && afterUi.styles && afterUi.styles.length === 0),
+    JSON.stringify(afterUi && afterUi.styles));
+  const goneOpt = await waitFor(() => !document.querySelector('#ld-cite-style option[value="csl:probe-style"]'), 5000);
+  push('界面删除后详情下拉里的选项也清掉', goneOpt);
+  push('删除后面板显示空态', !!(mgr && /还没有导入过/.test(mgr.textContent)), mgr ? mgr.textContent.slice(0, 60) : '');
+
+  // 6. 删除接口是幂等的（文件已经没了再删一次也不报错）
+  const again = api && api.cslRemove ? await api.cslRemove('probe-style') : null;
+  push('重复删除同一 id 仍然返回成功', !!(again && again.ok), JSON.stringify(again && again.error));
 
   return { checks };
 })();`;

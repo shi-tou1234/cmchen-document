@@ -22,6 +22,8 @@ module.exports = `(async () => {
     let off = null;
     if (pdfBridge.lib.onFetchPdfProgress) off = pdfBridge.lib.onFetchPdfProgress((p) => events.push(p));
     const r = await pdfBridge.lib.fetchPdfBatch(keys);
+    // Progress events and invoke replies travel on separate IPC deliveries.
+    await waitFor(() => events.length === (r && r.done), 4000);
     if (off) off();
 
     push('批量抓取返回 ok', r && r.ok, r && r.error);

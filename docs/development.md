@@ -60,6 +60,7 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 | `src/renderer/renderer.js` | 阅读器主逻辑（PDF / 富文档 / 缩放 / 翻页 / 标签 / 搜索 / 导出 / 朗读 / 打印） |
 | `src/renderer/library-ui.js` | 库界面（列表 / 详情 / 收藏集 / 标签 / 批量 / 设置）+ 全屏 Markdown 笔记编辑器 |
 | `src/renderer/annotations.js` | 标注模型与 SVG 渲染 |
+| `src/renderer/native-annos.js` | PDF 自带批注（/Annots）读取、坐标转换、去重合并 |
 | `src/renderer/selection.js` | 文本层选区、高亮、评论、摘录 |
 | `src/renderer/lightbox.js` | 看图模式灯箱 |
 | `src/renderer/pdfimages.js` | 从 PDF 操作符定位内嵌位图 |
@@ -80,7 +81,7 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 }
 ```
 
-这样会跑 58 个 Node 驱动的脚本（62 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
+这样会跑 65 个 Node 驱动的脚本（69 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
 
 | 类型 | 数量 | 怎么跑 |
 |---|---|---|
@@ -217,7 +218,7 @@ NSIS 安装包默认装到当前用户目录（`%LOCALAPPDATA%\Programs\Trove`�
 ## 发布清单
 
 - [ ] 16 个纯 Node 回归全过
-- [ ] 43 个 Electron 回归全过（至少 library-ui / csl-ui / richdoc / reader-plus / backup / datadir / single-instance / note-editor / rich-anno / undo / search；另有 3 个直跑 Electron 的探针）
+- [ ] 50 个 Electron 回归全过（至少 library-ui / csl-ui / richdoc / reader-plus / backup / datadir / single-instance / note-editor / rich-anno / undo / search / native-annos；另有 3 个直跑 Electron 的探针）
 - [ ] `npx electron-builder --win dir` → rcedit → portable + nsis
 - [ ] `node scripts/test-packaged.js "build\Trove-<版本>-portable.exe"` 17 项全过
 - [ ] 安装包静默安装 → 启动 → 卸载，快捷方式与安装目录清理干净

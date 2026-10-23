@@ -85,6 +85,7 @@ async function probe(win) {
 }
 
 app.whenReady().then(async () => {
+  let code = 1;
   try {
     const win = new BrowserWindow({
       show: false, width: 1000, height: 760,
@@ -96,8 +97,9 @@ app.whenReady().then(async () => {
     const res = await probe(win);
     fs.writeFileSync(path.join(require('os').tmpdir(), 'pdfreader-real-input.json'), JSON.stringify(res, null, 1));
     console.log('[real-input] ' + (res.pass ? 'PASS' : 'FAIL') + ' (details -> %TEMP%\\pdfreader-real-input.json)');
+    code = res.pass ? 0 : 1;
   } catch (e) {
     console.error('[real-input] ERROR', e && e.message ? e.message : e);
   }
-  app.exit(0);
+  app.exit(code);
 });

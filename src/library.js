@@ -28,6 +28,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const Creators = require('./creators.js');
 const RichText = require('./richtext.js');
+const { atomicWrite } = require('./atomic-file');
 
 const VERSION = 8;
 const BACKUP_KEEP = 10;
@@ -201,6 +202,7 @@ function backupRaw(raw, label) {
 
 // 读一次缓存住；损坏时把坏文件改名留证，再从空库开始，绝不让 app 崩溃
 let cache = null;
+let savedJson = null;
 function load() {
   if (cache) return cache;
   const p = filePath();
@@ -211,9 +213,10 @@ function load() {
     const obj = JSON.parse(raw);
     const oldVersion = Number.isFinite(+obj.version) ? +obj.version : 1;
     cache = normalize(obj);
+    savedJson = JSON.stringify(cache);
     if (oldVersion < VERSION) {
       backupRaw(raw, 'pre-v' + oldVersion);
-      save(); // 立刻落成当前版本，避免每次启动重复迁移/备份
+      try { save(); } catch (err) { console.warn('[library] migration save failed:', err.message); }
     }
   } catch (err) {
     if (err.code !== 'ENOENT') {
@@ -221,6 +224,7 @@ function load() {
       try { fs.copyFileSync(p, p + '.corrupt-' + Date.now()); } catch (_) {}
     }
     cache = emptyStore();
+    savedJson = JSON.stringify(cache);
   }
   return cache;
 }
@@ -393,26 +397,19 @@ function normalizeNotes(raw, legacyText, created, updated) {
   return out;
 }
 
-// 原子写：先写 tmp 再替换；Windows 上 rename 目标已存在时可能失败，退回直写
+// 写入失败恢复最后一次成功的内存状态，并通过 IPC 向调用者报告失败。
 function save() {
   const p = filePath();
-  const tmp = p + '.tmp';
   const store = load();
   store.version = VERSION;
   const json = JSON.stringify(store, null, 0);
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(tmp, json);
-    try {
-      if (fs.existsSync(p)) fs.unlinkSync(p);
-      fs.renameSync(tmp, p);
-    } catch (_) {
-      fs.writeFileSync(p, json);
-    }
+    atomicWrite(p, json);
+    savedJson = json;
     return true;
   } catch (err) {
-    console.error('[library] save failed:', err && err.message);
-    return false;
+    cache = savedJson ? JSON.parse(savedJson) : null;
+    throw new Error('保存失败，修改尚未写入磁盘：' + (err && err.message ? err.message : err));
   }
 }
 
@@ -830,6 +827,7 @@ function exportStore() {
 }
 
 function replaceStore(obj) {
+  load(); // 保留可回滚的旧状态，包括空库首次写入。
   cache = normalize(obj);
   save();
   return summary();
@@ -837,7 +835,15 @@ function replaceStore(obj) {
 
 // 把另一个库合并进来：同 id 的集合/搜索保留当前值，同 key 的条目跳过，避免恢复时把当前库清空。
 function mergeStore(obj) {
-  const cur = load();
+  const beforeCount = load().items.length;
+  cache = combineStores(load(), obj);
+  save();
+  const inc = normalize(obj);
+  return { addedItems: cache.items.length - beforeCount, addedCollections: inc.collections.length, addedSearches: inc.searches.length };
+}
+
+function combineStores(base, obj) {
+  const cur = normalize(base);
   const inc = normalize(obj);
   const collIds = new Set(cur.collections.map((c) => c.id));
   for (const c of inc.collections) {
@@ -859,8 +865,10 @@ function mergeStore(obj) {
     itemKeys.add(it.key);
     added++;
   }
-  save();
-  return { addedItems: added, addedCollections: inc.collections.length, addedSearches: inc.searches.length };
+  // 保留导入库的标注对象与标签，现有库同 id 的值优先。
+  cur.annoMeta = Object.assign({}, inc.annoMeta, cur.annoMeta);
+  cur.annoTags = Object.assign({}, inc.annoTags, cur.annoTags);
+  return cur;
 }
 
 function backupNow(label) {
@@ -1258,20 +1266,22 @@ function undoInfo() {
 }
 
 function undo() {
-  const it = undoStack.pop();
+  const it = undoStack[undoStack.length - 1];
   if (!it) return { ok: false, error: '没有可撤销的操作' };
   const nowSnap = snapshotJson();
-  if (!restoreSnapshot(it.snap)) return { ok: false, error: '撤销失败：备份数据损坏' };
+  if (!restoreSnapshot(it.snap)) return { ok: false, error: '撤销失败：无法保存，请检查磁盘或目录权限后重试' };
+  undoStack.pop();
   redoStack.push({ desc: it.desc, snap: nowSnap });
   if (redoStack.length > UNDO_LIMIT) redoStack.shift();
   return { ok: true, desc: it.desc };
 }
 
 function redo() {
-  const it = redoStack.pop();
+  const it = redoStack[redoStack.length - 1];
   if (!it) return { ok: false, error: '没有可重做的操作' };
   const nowSnap = snapshotJson();
-  if (!restoreSnapshot(it.snap)) return { ok: false, error: '重做失败：备份数据损坏' };
+  if (!restoreSnapshot(it.snap)) return { ok: false, error: '重做失败：无法保存，请检查磁盘或目录权限后重试' };
+  redoStack.pop();
   undoStack.push({ desc: it.desc, snap: nowSnap });
   if (undoStack.length > UNDO_LIMIT) undoStack.shift();
   return { ok: true, desc: it.desc };
@@ -1321,10 +1331,10 @@ module.exports = {
   setAnnoTags, addAnnoTags, removeAnnoTag,
   annoMetaOf, annoTagsOf, updateAnno, linkAnnoToItem, unlinkAnno, remapAnnoTags,
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,
-  exportStore, replaceStore, mergeStore, backupNow,
+  exportStore, replaceStore, mergeStore, combineStores, backupNow,
   guessTitleFromPath, ITEM_TYPES,
   undo, redo, undoInfo,
-  resetCache() { cache = null; }, // 测试钩子：模拟新进程从磁盘重载
+  resetCache() { cache = null; savedJson = null; }, // 测试钩子：模拟新进程从磁盘重载
   resetUndo() { undoStack = []; redoStack = []; },   // 测试钩子：清空撤销栈（不动数据）
 };
 

@@ -11,6 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const docconvert = require('./docconvert.js');
 const query = require('./query.js');
+const { atomicWrite } = require('./atomic-file');
 
 const VERSION = 1;
 const MAX_CHARS_PER_PAGE = 200000;
@@ -43,39 +44,35 @@ function statOf(p) {
   } catch (_) { return null; }
 }
 
-function readIndex(pdfPath) {
-  const f = fileFor(pdfPath);
+function readEntryFile(f) {
   let st;
-  try { st = fs.statSync(f); } catch (_) { return null; }
-  const stamp = st.size + ':' + Math.round(st.mtimeMs);
-  const hit = entryCache.get(pdfPath);
-  if (hit && hit.stamp === stamp) return hit.entry;
+  try { st = fs.statSync(f); } catch (_) { entryCache.delete(f); return null; }
+  const stamp = st.size + ':' + st.mtimeMs + ':' + st.ctimeMs;
+  const hit = entryCache.get(f);
+  if (hit && hit.stamp === stamp) { entryCache.delete(f); entryCache.set(f, hit); return hit.entry; }
+  entryCache.delete(f);
   try {
-    let raw = fs.readFileSync(f, 'utf8');
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    const raw = fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, '');
     const entry = JSON.parse(raw);
-    if (!entry || entry.version !== VERSION || !Array.isArray(entry.pages)) throw new Error('bad index');
-    entryCache.set(pdfPath, { stamp, entry });
+    if (!entry || entry.version !== VERSION || !Array.isArray(entry.pages)) return null;
+    // Bound cache memory; a single unusually large index remains readable without being retained.
+    if (st.size <= 32 * 1024 * 1024) {
+      entryCache.set(f, { stamp, entry, bytes: st.size });
+      let bytes = [...entryCache.values()].reduce((sum, e) => sum + e.bytes, 0);
+      while (bytes > 32 * 1024 * 1024) {
+        const key = entryCache.keys().next().value;
+        bytes -= entryCache.get(key).bytes; entryCache.delete(key);
+      }
+    }
     return entry;
-  } catch (_) {
-    return null;
-  }
+  } catch (_) { return null; }
 }
+function readIndex(pdfPath) { return readEntryFile(fileFor(pdfPath)); }
 
 function writeIndex(pdfPath, entry) {
   const f = fileFor(pdfPath);
-  const tmp = f + '.tmp';
-  const json = JSON.stringify(entry);
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  fs.writeFileSync(tmp, json);
-  try {
-    if (fs.existsSync(f)) fs.unlinkSync(f);
-    fs.renameSync(tmp, f);
-  } catch (_) {
-    fs.writeFileSync(f, json);
-  }
-  try { fs.unlinkSync(tmp); } catch (_) {}
-  entryCache.delete(pdfPath);
+  atomicWrite(f, JSON.stringify(entry));
+  entryCache.delete(f);
 }
 
 function isFresh(pdfPath) {
@@ -208,13 +205,7 @@ function search(queryStr) {
   try { files = fs.readdirSync(dirPath()).filter((f) => /^[a-f0-9]{24}\.json$/.test(f)); } catch (_) {}
   for (const f of files) {
     const full = path.join(dirPath(), f);
-    let entry = null;
-    try {
-      // 索引文件很小；按需读盘最稳，避免用 mtime 猜缓存导致串条目
-      let text = fs.readFileSync(full, 'utf8');
-      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-      entry = JSON.parse(text);
-    } catch (_) { continue; }
+    const entry = readEntryFile(full);
     if (!entry || entry.error || !Array.isArray(entry.pages)) continue;
     for (const pg of entry.pages) {
       const orig = String(pg.text || '');
@@ -269,8 +260,8 @@ function stats() {
     try {
       const full = path.join(dirPath(), f);
       bytes += fs.statSync(full).size;
-      let text = fs.readFileSync(full, 'utf8');
-      const obj = JSON.parse(text);
+      const obj = readEntryFile(full);
+      if (!obj) continue;
       if (obj.error) failed++;
       else {
         indexed++;
@@ -286,7 +277,7 @@ function removeForPath(pdfPath) {
   try {
     const f = fileFor(pdfPath);
     if (fs.existsSync(f)) fs.unlinkSync(f);
-    entryCache.delete(path.resolve(pdfPath));
+    entryCache.delete(f);
     return true;
   } catch (_) { return false; }
 }

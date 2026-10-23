@@ -453,10 +453,18 @@ function matchLibraryItem(it, ast) {
   });
 }
 
+// All search sources use the same occurrence, phrase and density weights.
+function scoreText(hay, ast) {
+  const m = evalText(hay, ast);
+  let score = 0, count = 0;
+  if (m.ok) for (const [tok, n] of m.hits) { count += n; score += n * (tok.phrase ? 3 : 1); }
+  return { count, score: score + count * 1000 / Math.max(60, hay.length) };
+}
+
 return {
   fold, hasCJK, parseQuery,
   matchTokens, matchNone, anyToken, countToken, firstHit,
-  matchText, evalText, evalNode, eval3,
+  matchText, evalText, evalNode, eval3, scoreText,
   creatorsText, fieldValues, matchFields, matchFieldsNot, itemHaystack, matchLibraryItem,
   CJK_RE,
 };

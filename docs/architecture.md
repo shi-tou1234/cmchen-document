@@ -17,6 +17,7 @@ Trove 是一个 Electron 应用：主进程管文件和索引，渲染进程管�
 │   library-ui.js   文献库：列表 / 详情 / 收藏集 / 标签 / 批量 / 设置          │
 │                   + 全屏 Markdown 笔记编辑器（源码 / 预览双栏）              │
 │   annotations.js  标注模型与 SVG 绘制                                       │
+│   native-annos.js PDF 自带批注（/Annots）→ 本地标注对象                     │
 │   selection.js    文本层选区 → 高亮 / 评论 / 摘录                            │
 │   lightbox.js     看图模式灯箱                                              │
 │   pdfimages.js    从 PDF 操作符里定位内嵌位图                                │
@@ -109,7 +110,7 @@ library.json  items[].annoIds   ← 与 annoMeta.itemKey 双向
 
 **富文档（Word / PPT / Excel / Markdown / EPUB）也有同一套叠加层**：`loadRichDoc` 给每个 `.doc-page` 挂上 `.anno-base` / `.anno` 两个 SVG 并 `Anno.attachPage`。区别是富文档的 SVG **不设 viewBox**——用户单位 = 页面 CSS 像素，页面变高 / 缩放都不漂（`#doc-view` 用 CSS zoom，缩放天然跟随）。
 
-标注按文件路径哈希存盘。在应用里用"按条目重命名"改名时，**标注文件与全文索引会跟着搬到新路径**（`annotations/<sha1(旧路径)>.json` → 新 hash，索引同理并更新内部 path）；但在资源管理器里直接改名 / 移动，旧标注不会跟随——这是"按路径引用"的代价，库里的"附件重定位"只改条目路径。
+标注按文件路径哈希存盘。在应用里用"按条目重命名"改名时，标注文件与全文索引跟着搬到新路径；在资源管理器里改名 / 移动后，可用"附件重定位"更新路径并复制旧标注到新路径的哈希文件，合并目标已有标注、保留旧副本。同 id 内容冲突时中止，不覆盖原标注。
 
 这些标注现在在文献库里有第二个入口：侧栏「标注」把 `annotations/*.json` 里的批注汇总成一张表（`anno-list` IPC），可以搜索、打标签（标签存在 `library.json` 的 `annoMeta[id].tags` 里）、批量导出成 Markdown 笔记。标注本体仍然跟着文件走，库这边存的是"对象这一侧"（见「标注对象层」）。
 
@@ -118,7 +119,10 @@ library.json  items[].annoIds   ← 与 annoMeta.itemKey 双向
 - `settings.json`：`dataDir`、`defaultSort`、`theme`、`autoIndex`、`hintSeen`、`invertPages`、`viewMode`、`fetchEmail`（Unpaywall 的联系邮箱）。字段白名单，读坏回退默认值。
 - `window-state.json`：窗口位置 / 尺寸 / 最近打开（最多 8 条，含每份文件的页码）。
 - `fulltext/<sha1(path)>.json`：全文索引，按 `mtime + size` 判断新鲜度，可重建，不进备份。
-- `snapshots/*.png`：图片标注与"标注 → 笔记"的截图，备份一并带走（单份备份最多 60 MB 图）。
+- `snapshots/`、`styles/`、`attachments/`：托管资源随迁移和 JSON 备份携带，资源总量上限 60 MB（超限报错，不截断）。备份保留 `format:1` 与旧 `images` 字段，并增加 `resources`、`sourceDataDir` 用于恢复路径。
+- `atomic-file.js`：同目录临时文件写完再替换，失败不直写旧文件；库和设置仅在落盘成功后确认状态，库失败时回滚缓存，撤销栈保留重试机会。
+- `data-resources.js`：先暂存资源、库、标注与设置，再提交；失败恢复已提交文件。回滚本身失败时保留临时恢复副本并报告位置。
+- 大库列表按 80 行分块，只挂载视口附近的 DOM；选择状态仍按 key 保存。引用键重名分配记录下一后缀，避免重复从 2 扫起。
 
 ## 打开一份文档的链路
 
@@ -194,9 +198,9 @@ doi: url: volume: issue: pages: language:      14 个字段限定
 - `cite.js` 管**入口与 5 种内置样式**：`gbt7714 / apa / chicago / ieee / mla`，37 类标识、citekey。`format()` 先看 `csl:` 前缀，命中就交给 `csl.js`；`styleList()` 把 5 种内置与已注册的 CSL 样式合成下拉数据源（内置样式 / CSL 样式（内置）/ 导入的 CSL 样式）。
 - `csl.js` 是**自研 CSL 1.0.2 子集**（UMD，主进程与渲染进程共用）：手写 XML 解析 → 样式解析（macro / citation / bibliography / sort / locale terms / page-range-format）→ 渲染参考文献表布局。不依赖 citeproc-js，也不联网。支持 `text / group / choose / names / date / number / label`、et-al、姓名缩写与排序、页码格式、text-case、引号、affix 与标点去重；不认识的元素记进 `warnings`，不阻断导入。
 - `csl-styles.js` 是 3 份手写的内置 CSL 样式（Vancouver / Nature / Harvard–Cite Them Right），由 `cite.js` 在加载时注册；`csl:` 前缀是界面 / 存储里的唯一标识（注册表内部 key 不带前缀）。
-- `bib.js` 负责**一批**：`isNumericStyle()` 决定是否编号与默认排序；CSL 样式若带 `<sort>`，由 `cslSort()` 交给引擎，否则退回「编号制保持传入顺序 / 作者-年份制按姓氏」；同作者同年补 a / b，编号制重新编号，最后包成 Markdown 或纯文本。CSL 样式自己输出 `citation-number`，`bib.js` 不再套 `[n]`。
+- `bib.js` 负责**一批**：`isNumericStyle()` 决定是否编号与默认排序；CSL 样式若带 `<sort>`，由 `cslSort()` 交给引擎，否则退回「编号制保持传入顺序 / 作者-年份制按姓氏」；同作者同年补 a / b，编号制重新编号，最后按 `format` 包装成 **Markdown / 纯文本 / HTML / Word / RTF**——五种格式共用同一份「正文 + 引用键 + 排序」结果，只有外衣不同，且 `format` 优先于老的 `markdown: true`。HTML / Word 走 `<ol>`（编号制）或 `<ul>`（作者-年份制），正文里的 `& < >` 转义；Word 那份是套了 `<meta charset>` 与基础排版的最小 HTML 外壳、存成 `.doc`，Word 打开即带编号与缩进。RTF 走另一套转义：`\ { }` 反斜杠转义、非 ASCII 一律写 `\uN?`（N 为 UTF-16 码元的有符号十进制，代理对拆成两个 `\u`），编号条目用 `\fi-360\li360` + `\tab` 排成悬挂缩进。CSL 样式自己输出 `citation-number`，`bib.js` 不再套 `[n]`。
 - **用户样式数据流**：`main.js` 的 `csl-styles` 扫描 `<数据目录>/styles/*.csl` → 用 `Csl.parseStyle` 校验（坏文件跳过）→ preload 暴露 `lib.cslStyles()` → `library-ui.js` 启动 / 切换数据目录时调用 `Cite.registerCslStyles()` → `Csl.setUserStyles()` 先清旧用户样式再整批注册 → 重建两个下拉。导入走 `csl-import`：系统文件对话框 → 校验 → 复制到 `styles/<id>.csl` → 返回全量列表，界面直接选中新样式。
-- **删除**：`csl-remove` 按 id 删 `styles/<id>.csl`；下次启动扫描后自然消失（界面暂未放按钮，可直接删文件）。
+- **删除**：`csl-remove` 按 id 删 `styles/<id>.csl`；参考文献弹层的「管理样式」面板列出已导入的样式并逐个删除，删完以主进程重扫的结果为准（界面不自己维护列表），删掉正在使用的样式会退回 GB/T。
 - citekey 由渲染层传入整库分配的 Map，避免只选部分条目时出现不同的 `-2` 后缀。
 - 保存走通用 `save-text` IPC：渲染层拼好文本，主进程只弹系统对话框 + 原子写，不再读一遍库。
 

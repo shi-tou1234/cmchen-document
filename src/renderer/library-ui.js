@@ -356,6 +356,75 @@ window.LibraryUI = (function () {
       '<span style="color:#9aa0a6;font-size:11px">' + cnt + '</span></button>';
   }
 
+  let gridWindow = null;
+  function renderRows(list, scrollTop) {
+    if (gridWindow) { gridWindow.destroy(); gridWindow = null; }
+    if (list.length <= 240 || !window.IntersectionObserver) {
+      el.grid.innerHTML = list.map(cardHtml).join('');
+      return;
+    }
+    // Keep distant rows as measured placeholders. Event delegation and the data selection
+    // model stay unchanged; only a few chunks need live DOM nodes at any one time.
+    const chunkSize = 80, chunks = [], heights = new Map();
+    const kind = it => it.itemType === 'annotation' ? 'annotation' : (it.deletedAt ? 'trash' : (it.attachment && !it.hasFile ? 'missing' : 'normal'));
+    el.grid.innerHTML = '';
+    const measure = document.createElement('div');
+    measure.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;width:' + el.grid.clientWidth + 'px';
+    el.grid.appendChild(measure);
+    for (const it of list) if (!heights.has(kind(it))) {
+      measure.innerHTML = cardHtml(it);
+      heights.set(kind(it), measure.firstElementChild.getBoundingClientRect().height || 40);
+    }
+    measure.remove();
+    const fragment = document.createDocumentFragment();
+    for (let start = 0; start < list.length; start += chunkSize) {
+      const rows = list.slice(start, start + chunkSize);
+      const node = document.createElement('div');
+      node.className = 'lib-chunk';
+      node.style.height = rows.reduce((n, it) => n + heights.get(kind(it)), 0) + 'px';
+      const chunk = { node, rows, mounted: false };
+      node.__chunk = chunk;
+      chunks.push(chunk); fragment.appendChild(node);
+    }
+    el.grid.appendChild(fragment);
+    function mount(chunk) {
+      if (chunk.mounted) return;
+      chunk.node.innerHTML = chunk.rows.map(cardHtml).join('');
+      chunk.node.style.height = '';
+      chunk.mounted = true;
+    }
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const chunk = entry.target.__chunk;
+        if (entry.isIntersecting) mount(chunk);
+        else if (chunk.mounted && !chunk.node.contains(document.activeElement) && !state.dragKey) {
+          const height = chunk.node.getBoundingClientRect().height;
+          chunk.node.style.height = height + 'px';
+          chunk.node.replaceChildren(); chunk.mounted = false;
+        }
+      }
+    }, { root: el.grid, rootMargin: '800px 0px' });
+    // Mount the current viewport synchronously, including refresh at a saved scroll position.
+    let top = 0;
+    for (const chunk of chunks) {
+      const height = parseFloat(chunk.node.style.height);
+      if (top + height >= scrollTop - 800 && top <= scrollTop + el.grid.clientHeight + 800) mount(chunk);
+      top += height; observer.observe(chunk.node);
+    }
+    let width = el.grid.clientWidth, resizeFrame = null;
+    const resize = new ResizeObserver(() => {
+      if (el.grid.clientWidth === width) return;
+      width = el.grid.clientWidth;
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(renderGrid);
+    });
+    resize.observe(el.grid);
+    gridWindow = {
+      ensure(key) { const i = list.findIndex(it => it.key === key); if (i >= 0) mount(chunks[Math.floor(i / chunkSize)]); },
+      destroy() { observer.disconnect(); resize.disconnect(); cancelAnimationFrame(resizeFrame); },
+    };
+  }
+
   function renderGrid() {
     const list = visibleItems();
     const saved = scopeSearch();
@@ -386,7 +455,7 @@ window.LibraryUI = (function () {
       el.search.title = '检索语法："短语" 精确匹配 · -词 排除 · OR（或）· ( ) 分组 · title:/author:/tag:/year: 等字段限定';
     }
     const keepTop = el.grid.scrollTop;
-    el.grid.innerHTML = list.map((it) => cardHtml(it)).join('');
+    renderRows(list, keepTop);
     el.grid.scrollTop = keepTop;
   }
 
@@ -408,6 +477,7 @@ window.LibraryUI = (function () {
     if (it.publication) meta.push(esc(it.publication));
     // v9：独立笔记没有作者/年份，摘要就是正文前几十个字
     const isNoteItem = it.itemType === 'note' && !it.attachment;
+    const missingFile = !!(it.attachment && it.attachment.path && !it.hasFile);
     if (isNoteItem) {
       const body = ((it.notes || [])[0] || {}).text || it.note || '';
       const flat = String(body).replace(/\s+/g, ' ').trim();
@@ -444,9 +514,9 @@ window.LibraryUI = (function () {
           '<button class="rm" data-trash="' + esc(it.key) + '">回收站</button>');
     const note = trashed
       ? '<div class="lcpath">在回收站中 · 磁盘文件未被删除</div>'
-      : (!isNoteItem && !it.hasFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
+      : (missingFile ? '<div class="lcpath">文件已移动或删除 · 可在详情里重新定位</div>' : '');
     return '<div class="lib-card' + (selected ? ' selected' : '') + (picked ? ' picked' : '') + (cur ? ' current' : '')
-      + (it.hasFile || isNoteItem ? '' : ' missing') + '" data-key="' + esc(it.key) + '"' + openAttr +
+      + (missingFile ? ' missing' : '') + '" data-key="' + esc(it.key) + '"' + openAttr +
       (trashed ? '' : ' draggable="true"') + '>' +
       check +
       '<div class="lctitle"' + titleAttr + '>' + esc(it.title || '(无标题)') + '</div>' +
@@ -919,7 +989,7 @@ window.LibraryUI = (function () {
 
   function nvSaveNow() {
     const md = $('nv-md');
-    if (!nv.open || !nv.key || !nv.noteId || !md) return Promise.resolve();
+    if (!nv.open || !nv.key || !nv.noteId || !md) return Promise.resolve(true);
     if (nv.timer) { clearTimeout(nv.timer); nv.timer = null; }
     const text = md.value;
     const title = ($('nv-title') && $('nv-title').value.trim()) || '';
@@ -930,11 +1000,12 @@ window.LibraryUI = (function () {
       .then(() => (title ? L().updateItem(key, { title }) : null))
       .then(() => reloadItemsQuiet())
       .then(() => {
-        if (nv.key !== key) return;
+        if (nv.key !== key) return true;
         const d = new Date();
         nvStatus('已保存 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'));
+        return true;
       })
-      .catch(() => { if (nv.key === key) nvStatus('保存失败'); });
+      .catch(() => { if (nv.key === key) nvStatus('保存失败，请检查磁盘或目录权限后重试'); return false; });
     return p;
   }
 
@@ -968,6 +1039,7 @@ window.LibraryUI = (function () {
   }
 
   async function openNoteEditor(key) {
+    if (nv.open && !await nvSaveNow()) return;
     const it = state.items.find((x) => x.key === key);
     if (!it || !L()) return;
     let note = (it.notes || [])[0] || null;
@@ -994,7 +1066,6 @@ window.LibraryUI = (function () {
   // 不发网络/不刷新的快速关闭：切到阅读器时用，避免和文献库淡出动画抢状态
   function nvCloseQuiet() {
     if (!nv.open) return;
-    nvSaveNow();
     nv.open = false;
     nv.key = '';
     nv.noteId = '';
@@ -1007,7 +1078,7 @@ window.LibraryUI = (function () {
 
   async function closeNoteEditor() {
     if (!nv.open) return;
-    await nvSaveNow();   // 等保存真正落库，回去的列表摘要才是新的
+    if (!await nvSaveNow()) return; // 保存失败保留编辑内容，允许重试。
     nvCloseQuiet();
     if (window.App && window.App.toast) window.App.toast('笔记已保存');
     // 回到文献库时不要顺手把右侧详情栏弹出来（renderDetail 会跟着 selectedKey 走）
@@ -1480,7 +1551,12 @@ window.LibraryUI = (function () {
     if (!it || it.deletedAt) return;
     const patch = readDetailForm();
     if (!patch.title) patch.title = '(无标题)';
-    await L().updateItem(it.key, patch);
+    try { await L().updateItem(it.key, patch); }
+    catch (err) {
+      el.ld.status.textContent = '保存失败：' + (err.message || String(err));
+      window.App && window.App.toast && window.App.toast('条目尚未保存，请重试', 4000);
+      return;
+    }
     await refresh();
     el.ld.status.textContent = '已保存';
     window.App && window.App.toast && window.App.toast('条目已保存');
@@ -1821,8 +1897,10 @@ window.LibraryUI = (function () {
     const old = (el.ld.fetchPdf || {}).textContent;
     if (el.ld.fetchPdf) { el.ld.fetchPdf.disabled = true; el.ld.fetchPdf.textContent = '下载中…'; }
     el.ld.fetchStatus.textContent = '正在找开放获取的 PDF…';
-    const r = await L().fetchPdf(it.key, url || undefined);
-    if (el.ld.fetchPdf) { el.ld.fetchPdf.disabled = false; el.ld.fetchPdf.textContent = old || '抓 PDF 全文'; }
+    let r;
+    try { r = await L().fetchPdf(it.key, url || undefined, doi); }
+    catch (err) { r = { ok: false, error: err.message || String(err) }; }
+    finally { if (el.ld.fetchPdf) { el.ld.fetchPdf.disabled = false; el.ld.fetchPdf.textContent = old || '抓 PDF 全文'; } }
     if (!r || !r.ok) {
       el.ld.fetchStatus.textContent = '没抓到：' + ((r && r.error) || '未知错误');
       return;
@@ -2135,6 +2213,48 @@ window.LibraryUI = (function () {
     window.App && App.toast && App.toast('已导入样式：' + (r.label || r.id) + extra, 6000);
   }
 
+  // ---------- 已导入 CSL 样式的管理（删除入口） ----------
+  // 删除 = 删掉 <数据目录>/styles/<id>.csl，扫描列表由主进程重扫后返回，
+  // 所以这里不自己维护列表，永远以 cslStyles() 的结果为准。
+  function cslImportedList() {
+    if (!window.Cite || !Cite.styleList) return [];
+    return Cite.styleList().filter((s) => s.kind === 'user');
+  }
+
+  function renderCslManager() {
+    if (!el.cslManager) return;
+    const list = cslImportedList();
+    if (!list.length) {
+      el.cslManager.innerHTML = '<div class="csl-empty">还没有导入过 CSL 样式。点「导入 CSL…」从 zotero.org/styles 下载的 .csl 可以直接用。</div>';
+      return;
+    }
+    el.cslManager.innerHTML = list.map((s) => {
+      const warn = (s.warnings && s.warnings.length) ? ' title="样式含未支持特性：' + esc(s.warnings.slice(0, 3).join('、')) + '"' : '';
+      return '<div class="csl-row" data-csl-id="' + esc(s.id) + '">' +
+        '<span class="csl-name"' + warn + '>' + esc(s.label) + '</span>' +
+        '<span class="csl-id">' + esc(s.id) + '</span>' +
+        '<button class="ld-mini" data-csl-del="' + esc(s.id) + '">删除</button>' +
+        '</div>';
+    }).join('');
+  }
+
+  async function removeCslStyle(id) {
+    if (!L() || !L().cslRemove) return;
+    const r = await L().cslRemove(id);
+    if (!r || !r.ok) {
+      window.App && App.toast && App.toast('删除失败：' + ((r && r.error) || '未知错误'), 5000);
+      return;
+    }
+    if (window.Cite && Cite.registerCslStyles) Cite.registerCslStyles(r.styles || []);
+    // 正在用的样式被删了就退回 GB/T，别让下拉停在幽灵选项上
+    if (state.citeStyle === 'csl:' + id) state.citeStyle = 'gbt7714';
+    fillStyleSelects();
+    renderCslManager();
+    if (el.bib && el.bib.modal && !el.bib.modal.hidden) renderBib();
+    if (el.detail && !el.detail.hidden) renderDetail();
+    window.App && App.toast && App.toast('已删除样式：' + id);
+  }
+
   function bibStyleId() {
     return (el.bib && el.bib.style.value) || state.citeStyle || 'gbt7714';
   }
@@ -2154,10 +2274,11 @@ window.LibraryUI = (function () {
 
   function currentBibliography() {
     if (!window.Bib || !el.bib) return { text: '', count: 0, skipped: 0, entries: [] };
+    const fmt = el.bib.format.value;
     return window.Bib.build(bibScopeItems(), {
       style: bibStyleId(),
       order: bibOrder(),
-      markdown: el.bib.format.value === 'markdown',
+      format: fmt,
       includeKeys: el.bib.keys.checked,
       title: el.bib.title.value.trim(),
       // 用整库分配好的 citekey，避免只选部分条目时出现不同的 -2 后缀
@@ -2168,10 +2289,13 @@ window.LibraryUI = (function () {
   function renderBib() {
     if (!el.bib || el.bib.modal.hidden) return;
     const r = currentBibliography();
-    const md = el.bib.format.value === 'markdown';
+    const fmt = el.bib.format.value;
+    // html / word / rtf 的「复制」复制的是源码本身（剪贴板是纯文本，粘进 Word 会是源码），
+    // 所以标签写清楚，真正要 Word 文档请用「保存为文件…」。
+    const COPY_LABEL = { markdown: '复制 Markdown', text: '复制纯文本', html: '复制 HTML', word: '复制 HTML 源码', rtf: '复制 RTF 源码' };
     const scopeName = { list: '当前列表', selected: '已选条目', all: '整库' }[el.bib.scope.value] || '当前列表';
     el.bib.preview.value = r.text || '';
-    el.bib.copy.textContent = md ? '复制 Markdown' : '复制纯文本';
+    el.bib.copy.textContent = COPY_LABEL[fmt] || '复制';
     let meta = r.count
       ? r.count + ' 条 · ' + scopeName + ' · ' + (r.styleLabel || '')
       : scopeName + '里没有可生成的条目';
@@ -2203,6 +2327,8 @@ window.LibraryUI = (function () {
     el.bib.keys.checked = false;
     el.bib.title.value = '参考文献';
     el.bib.modal.hidden = false;
+    // 管理面板默认收起：多数时候只是来复制参考文献，别一开就占掉一截高度
+    if (el.cslManager) el.cslManager.hidden = true;
     renderBib();
     setTimeout(() => { if (el.bib && !el.bib.modal.hidden) el.bib.preview.focus(); }, 30);
   }
@@ -2214,11 +2340,12 @@ window.LibraryUI = (function () {
   async function copyBibliography() {
     const r = currentBibliography();
     if (!r.count || !window.pdfBridge || !window.pdfBridge.copyText) return;
-    const md = el.bib.format.value === 'markdown';
+    const FMT_NAME = { markdown: ' Markdown', text: '纯文本', html: ' HTML', word: ' Word（HTML 源码）', rtf: ' RTF' };
+    const label = FMT_NAME[el.bib.format.value] || '纯文本';
     try {
       const res = await window.pdfBridge.copyText(r.text);
       if (res && res.ok) {
-        el.bib.status.textContent = '已复制 ' + r.count + ' 条' + (md ? ' Markdown' : '纯文本') + '到剪贴板';
+        el.bib.status.textContent = '已复制 ' + r.count + ' 条' + label + '到剪贴板';
         window.App && window.App.toast && window.App.toast('参考文献表已复制');
       } else {
         el.bib.status.textContent = '复制失败';
@@ -2235,11 +2362,11 @@ window.LibraryUI = (function () {
       el.bib.status.textContent = '当前环境不能保存文件';
       return;
     }
-    const md = el.bib.format.value === 'markdown';
+    const fmt = el.bib.format.value;
     try {
       const res = await window.pdfBridge.saveText({
         text: r.text,
-        format: md ? 'markdown' : 'text',
+        format: fmt,
         defaultName: 'Trove-参考文献-' + new Date().toISOString().slice(0, 10),
       });
       if (res && res.ok) {
@@ -2584,9 +2711,10 @@ window.LibraryUI = (function () {
         order: $('bib-order'), format: $('bib-format'), keys: $('bib-keys'),
         title: $('bib-title'), preview: $('bib-preview'), count: $('bib-count'),
         copy: $('bib-copy'), save: $('bib-save'), status: $('bib-status'),
-        cslImport: $('bib-csl-import'),
+        cslImport: $('bib-csl-import'), cslManage: $('bib-csl-manage'),
         close: $('bib-close'), close2: $('bib-close2'),
       },
+      cslManager: $('csl-manager'),
     };
 
     // 搜索框：每次按键都重画整张列表，条目一多就会卡。去抖一下（90ms），
@@ -2849,9 +2977,9 @@ window.LibraryUI = (function () {
     const nvBack = $('nv-back');
     if (nvBack) nvBack.addEventListener('click', closeNoteEditor);
     const nvSaveBtn = $('nv-save');
-    if (nvSaveBtn) nvSaveBtn.addEventListener('click', () => {
-      nvSaveNow();
-      if (window.App && window.App.toast) window.App.toast('笔记已保存');
+    if (nvSaveBtn) nvSaveBtn.addEventListener('click', async () => {
+      const saved = await nvSaveNow();
+      if (saved && window.App && window.App.toast) window.App.toast('笔记已保存');
     });
     const nvTitle = $('nv-title');
     if (nvTitle) nvTitle.addEventListener('input', nvScheduleSave);
@@ -2916,8 +3044,7 @@ window.LibraryUI = (function () {
       }
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
-        nvSaveNow();
-        if (window.App && window.App.toast) window.App.toast('笔记已保存');
+        nvSaveNow().then(saved => { if (saved && window.App && window.App.toast) window.App.toast('笔记已保存'); });
       }
     });
 
@@ -2943,6 +3070,18 @@ window.LibraryUI = (function () {
       el.bib.copy.addEventListener('click', copyBibliography);
       el.bib.save.addEventListener('click', saveBibliography);
       if (el.bib.cslImport) el.bib.cslImport.addEventListener('click', importCslStyle);
+      if (el.bib.cslManage) {
+        el.bib.cslManage.addEventListener('click', () => {
+          el.cslManager.hidden = !el.cslManager.hidden;
+          if (!el.cslManager.hidden) renderCslManager();
+        });
+      }
+      if (el.cslManager) {
+        el.cslManager.addEventListener('click', (e) => {
+          const btn = e.target.closest && e.target.closest('[data-csl-del]');
+          if (btn) removeCslStyle(btn.getAttribute('data-csl-del'));
+        });
+      }
     }
 
     // 设置弹层
@@ -3394,6 +3533,7 @@ window.LibraryUI = (function () {
         if (i < 0) i = e.key === 'ArrowDown' ? -1 : list.length;
         i = Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
         state.selectedKey = list[i].key;
+        if (gridWindow) gridWindow.ensure(state.selectedKey);
         markSelection(); renderDetail();
         const card = el.grid.querySelector('.lib-card.selected');
         if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest' });
@@ -3515,6 +3655,9 @@ window.LibraryUI = (function () {
   // 只藏根节点的话，它们会留在阅读器上面，遮住整页。
   // 收起库时记住列表滚动位置
   function hide() {
+    if (nv.open) return nvSaveNow().then(saved => {
+      if (saved) { nvCloseQuiet(); hide(); }
+    });
     nvCloseQuiet();   // 去阅读器时把全屏笔记收掉（先落盘），别让它盖住文档
     if (el.grid) state.listScroll = el.grid.scrollTop;
     const seq = ++layerSeq;

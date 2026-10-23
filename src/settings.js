@@ -6,6 +6,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { atomicWrite } = require('./atomic-file');
 
 const DEFAULTS = {
   dataDir: '',            // 空 = <userData>
@@ -79,21 +80,13 @@ function get() {
 function set(patch) {
   const cur = get();
   const next = sanitize(Object.assign({}, cur, patch || {}));
-  cache = next;
   try {
-    fs.mkdirSync(path.dirname(filePath()), { recursive: true });
-    const tmp = filePath() + '.tmp';
     const json = JSON.stringify(next, null, 2);
-    fs.writeFileSync(tmp, json);
-    try {
-      if (fs.existsSync(filePath())) fs.unlinkSync(filePath());
-      fs.renameSync(tmp, filePath());
-    } catch (_) {
-      fs.writeFileSync(filePath(), json);
-    }
+    atomicWrite(filePath(), json);
+    cache = next;
     return { ok: true, settings: Object.assign({}, next) };
   } catch (err) {
-    return { ok: false, error: String(err && err.message ? err.message : err), settings: Object.assign({}, next) };
+    return { ok: false, error: String(err && err.message ? err.message : err), settings: cur };
   }
 }
 

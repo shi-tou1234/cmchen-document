@@ -27,6 +27,85 @@
   const NUMERIC_STYLES = new Set(['gbt7714', 'ieee']);
   const str = (v) => String(v == null ? '' : v).trim();
 
+  const escHtml = (v) => String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // 参考文献表的 HTML：编号制用 <ol>，作者-年份制用 <ul>。
+  // 存在的意义是省掉「粘进 Word 再排版」这一步 —— 存成 .doc 时 Word 直接按 HTML 解析，
+  // 编号、缩进、引用键都能保留。
+  function toHtml(title, rows, numeric) {
+    // 空表不输出空壳：和 markdown / text 一致地返回空串，让主进程按「没有可保存的内容」拦掉，
+    // 免得导出一个只有 <ol></ol> 的空文件。
+    if (!rows.length) return '';
+    let out = '';
+    if (title) out += '<h2>' + escHtml(title) + '</h2>\n';
+    const tag = numeric ? 'ol' : 'ul';
+    out += '<' + tag + ' class="references">\n';
+    for (const r of rows) {
+      let body = escHtml(r.body);
+      if (r.key) body += ' <code>[@' + escHtml(r.key) + ']</code>';
+      out += '  <li>' + body + '</li>\n';
+    }
+    return out + '</' + tag + '>\n';
+  }
+
+  // Word 打开 .doc 时按 HTML 解析，给它一个最小但够用的外壳（字体、行距、缩进）。
+  // 不塞复杂样式：不同 Word 版本对 CSS 的支持差别大，越简单越稳。
+  function wrapHtmlDoc(inner, title) {
+    return '<!DOCTYPE html>\n<html><head><meta charset="utf-8">\n' +
+      '<title>' + escHtml(title || '参考文献') + '</title>\n' +
+      '<style>' +
+      'body{font-family:"Times New Roman","SimSun",serif;font-size:12pt;line-height:1.5;margin:2em}' +
+      'h2{font-size:14pt}' +
+      'ol.references,ul.references{padding-left:2em}' +
+      'li{margin:0 0 6pt}' +
+      'code{font-family:Consolas,monospace;font-size:10pt;color:#555}' +
+      '</style>\n</head><body>\n' + inner + '</body></html>\n';
+  }
+
+  // ---------------- RTF ----------------
+  // Zotero 的「粘进 Word」主力格式就是 RTF。相比 HTML，Word / LibreOffice / WPS 对 RTF
+  // 的解释更一致，粘过去不会被目标软件的清洗规则改掉行距和缩进。
+  // RTF 是 7-bit 安全格式：非 ASCII 一律写成 \uN?（N = UTF-16 码元的有符号十进制），
+  // 反斜杠 / 大括号必须转义，否则会把文档结构弄坏。
+  function rtfEscape(v) {
+    const s = String(v == null ? '' : v);
+    let out = '';
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      const code = s.charCodeAt(i);
+      if (ch === '\\') out += '\\\\';
+      else if (ch === '{') out += '\\{';
+      else if (ch === '}') out += '\\}';
+      else if (ch === '\n') out += '\\par\n';
+      else if (ch === '\r') continue;
+      else if (ch === '\t') out += '\\tab ';
+      else if (code < 32) continue;
+      else if (code < 128) out += ch;
+      // 代理对会拆成两个 \u（RTF 没有 32 位码点），Word 能按 UTF-16 拼回去
+      else out += '\\u' + (code > 32767 ? code - 65536 : code) + '?';
+    }
+    return out;
+  }
+
+  function toRtf(title, rows) {
+    if (!rows.length) return '';
+    let out = '{\\rtf1\\ansi\\ansicpg936\\deff0\\uc1\n' +
+      '{\\fonttbl{\\f0\\fnil\\fcharset134 SimSun;}}\n' +
+      '\\viewkind4\\pard\\sa200\\sl276\\slmult1\\f0\\fs24\n';
+    if (title) out += '\\pard\\b\\fs28 ' + rtfEscape(title) + '\\b0\\fs24\\par\\par\n';
+    for (const r of rows) {
+      let line = r.body;
+      if (r.key) line += '  [@' + r.key + ']';
+      // 形如「[3] 正文」的编号制条目拆出编号，用悬挂缩进排：首行顶格，折行缩进 0.25 英寸
+      const m = /^\[(\d+)\]\s+/.exec(line);
+      out += m
+        ? '\\pard\\fi-360\\li360\\sa120 [' + m[1] + ']\\tab ' + rtfEscape(line.slice(m[0].length)) + '\\par\n'
+        : '\\pard\\sa120 ' + rtfEscape(line) + '\\par\n';
+    }
+    return out + '}\n';
+  }
+
   // 样式列表里有 CSL 用户样式（渲染进程启动后才注册），所以不能在建模块时拍死一份 id 集合。
   function isKnownStyle(id) {
     const s = str(id);
@@ -169,11 +248,16 @@
    * opts:
    *   style       'gbt7714' | 'apa' | 'chicago' | 'ieee' | 'mla'
    *   order       'entry' | 'author'；省略时按样式取默认值
-   *   markdown    是否输出 Markdown（标题用 ##，条目间空行）
-   *   includeKeys 每条附 `[@citekey]`（Markdown 用反引号包住）
+   *   markdown    是否输出 Markdown（标题用 ##，条目间空行）；与 format 二选一，
+   *                format 优先（老调用方传 markdown 仍然有效）
+   *   format      'text' | 'markdown' | 'html' | 'word' | 'rtf'
+   *               html —— 片段（<h2> + <ol>/<ul>），用来塞进别的页面
+   *               word —— 同上但带 HTML 外壳，存成 .doc 给 Word 直接打开
+   *               rtf  —— RTF 源码，Word / LibreOffice / WPS 都能直接打开或粘贴
+   *   includeKeys 每条附 `[@citekey]`（Markdown 用反引号，HTML 用 <code>）
    *   title       标题；空串 = 不加标题
    *   citekeys    Map<item.key, citekey>；不给则按本次条目现算（可能和整库不一致）
-   * 返回 { text, entries, count, skipped, style, styleLabel, order, numeric }
+   * 返回 { text, html, rtf, entries, count, skipped, style, styleLabel, order, numeric, format }
    */
   function build(items, opts) {
     const o = opts || {};
@@ -181,7 +265,9 @@
     const numeric = isNumeric(style);
     const order = (o.order === 'entry' || o.order === 'author') ? o.order : defaultOrder(style);
     const autoOrder = o.order !== 'entry' && o.order !== 'author';
-    const markdown = !!o.markdown;
+    const format = ['text', 'markdown', 'html', 'word', 'rtf'].indexOf(o.format) >= 0
+      ? o.format : (o.markdown ? 'markdown' : 'text');
+    const markdown = format === 'markdown';
 
     let skipped = 0;
     let list = uniqueByKey(Array.isArray(items) ? items : []).filter((it) => {
@@ -192,35 +278,53 @@
     if (!numeric) list = withYearSuffixes(list, style);
 
     const keys = (o.citekeys instanceof Map) ? o.citekeys : Cite.citekeys(list);
-    const entries = list.map((it, i) => {
+    // 先算「正文 + 引用键」两件套，再按目标格式包装：
+    // 四种格式只是外衣不同，正文与排序逻辑共用一份，不会出现改了 HTML 忘了改 Markdown 的情况。
+    const rows = list.map((it, i) => {
       const n = i + 1;
       let body = Cite.format(it, style, n);
       // CSL 样式自己决定编号怎么写（citation-number），别再套一层 [n]
       if (numeric && style !== 'ieee' && !(typeof Cite.isCslStyle === 'function' && Cite.isCslStyle(style))) {
         body = '[' + n + '] ' + body;
       }
-      if (o.includeKeys) {
-        const key = keys.get(it.key) || Cite.citekey(it);
-        if (key) body += markdown ? ' `[@' + key + ']`' : '  [@' + key + ']';
-      }
-      return body;
+      return { body, key: o.includeKeys ? (keys.get(it.key) || Cite.citekey(it)) : '' };
     });
 
     const title = str(o.title);
-    let text = '';
-    if (entries.length) {
-      if (title) text += (markdown ? (/^#{1,6}\s/.test(title) ? title : '## ' + title) : title) + '\n\n';
-      text += entries.join(markdown ? '\n\n' : '\n') + '\n';
+    const htmlBody = toHtml(title, rows, numeric);
+    // 没条目时连外壳也不给（否则 Word 会打开一个空文档）
+    const html = (!rows.length) ? '' : (format === 'word' ? wrapHtmlDoc(htmlBody, title || '参考文献') : htmlBody);
+    const rtf = toRtf(title, rows);
+
+    // entries 始终是纯文本版（UI 用它显示条数、做复制兜底）；HTML / RTF 走各自字段
+    const entries = rows.map((r) => {
+      if (!r.key) return r.body;
+      return r.body + (markdown ? ' `[@' + r.key + ']`' : '  [@' + r.key + ']');
+    });
+
+    let text;
+    if (format === 'html' || format === 'word') {
+      text = html;                       // 一份就够，别让 text 和 html 两处各转义一次
+    } else if (format === 'rtf') {
+      text = rtf;
+    } else {
+      text = '';
+      if (entries.length) {
+        if (title) {
+          text += (markdown ? (/^#{1,6}\s/.test(title) ? title : '## ' + title) : title) + '\n\n';
+        }
+        text += entries.join(markdown ? '\n\n' : '\n') + '\n';
+      }
     }
 
     return {
-      text, entries, count: entries.length, skipped,
-      style, styleLabel: Cite.styleLabel(style), order, numeric,
+      text, html, rtf, entries, count: entries.length, skipped,
+      style, styleLabel: Cite.styleLabel(style), order, numeric, format,
     };
   }
 
   return {
-    build, sortItems, isNumeric, defaultOrder,
+    build, sortItems, isNumeric, defaultOrder, toHtml, wrapHtmlDoc, toRtf, rtfEscape,
     STYLES: Cite.STYLES,
   };
 });

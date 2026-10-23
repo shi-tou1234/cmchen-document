@@ -58,16 +58,25 @@ const Anno = window.Anno = (() => {
         // 文字选区高亮：矩形来自真实文本层选区，存单位坐标，缩放后不漂。
         // kind:'quote' 是「摘录」，用更淡的底 + 虚线和普通高亮区分；
         // kind:'underline' 是「下划线」，只在每行底部画一条线（Zotero 的下划线标注）。
+        // kind:'strike' / 'squiggly' 来自 PDF 原生批注导入（删除线 / 波浪线）。
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('class', 'text-mark'
           + (sh.kind === 'quote' ? ' text-quote' : '')
-          + (sh.kind === 'underline' ? ' text-underline' : ''));
+          + (sh.kind === 'underline' ? ' text-underline' : '')
+          + (sh.kind === 'strike' ? ' text-strike' : '')
+          + (sh.kind === 'squiggly' ? ' text-squiggly' : ''));
         for (const r of (sh.rects || [])) {
-          if (sh.kind === 'underline') {
-            const th = 2;   // 线宽：单位坐标，缩放时跟着页面一起放大
+          const lineY = sh.kind === 'strike' ? r.y + Math.max(0, r.h / 2)
+            : r.y + Math.max(0, r.h - 2);
+          if (sh.kind === 'underline' || sh.kind === 'strike') {
             g.appendChild(el('rect', {
-              x: r.x, y: r.y + Math.max(0, r.h - th), width: Math.max(1, r.w), height: th,
+              x: r.x, y: lineY, width: Math.max(1, r.w), height: 2,
               fill: sh.color || '#ffd54f', 'fill-opacity': '0.95', rx: '1',
+            }));
+          } else if (sh.kind === 'squiggly') {
+            g.appendChild(el('line', {
+              x1: r.x, y1: lineY + 1, x2: r.x + Math.max(1, r.w), y2: lineY + 1,
+              stroke: sh.color || '#e05a4f', 'stroke-width': 1.6, 'stroke-dasharray': '2 1.6',
             }));
           } else {
             g.appendChild(el('rect', {
@@ -79,7 +88,8 @@ const Anno = window.Anno = (() => {
           }
         }
         const ti = el('title', {});
-        const label = sh.kind === 'quote' ? '摘录：' : sh.kind === 'underline' ? '下划线：' : '';
+        const label = sh.kind === 'quote' ? '摘录：' : sh.kind === 'underline' ? '下划线：'
+          : sh.kind === 'strike' ? '删除线：' : sh.kind === 'squiggly' ? '波浪线：' : '';
         ti.textContent = label + String(sh.text || '') + (sh.comment ? '\n评论：' + sh.comment : '');
         g.appendChild(ti);
         base.appendChild(g);

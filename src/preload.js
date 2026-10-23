@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   setTitle: (t) => ipcRenderer.send('set-title', t),
   // 标注自动保存 / 恢复（按文件路径）
   saveAnnos: (path, pages) => ipcRenderer.invoke('anno-save', { path, pages }),
+  onSaveError: (cb) => ipcRenderer.on('save-error', (_e, message) => cb(message)),
   loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path }),
   // 标注条目化 —— 汇总所有文档的标注 + 给标注打标签
   listAnnotations: () => ipcRenderer.invoke('anno-list'),
@@ -127,7 +128,7 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     // v12：元数据 / 文献格式 / 查重 / 批量 / 智能收藏集
     fetchMetadata: (identifier) => ipcRenderer.invoke('lib-fetch-metadata', { identifier }),
     // v9：抓 PDF 全文
-    fetchPdf: (key, url) => ipcRenderer.invoke('lib-fetch-pdf', { key, url }),
+    fetchPdf: (key, url, doi) => ipcRenderer.invoke('lib-fetch-pdf', { key, url, doi }),
     // v31：批量抓取 + 进度订阅 + 网页快照
     fetchPdfBatch: (keys, opts) => ipcRenderer.invoke('lib-fetch-pdf-batch',
       Object.assign({ keys: Array.isArray(keys) ? keys : [] }, opts || {})),

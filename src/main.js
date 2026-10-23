@@ -2,6 +2,8 @@ const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen } = 
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { atomicWrite } = require('./atomic-file');
+const resources = require('./data-resources');
 
 const settings = require('./settings.js');
 const fulltext = require('./fulltext.js');
@@ -88,7 +90,7 @@ function loadWindowState() {
   try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')) || {}; } catch (_) { return {}; }
 }
 function saveWindowState(s) {
-  try { fs.writeFileSync(stateFile, JSON.stringify(s)); } catch (_) {}
+  try { atomicWrite(stateFile, JSON.stringify(s)); } catch (_) {}
 }
 let appState = loadWindowState();
 
@@ -374,7 +376,10 @@ async function pickDocumentsViaDialog() {
 ipcMain.handle('pick-documents', () => pickDocumentsViaDialog());
 
 // 渲染进程上报当前页码（按文件记住，下次打开回到同一位置）
-ipcMain.on('set-page', (_e, info) => { if (info) recordPage(info.path, info.page); });
+ipcMain.on('set-page', (_e, info) => {
+  try { if (info) recordPage(info.path, info.page); }
+  catch (err) { if (win && !win.isDestroyed()) win.webContents.send('save-error', '阅读进度保存失败：' + err.message); }
+});
 
 // 拖拽打开的文件也要进「最近打开」；返回该文件上次读到的页码，交给渲染层决定落到哪
 ipcMain.handle('note-recent', (_e, info) => {
@@ -385,20 +390,9 @@ ipcMain.handle('note-recent', (_e, info) => {
 });
 
 // ---------- 数据目录 / 备份恢复 / 导入导出（v11-v12） ----------
-function atomicWrite(file, text) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, text, 'utf8');
-  try {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-    fs.renameSync(tmp, file);
-  } catch (_) { fs.writeFileSync(file, text, 'utf8'); }
-  try { fs.unlinkSync(tmp); } catch (_) {}
-}
-
 function annoDir() { return path.join(USER_DATA, 'annotations'); }
 
-function readAnnotationBundle() {
+function readAnnotationBundle(strict = false) {
   const out = [];
   try {
     const dir = annoDir();
@@ -408,72 +402,25 @@ function readAnnotationBundle() {
         let raw = fs.readFileSync(path.join(dir, f), 'utf8');
         if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
         out.push({ name: f, data: JSON.parse(raw) });
-      } catch (_) {}
+      } catch (err) { if (strict) throw err; }
     }
-  } catch (_) {}
+  } catch (err) { if (strict && err.code !== 'ENOENT') throw err; }
   return out;
-}
-
-function applyAnnotationBundle(list) {
-  const dir = annoDir();
-  fs.mkdirSync(dir, { recursive: true });
-  // 恢复是“替换”语义：先清掉现有 .json，再写回备份里的标注；备份前已自动留过当前快照。
-  try {
-    for (const f of fs.readdirSync(dir)) if (/\.json$/i.test(f)) fs.unlinkSync(path.join(dir, f));
-  } catch (_) {}
-  let n = 0;
-  for (const entry of list || []) {
-    if (!entry || !entry.data) continue;
-    const name = path.basename(String(entry.name || ''));
-    if (!/^[a-f0-9]{8,64}\.json$/i.test(name)) continue;
-    try { atomicWrite(path.join(dir, name), JSON.stringify(entry.data)); n++; } catch (_) {}
-  }
-  return n;
-}
-
-// v8：从标注生成的笔记带页面截图（PNG 存在数据目录 snapshots/）。
-// 备份是单个 JSON，图片以 base64 一起带走，恢复时写回；单份备份最多带 60MB 图。
-function readSnapshotBundle() {
-  const out = {};
-  const dir = path.join(currentDataDir(), 'snapshots');
-  let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => /\.png$/i.test(f)); } catch (_) { return out; }
-  let total = 0;
-  for (const f of files) {
-    try {
-      const buf = fs.readFileSync(path.join(dir, f));
-      if (total + buf.length > 60 * 1024 * 1024) break;
-      total += buf.length;
-      out[f] = buf.toString('base64');
-    } catch (_) {}
-  }
-  return out;
-}
-
-function applySnapshotBundle(obj) {
-  const dir = path.join(currentDataDir(), 'snapshots');
-  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) { return 0; }
-  let n = 0;
-  for (const name of Object.keys(obj || {})) {
-    if (!/\.png$/i.test(name)) continue;   // 只认 png，别被备份里的路径穿越坑到
-    try {
-      fs.writeFileSync(path.join(dir, path.basename(name)), Buffer.from(obj[name], 'base64'));
-      n++;
-    } catch (_) {}
-  }
-  return n;
 }
 
 function buildBackupPayload() {
+  const files = resources.readBundle(currentDataDir());
   return {
     app: 'trove',
     format: 1,
     createdAt: new Date().toISOString(),
     settings: settings.get(),
     library: library.exportStore(),
-    annotations: readAnnotationBundle(),
-    images: readSnapshotBundle(),
-    note: '全文索引不包含在备份内；恢复后可在设置里重建。',
+    annotations: readAnnotationBundle(true),
+    sourceDataDir: currentDataDir(),
+    resources: files,
+    images: Object.fromEntries(Object.entries(files).filter(([p]) => /^snapshots\/[^/]+\.png$/i.test(p)).map(([p, data]) => [path.basename(p), data])),
+    note: '包含笔记图片、网页快照、自定义 CSL 及托管附件；外部引用的文档和全文索引不包含在备份内。',
   };
 }
 
@@ -511,21 +458,46 @@ function restoreFromFile(file) {
   if (!obj || (obj.app !== 'trove' && obj.app !== 'pdf-reader') || !obj.library || !Array.isArray(obj.library.items)) {
     return { ok: false, error: '不是本程序生成的备份文件' };
   }
+  const tx = new resources.FileTransaction();
   try {
     const pre = path.join(currentDataDir(), 'backups', 'pre-restore-' + Date.now() + '.json');
     atomicWrite(pre, JSON.stringify(buildBackupPayload()));
-    library.replaceStore(obj.library);
-    const n = applyAnnotationBundle(obj.annotations || []);
-    const imgs = applySnapshotBundle(obj.images || {});
-    const keepDir = settings.get().dataDir;
-    if (obj.settings && typeof obj.settings === 'object') {
-      settings.set(Object.assign({}, obj.settings, { dataDir: keepDir }));
-      appSettings = settings.get();
+    const files = Object.assign({}, obj.resources || {});
+    for (const [name, data] of Object.entries(obj.images || {})) {
+      if (path.basename(name) !== name || !/\.png$/i.test(name)) throw new Error('备份图片路径不合法');
+      if (!Object.hasOwn(files, 'snapshots/' + name)) files['snapshots/' + name] = data;
     }
+    const map = resources.installResources(tx, currentDataDir(), null, files);
+    const store = resources.remapStore(obj.library, obj.sourceDataDir, currentDataDir(), map);
+    // Normalize before publishing so invalid metadata cannot leave a half-restored library.
+    const normalized = library.combineStores(store, { items: [] });
+    tx.add(library.filePath(), JSON.stringify(normalized));
+    let n = 0;
+    const restoredNames = new Set();
+    for (const entry of obj.annotations || []) {
+      if (!entry || !entry.data || !/^[a-f0-9]{8,64}\.json$/i.test(entry.name || '')) throw new Error('备份标注文件不合法');
+      const data = JSON.parse(JSON.stringify(entry.data));
+      const owner = (obj.library.items || []).find(it => it.attachment && it.attachment.path === data.path);
+      const restored = owner && normalized.items.find(it => it.key === owner.key);
+      if (restored && restored.attachment) data.path = restored.attachment.path;
+      const name = data.path ? path.basename(annoFileFor(data.path)) : entry.name;
+      if (restoredNames.has(name)) throw new Error('备份标注文件重复：' + name);
+      restoredNames.add(name);
+      tx.add(path.join(annoDir(), name), JSON.stringify(data)); n++;
+    }
+    if (fs.existsSync(annoDir())) for (const name of fs.readdirSync(annoDir())) {
+      if (/\.json$/i.test(name) && !restoredNames.has(name)) tx.remove(path.join(annoDir(), name));
+    }
+    const keepDir = settings.get().dataDir;
+    const next = settings._sanitize(Object.assign({}, obj.settings || settings.get(), { dataDir: keepDir }));
+    tx.add(settings.filePath(), JSON.stringify(next));
+    tx.commit();
+    library.resetCache(); library.resetUndo(); settings.resetCache(); appSettings = settings.get();
     fulltext.init(currentDataDir());
     if (win) win.webContents.send('lib-changed');
-    return { ok: true, path: file, preBackup: pre, items: obj.library.items.length, annotations: n, images: imgs };
+    return { ok: true, path: file, preBackup: pre, items: normalized.items.length, annotations: n, images: Object.keys(obj.images || {}).length };
   } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+  finally { tx.dispose(); }
 }
 
 async function restoreViaDialog() {
@@ -542,43 +514,52 @@ async function restoreViaDialog() {
 function switchDataDir(target, mode) {
   const abs = path.resolve(target);
   const curDir = path.resolve(currentDataDir());
-  if (abs === curDir) return { ok: true, unchanged: true, dataDir: abs, summary: library.summary() };
+  if (abs.toLowerCase() === curDir.toLowerCase()) return { ok: true, unchanged: true, dataDir: abs, summary: library.summary() };
+  const tx = new resources.FileTransaction();
   try {
     fs.mkdirSync(abs, { recursive: true });
-    const cur = library.exportStore();
-    library.backupNow('pre-move');
-    // 索引是可重建缓存，顺手复制过去，省得切目录后立刻重新抽一遍
-    try {
-      const from = path.join(curDir, 'fulltext');
-      if (fs.existsSync(from)) fs.cpSync(from, path.join(abs, 'fulltext'), { recursive: true, force: true });
-    } catch (_) {}
+    const current = library.exportStore();
+    if (!library.backupNow('pre-move')) throw new Error('切换前备份失败，已取消切换');
     const incomingFile = path.join(abs, 'library.json');
-    const exists = fs.existsSync(incomingFile);
-    if (exists && mode === 'replace') {
-      let raw = fs.readFileSync(incomingFile, 'utf8');
-      if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-      const incoming = JSON.parse(raw);
-      library.init(abs); library.resetCache(); fulltext.init(abs);
-      library.replaceStore(incoming);
-    } else if (exists && mode === 'merge') {
-      let raw = fs.readFileSync(incomingFile, 'utf8');
-      if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-      const incoming = JSON.parse(raw);
-      library.init(abs); library.resetCache(); fulltext.init(abs);
-      library.replaceStore(incoming);
-      library.mergeStore(cur);
-    } else {
-      library.init(abs); library.resetCache(); fulltext.init(abs);
-      library.replaceStore(cur);
+    let incoming = null;
+    if (fs.existsSync(incomingFile)) {
+      incoming = JSON.parse(fs.readFileSync(incomingFile, 'utf8').replace(/^\uFEFF/, ''));
+      if (!incoming || !Array.isArray(incoming.items)) throw new Error('目标文献库无效');
     }
-    const saved = settings.set({ dataDir: abs });
-    if (!saved.ok) return { ok: false, error: saved.error };
-    appSettings = settings.get();
+    let store;
+    if (incoming && mode === 'replace') store = library.combineStores(incoming, { items: [] });
+    else {
+      const map = resources.installResources(tx, abs, curDir);
+      const migrated = resources.remapStore(current, curDir, abs, map);
+      store = incoming && mode === 'merge' ? library.combineStores(incoming, migrated) : migrated;
+      const retainedKeys = new Set(incoming && mode === 'merge' ? incoming.items.map(it => it.key) : []);
+      const annotationTargets = new Set();
+      // Managed documents change paths. Copy their annotations under the new path hash.
+      for (const old of current.items) {
+        if (retainedKeys.has(old.key)) continue; // 同 key 保留目标条目，也保留目标的标注关联。
+        const updated = store.items.find(it => it.key === old.key);
+        if (!old.attachment || !updated || !updated.attachment || old.attachment.path === updated.attachment.path) continue;
+        const from = annoFileFor(old.attachment.path), to = annoFileFor(updated.attachment.path);
+        if (annotationTargets.has(to)) continue;
+        if (!fs.existsSync(from)) continue;
+        if (fs.existsSync(to)) throw new Error('目标附件已有关联标注，已取消切换以避免覆盖');
+        const data = JSON.parse(fs.readFileSync(from, 'utf8')); data.path = updated.attachment.path;
+        tx.add(to, JSON.stringify(data));
+        annotationTargets.add(to);
+      }
+    }
+    tx.add(incomingFile, JSON.stringify(store));
+    tx.add(settings.filePath(), JSON.stringify(settings._sanitize(Object.assign({}, settings.get(), { dataDir: abs }))));
+    tx.commit();
+    settings.resetCache(); appSettings = settings.get();
+    library.init(abs); library.resetCache(); library.resetUndo(); fulltext.init(abs);
+    // Indexes are rebuildable caches. Rebuild at the new paths using the existing queue.
+    if (!process.env.PDFREADER_NO_AUTO_INDEX && appSettings.autoIndex) fulltext.indexAll(store.items).catch(err => console.warn('[fulltext]', err.message));
     if (win) win.webContents.send('lib-changed');
     return { ok: true, dataDir: abs, summary: library.summary() };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
-  }
+  } finally { tx.dispose(); }
 }
 
 async function chooseDataDirViaDialog() {
@@ -712,12 +693,15 @@ function uniquePath(dir, base, ext) {
 // 一个文件改了名，它的标注文件与全文索引也跟着搬到新路径对应的文件
 function moveSidecar(oldPath, newPath) {
   const moved = { anno: false, ft: false };
+  if (path.resolve(oldPath).toLowerCase() === path.resolve(newPath).toLowerCase()) return moved;
   try {
     const oldAnno = annoFileFor(oldPath);
     if (fs.existsSync(oldAnno)) {
       const obj = JSON.parse(fs.readFileSync(oldAnno, 'utf8'));
       obj.path = newPath;
-      fs.writeFileSync(annoFileFor(newPath), JSON.stringify(obj));
+      const target = annoFileFor(newPath);
+      if (fs.existsSync(target)) throw new Error('目标附件已有关联标注');
+      atomicWrite(target, JSON.stringify(obj));
       try { fs.unlinkSync(oldAnno); } catch (_) {}
       moved.anno = true;
     }
@@ -727,7 +711,7 @@ function moveSidecar(oldPath, newPath) {
     if (fs.existsSync(oldFt)) {
       const obj = JSON.parse(fs.readFileSync(oldFt, 'utf8'));
       obj.path = newPath;
-      fs.writeFileSync(fulltext.fileFor(newPath), JSON.stringify(obj));
+      atomicWrite(fulltext.fileFor(newPath), JSON.stringify(obj));
       try { fs.unlinkSync(oldFt); } catch (_) {}
       moved.ft = true;
     }
@@ -1022,14 +1006,14 @@ function makeSnippet(text, q, width) {
   return (from > 0 ? '…' : '') + s.slice(from, to) + (to < s.length ? '…' : '');
 }
 
-function annotationResults(q, ast) {
+function annotationResults(q, ast, byPath) {
   const A = ast || query.parseQuery(q);
   const out = [];
   for (const entry of readAnnotationBundle()) {
     const data = entry && entry.data;
     const p = data && data.path;
     if (!p) continue;
-    const it = library.findItemByPath(p);
+    const it = byPath ? byPath.get(p) : library.findItemByPath(p);
     if (!it || it.deletedAt) continue;
     for (const pg of (data.pages || [])) {
       for (const sh of (pg && pg.shapes) || []) {
@@ -1041,6 +1025,7 @@ function annotationResults(q, ast) {
           key: it.key, title: it.title || '(无标题)', page: pg.page || 1,
           type: 'annotation', label: sh.comment ? '批注' : '摘录',
           snippet: makeSnippet(text, A), path: p,
+          ...query.scoreText(hay, A),
         });
       }
     }
@@ -1051,7 +1036,7 @@ function annotationResults(q, ast) {
 function noteResults(q, ast) {
   const A = ast || query.parseQuery(q);
   const out = [];
-  for (const it of library.summary().items) {
+  for (const it of library.load().items) {
     if (it.deletedAt) continue;
     for (const n of it.notes || []) {
       const hay = [n.title, n.text].filter(Boolean).join(' ');
@@ -1061,6 +1046,7 @@ function noteResults(q, ast) {
         key: it.key, title: it.title || '(无标题)', page: it.page || 1,
         type: 'note', label: '笔记', noteId: n.id,
         snippet: makeSnippet(hay, A), path: (it.attachment && it.attachment.path) || '',
+        ...query.scoreText(query.fold(hay), A),
       });
     }
   }
@@ -1070,6 +1056,10 @@ function noteResults(q, ast) {
 function fulltextResults(queryRaw) {
   const ast = query.parseQuery(queryRaw);
   const hit = fulltext.search(queryRaw);
+  const items = library.load().items;
+  const byKey = new Map(items.map(it => [it.key, it]));
+  const byPath = new Map();
+  for (const it of items) if (!it.deletedAt && it.attachment && !byPath.has(it.attachment.path)) byPath.set(it.attachment.path, it);
   const out = [];
   const seen = new Set();
   // 带字段限定（title:/author:/tag:…）时，正文命中还要过一遍条目字段；
@@ -1077,7 +1067,7 @@ function fulltextResults(queryRaw) {
   const hasFields = ((ast.fieldTokens && ast.fieldTokens.length) || Object.keys(ast.fields || {}).length) > 0;
   const filterItem = (it) => query.matchFieldsNot(it, ast);
   if (hasFields && !ast.text.length) {
-    for (const it of library.summary().items) {
+    for (const it of items) {
       if (it.deletedAt) continue;
       if (!query.matchFieldsNot(it, ast)) continue;
       const id = 'it:' + it.key;
@@ -1093,7 +1083,7 @@ function fulltextResults(queryRaw) {
     return { ok: true, query: ast.raw, results: out, stats: hit.stats };
   }
   for (const r of hit.results) {
-    const it = library.findItemByPath(r.path);
+    const it = byPath.get(r.path);
     if (!it || it.deletedAt) continue;
     if (hasFields && !filterItem(it)) continue;
     const id = 'ft:' + it.key + ':' + r.page;
@@ -1102,33 +1092,36 @@ function fulltextResults(queryRaw) {
     out.push({
       key: it.key, title: it.title || '(无标题)', page: r.page,
       type: 'fulltext', label: '全文',
-      snippet: r.snippet, count: r.count, path: r.path,
+      snippet: r.snippet, count: r.count, score: r.score, path: r.path,
     });
-    if (out.length >= 120) break;
   }
-  if (out.length < 120 && String(queryRaw || '').trim()) {
-    for (const r of annotationResults(queryRaw, ast)) {
-      const it = library.findItemByPath(r.path);
+  if (String(queryRaw || '').trim()) {
+    for (const r of annotationResults(queryRaw, ast, byPath)) {
+      const it = byKey.get(r.key);
       if (hasFields && (!it || !query.matchFieldsNot(it, ast))) continue;
       const id = 'an:' + r.key + ':' + r.page + ':' + r.snippet;
       if (seen.has(id)) continue;
       seen.add(id);
       out.push(r);
-      if (out.length >= 120) break;
     }
   }
-  if (out.length < 120 && String(queryRaw || '').trim()) {
+  if (String(queryRaw || '').trim()) {
     for (const r of noteResults(queryRaw, ast)) {
-      const it = library.findItemByPath(r.path);
+      const it = byKey.get(r.key);
       if (hasFields && (!it || !query.matchFieldsNot(it, ast))) continue;
       const id = 'nt:' + r.key + ':' + r.noteId;
       if (seen.has(id)) continue;
       seen.add(id);
       out.push(r);
-      if (out.length >= 120) break;
     }
   }
-  return { ok: true, query: ast.raw, results: out, stats: hit.stats };
+  const priority = { note: 0, annotation: 1, fulltext: 2 };
+  const compare = (a, b) => (b.score || 0) - (a.score || 0) || priority[a.type] - priority[b.type] || a.key.localeCompare(b.key) || a.page - b.page;
+  out.sort(compare);
+  // Keep the best hit from each matching source when the global limit is reached.
+  const reserved = [...new Set(out.map(r => r.type))].map(type => out.find(r => r.type === type));
+  const results = reserved.concat(out.filter(r => !reserved.includes(r)).slice(0, 120 - reserved.length)).sort(compare);
+  return { ok: true, query: ast.raw, results, stats: hit.stats };
 }
 ipcMain.handle('lib-search-full', (_e, info) => fulltextResults(info && info.query));
 ipcMain.handle('lib-ft-status', () => {
@@ -1164,8 +1157,8 @@ ipcMain.handle('lib-fetch-pdf', async (_e, info) => {
   if (it.deletedAt) return { ok: false, error: '回收站里的条目不能抓取' };
   const custom = String((info && info.url) || '').trim();
   const src = {
-    doi: it.doi || '',
-    arxivId: fetchpdf.arxivIdFromUrl((it.fields && it.fields.arxivId) || it.url || ''),
+    doi: typeof info.doi === 'string' ? info.doi.trim() : (it.doi || ''),
+    arxivId: fetchpdf.arxivIdFromUrl(custom || (it.fields && it.fields.arxivId) || it.url || ''),
     url: custom || it.url || '',
     email: (settings.get().fetchEmail || '').trim(),
   };
@@ -1177,7 +1170,8 @@ ipcMain.handle('lib-fetch-pdf', async (_e, info) => {
   const r = await fetchpdf.fetchToFile(src, dest, { timeout: (info && info.timeout) || undefined });
   if (!r.ok) return Object.assign({ ok: false }, r, { sources: src });
   try {
-    library.setAttachment(key, r.path);
+    const updated = library.setAttachment(key, r.path);
+    fulltext.indexOne(updated).catch(err => console.warn('[fulltext] downloaded file:', err.message));
     if (win) win.webContents.send('lib-changed');
   } catch (err) {
     return { ok: false, error: '下载成功但挂载失败：' + (err && err.message ? err.message : err) };
@@ -1244,7 +1238,8 @@ ipcMain.handle('lib-fetch-pdf-batch', async (_e, info) => {
         }
         if (r.ok) {
           try {
-            library.setAttachment(key, r.path);
+            const updated = library.setAttachment(key, r.path);
+            fulltext.indexOne(updated).catch(err => console.warn('[fulltext] downloaded file:', err.message));
             rec.status = 'ok'; rec.source = r.source; rec.bytes = r.bytes; fetched++;
           } catch (err) {
             rec.status = 'failed';
@@ -1482,15 +1477,23 @@ ipcMain.handle('save-text', async (_e, info) => {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
   }
-  const markdown = info.format !== 'text';
+  // html / word / rtf 的正文由渲染层的 bib.js 拼好，主进程只负责挑对扩展名和过滤器。
+  // word 存的是 .doc（内容是 HTML），Word 能直接打开并保留编号与缩进；rtf 是真正的 RTF 源码。
+  const FMT_EXT = { markdown: 'md', text: 'txt', html: 'html', word: 'doc', rtf: 'rtf' };
+  const FMT_FILTERS = {
+    markdown: [{ name: 'Markdown', extensions: ['md'] }, { name: '纯文本', extensions: ['txt'] }],
+    text: [{ name: '纯文本', extensions: ['txt'] }, { name: 'Markdown', extensions: ['md'] }],
+    html: [{ name: '网页', extensions: ['html'] }, { name: 'Word 文档', extensions: ['doc'] }],
+    word: [{ name: 'Word 文档', extensions: ['doc'] }, { name: '网页', extensions: ['html'] }],
+    rtf: [{ name: 'RTF 文档', extensions: ['rtf'] }, { name: 'Word 文档', extensions: ['doc'] }],
+  };
+  const fmt = FMT_EXT[String(info.format)] ? String(info.format) : 'markdown';
   const base = String(info.defaultName || ('Trove-参考文献-' + new Date().toISOString().slice(0, 10)))
-    .replace(/[\\/:*?"<>|]/g, '-').replace(/\.(md|txt)$/i, '');
+    .replace(/[\\/:*?"<>|]/g, '-').replace(/\.(md|txt|html|doc|rtf)$/i, '');
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     title: '保存参考文献表',
-    defaultPath: path.join(appState.lastBackupDir || '', base + (markdown ? '.md' : '.txt')),
-    filters: markdown
-      ? [{ name: 'Markdown', extensions: ['md'] }, { name: '纯文本', extensions: ['txt'] }]
-      : [{ name: '纯文本', extensions: ['txt'] }, { name: 'Markdown', extensions: ['md'] }],
+    defaultPath: path.join(appState.lastBackupDir || '', base + '.' + FMT_EXT[fmt]),
+    filters: FMT_FILTERS[fmt],
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
   try {
@@ -1547,9 +1550,36 @@ ipcMain.handle('lib-relink-item', async (_e, info) => {
       ? it.attachment.path : (appState.lastDir || undefined),
   });
   if (canceled || !filePaths.length) return { ok: false, canceled: true };
-  const updated = library.setAttachment(it.key, filePaths[0]);
-  if (updated) fulltext.indexOne(updated).catch((err) => console.warn('[fulltext] reindex failed:', err && err.message));
-  return { ok: !!updated, item: updated };
+  const newPath = path.resolve(filePaths[0]);
+  const oldPath = it.attachment && it.attachment.path;
+  const tx = new resources.FileTransaction();
+  try {
+    if (!fs.existsSync(newPath)) throw new Error('选择的文件不存在');
+    const oldAnno = oldPath && annoFileFor(oldPath), newAnno = annoFileFor(newPath);
+    if (oldAnno && oldAnno !== newAnno && fs.existsSync(oldAnno)) {
+      const source = JSON.parse(fs.readFileSync(oldAnno, 'utf8'));
+      const target = fs.existsSync(newAnno) ? JSON.parse(fs.readFileSync(newAnno, 'utf8')) : { pages: [] };
+      for (const pg of source.pages || []) {
+        let dest = target.pages.find(p => p.page === pg.page);
+        if (!dest) { dest = { page: pg.page, shapes: [] }; target.pages.push(dest); }
+        for (const shape of pg.shapes || []) {
+          const existing = shape.id && dest.shapes.find(s => s.id === shape.id);
+          if (existing && JSON.stringify(existing) !== JSON.stringify(shape)) throw new Error('目标附件包含同 id 的不同标注，已保留原关联');
+          if (!existing) dest.shapes.push(shape);
+        }
+      }
+      target.path = newPath; target.saved = Date.now();
+      tx.add(newAnno, JSON.stringify(target)); // 原标注仍保留，其他引用旧附件的条目不受影响。
+    }
+    const store = library.exportStore();
+    const updated = store.items.find(x => x.key === it.key);
+    updated.attachment = { path: newPath, name: path.basename(newPath) }; updated.updated = Date.now();
+    tx.add(library.filePath(), JSON.stringify(store));
+    tx.commit(); library.resetCache();
+    fulltext.indexOne(updated).catch(err => console.warn('[fulltext] reindex failed:', err.message));
+    return { ok: true, item: library.summary().items.find(x => x.key === it.key) };
+  } catch (err) { return { ok: false, error: err.message }; }
+  finally { tx.dispose(); }
 });
 
 // ---------- 标注自动保存 / 恢复（按文件路径，userData/annotations/<hash>.json） ----------
@@ -1625,7 +1655,7 @@ ipcMain.handle('anno-save', (_e, info) => {
     const obj = { path: info.path, saved: Date.now(), pages: info.pages || [] };
     // 兜底：渲染层没带 id 的形状顺手补上（新建标注由渲染层生成 id，这里是保险）
     ensureAnnoIds(obj, '', () => {});
-    fs.writeFileSync(annoFileFor(info.path), JSON.stringify(obj));
+    atomicWrite(annoFileFor(info.path), JSON.stringify(obj));
     return true;
   } catch (err) { return { error: String(err && err.message ? err.message : err) }; }
 });
@@ -2030,13 +2060,24 @@ function drawAnno(page, sh, font, lib) {
   } else if (sh.tool === 'highlight') {
     for (let i = 0; i < sh.pts.length - 1; i++) seg(sh.pts[i], sh.pts[i + 1], { color, opacity: 0.35, thickness: t, ...round });
   } else if (sh.tool === 'mark') {
-    // 选区高亮：矩形已由渲染进程转成 PDF 坐标（左下原点）
+    // 选区高亮：矩形已由渲染进程转成 PDF 坐标（左下原点）。
+    // 下划线 / 删除线 / 波浪线只画一条线，摘录用更淡的底，和渲染层保持一致。
     for (const r of (sh.rects || [])) {
       if (!(r.w > 0 && r.h > 0)) continue;
-      page.drawRectangle({
-        x: r.x, y: r.y, width: r.w, height: r.h,
-        color, opacity: 0.38, borderColor: color, borderWidth: 0.6, borderOpacity: 0.55,
-      });
+      if (sh.kind === 'underline' || sh.kind === 'strike' || sh.kind === 'squiggly') {
+        const y = sh.kind === 'strike' ? r.y + r.h / 2 : r.y + Math.min(2, r.h / 3);
+        page.drawLine({
+          start: { x: r.x, y }, end: { x: r.x + r.w, y },
+          color, thickness: 1.4,
+          ...(sh.kind === 'squiggly' ? { dashArray: [2, 1.6] } : {}),
+        });
+      } else {
+        page.drawRectangle({
+          x: r.x, y: r.y, width: r.w, height: r.h,
+          color, opacity: sh.kind === 'quote' ? 0.18 : 0.38,
+          borderColor: color, borderWidth: 0.6, borderOpacity: 0.55,
+        });
+      }
     }
   } else if (sh.tool === 'line') {
     seg(sh.a, sh.b, { color, thickness: t, ...round });
@@ -2068,12 +2109,17 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
     const font = await doc.embedFont(StandardFonts.Helvetica);
     const pages = doc.getPages();
     let skipped = 0;
+    const reasons = [];
     for (const pg of payload.pages) {
       const page = pages[pg.index];
       if (!page) continue;
       for (const sh of pg.shapes) {
         try { drawAnno(page, sh, font, lib); }
-        catch (_) { skipped++; }
+        catch (err) {
+          skipped++;
+          // 只留前几条，够定位是哪类标注失败即可；界面仍然只显示总数。
+          if (reasons.length < 5) reasons.push({ tool: sh.tool, kind: sh.kind || '', msg: String(err && err.message ? err.message : err) });
+        }
       }
     }
     const out = Buffer.from(await doc.save());
@@ -2087,7 +2133,7 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
       target = filePath;
     }
     fs.writeFileSync(target, out);
-    return { ok: true, path: target, skipped };
+    return { ok: true, path: target, skipped, reasons };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }
