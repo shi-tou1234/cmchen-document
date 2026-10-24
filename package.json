@@ -50,8 +50,7 @@
         "portable",
         "nsis"
       ],
-      "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
