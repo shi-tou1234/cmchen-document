@@ -2028,7 +2028,9 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
   if (!text.trim() && note.html) {
     try { text = Md.fromHtml(note.html); } catch (_) { text = ''; }
   }
-  if (!text.trim()) return { ok: false, error: '笔记是空的' };
+  // R04：纯截图笔记（正文空、只有批注截图）也允许导出，截图会作为正文插图带出去
+  const hasImageField = !!(note.image && /^snapshots\/[^\\/]+$/i.test(String(note.image)));
+  if (!text.trim() && !hasImageField) return { ok: false, error: '笔记是空的' };
 
   // 收集图片引用（数据目录内相对路径，只认 snapshots/ 前缀，和 note-image 的守卫一致）
   const refs = [];
@@ -2062,7 +2064,11 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
 
   try {
     const dataRoot = path.resolve(currentDataDir());
-    const filesDirName = path.basename(filePath, path.extname(filePath)) + '.files';
+    // R03：资源目录名只留对文件系统、Markdown 语法和相对 URL 都安全的字符。
+    // 空格、#、%、&、括号会让 Markdown 图片目标失配（正文退化成原始文本）
+    // 或破坏相对路径解析；中文 / 数字 / 点 / 连字符保留，其余折叠成 -。
+    const filesDirName = (path.basename(filePath, path.extname(filePath))
+      .replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^[-.]+|[-.]+$/g, '') || 'note') + '.files';
     const filesDir = path.join(path.dirname(filePath), filesDirName);
     const rewrite = new Map();   // snapshots/x.png → <files>/x.png
     let copied = 0, skipped = 0;
@@ -2085,12 +2091,26 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
     }
     // 引用改写（Markdown 语法里的链接目标）
     let outText = text.replace(imgRe, (whole, rel) => rewrite.has(rel) ? whole.replace(rel, rewrite.get(rel)) : whole);
+    // R04：批注截图存在 note.image 字段、正文里未必有引用——导出时统一带进正文
+    //（正文已引用同一张图时不重复插图）。
+    if (hasImageField && rewrite.has(note.image) && !text.includes('](' + note.image + ')')) {
+      outText = '![' + Md.esc('批注截图') + '](' + rewrite.get(note.image) + ')\n\n' + outText;
+    }
     if (fmt === 'md') {
       atomicWrite(filePath, outText);
       appState.lastDir = path.dirname(filePath);
       return { ok: true, path: filePath, images: copied, skipped };
     }
     let html = Md.render(outText);
+    // R05：独立 HTML 里不能保留应用内部的占位链接（href="javascript:void(0)"，
+    // 靠渲染层的 data-md-link 点击代理才可点）。这里按原有协议白名单换成真实 URL，
+    // 非法协议维持不可点。GitHub / 音乐卡片走同一个 data-md-link 机制，一并覆盖。
+    html = html.replace(/data-md-link="([^"]*)" href="javascript:void\(0\)"/g, (_w, raw) => {
+      const href = Md.safeHref(raw);
+      return href
+        ? 'href="' + href + '" target="_blank" rel="noopener noreferrer"'
+        : 'href="javascript:void(0)" data-md-link="' + raw + '"';
+    });
     // 本地图片：占位属性换成真实相对 src。注意 Markdown 里的引用已先被改写成
     // <文件名>.files/xxx 路径，所以属性值以图片目录前缀开头的就是复制成功的图；
     // 其余（复制失败保留了 snapshots/ 原路径）给出可见说明，不留破图标。

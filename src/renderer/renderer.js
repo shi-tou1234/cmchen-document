@@ -232,10 +232,14 @@ function sessionTabs() {
 }
 function saveSessionNow() {
   try {
+    // R06：启动恢复进行中不能写会话——标签只开了一半时渲染/翻页触发的保存，
+    // 会把「部分恢复」的清单写回源快照，丢掉还没恢复的记录。
+    if (sessionRestoring) return;
     if (window.pdfBridge && window.pdfBridge.saveSession) window.pdfBridge.saveSession(sessionTabs());
   } catch (_) {}
 }
 let sessionSaveTimer = null;
+let sessionRestoring = false;
 function scheduleSessionSave() {
   clearTimeout(sessionSaveTimer);
   sessionSaveTimer = setTimeout(saveSessionNow, 600);
@@ -2381,18 +2385,28 @@ function bind() {
   if (window.pdfBridge.onSessionRestore) {
     window.pdfBridge.onSessionRestore(async (info) => {
       const tabs = (info && info.tabs) || [];
+      // R06：恢复全部记录（上限与保存一致，主进程已按 20 条裁剪），不再截断前 8 个；
+      // 恢复期间挂起会话写入，结束后按实际打开的清单落一次盘并提示跳过数。
       let opened = 0, activeId = null;
-      for (const t of tabs.slice(0, 8)) {
-        try {
-          const payload = await window.pdfBridge.openDocPath({ path: t.path, page: t.page });
-          if (!payload || !payload.ok) continue;
-          await openDocument(payload, { newTab: true });
-          opened++;
-          if (info.active && t.path === info.active) activeId = App.activeTabId;
-        } catch (_) {}
+      sessionRestoring = true;
+      try {
+        for (const t of tabs) {
+          try {
+            const payload = await window.pdfBridge.openDocPath({ path: t.path, page: t.page });
+            if (!payload || !payload.ok) continue;
+            await openDocument(payload, { newTab: true });
+            opened++;
+            if (info.active && t.path === info.active) activeId = App.activeTabId;
+          } catch (_) {}
+        }
+      } finally {
+        sessionRestoring = false;
       }
       if (activeId && activeId !== App.activeTabId) await switchTab(activeId);
-      if (opened > 1) toast('已恢复上次打开的 ' + opened + ' 个标签页');
+      saveSessionNow();
+      const skipped = tabs.length - opened;
+      if (opened && skipped) toast('已恢复上次打开的 ' + opened + ' 个标签页；' + skipped + ' 个文件未能打开，已跳过', 5000);
+      else if (opened > 1) toast('已恢复上次打开的 ' + opened + ' 个标签页');
     });
   }
   // v9：库里按条目元数据重命名了附件文件，把打开的标签 / 当前会话的路径跟着换掉

@@ -1293,15 +1293,17 @@ window.LibraryUI = (function () {
     if (!tpl) return;
     const ta = $('nv-md');
     if (!ta) return;
-    // 空笔记直接铺开模板；已有内容则作为新板块接在后面，不打断已有正文
+    // R02：模板必须真正「追加到末尾」。不能走 nvInsertBlock——它替换当前选区 /
+    // 在光标处插入，界面却提示「已在末尾」，选中的正文会被模板吃掉。
+    // 这里用 setRangeText 钉死在正文末尾的位置：原正文逐字不变，选区 / 光标也不动语义。
     if (!ta.value.trim()) {
-      ta.value = tpl;
-      ta.focus();
-      nvAfterEdit();
-      nvStatus('已套用模板');
-      return;
+      ta.setRangeText(tpl, 0, 0, 'end');
+    } else {
+      ta.setRangeText('\n\n' + tpl, ta.value.length, ta.value.length, 'end');
     }
-    nvInsertBlock(tpl);
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = ta.value.length;
+    nvAfterEdit();
     nvStatus('已在末尾插入模板');
   }
 
@@ -1376,6 +1378,9 @@ window.LibraryUI = (function () {
         '<div class="ld-note-rich" contenteditable="true" data-note-field="html" ' +
           'data-placeholder="直接在这里写，选中文字就能加粗 / 列表 / 链接…">' + body + '</div>' +
         '<div class="ld-note-foot"><span class="ld-hint">改完自动保存' + (n.image ? ' · 含标注截图' : '') + '</span>' +
+        // R04：子笔记的导出入口（独立笔记的全屏编辑器里另有「导出…」下拉）
+        '<select class="ld-note-export" title="导出这条笔记（HTML 自带图片 / Markdown 带图片目录）">' +
+          '<option value="">导出…</option><option value="html">HTML</option><option value="md">Markdown</option></select>' +
         '<button class="ld-mini ld-note-del" title="删除这条笔记">删除</button></div>' +
       '</div>';
     }).join('');
@@ -2898,6 +2903,21 @@ window.LibraryUI = (function () {
       el.ld.notes.addEventListener('change', async (e) => {
         const box = e.target.closest('[data-note-id]');
         if (!box) return;
+        // R04：子笔记导出——导出前先落盘，导出的内容必须和库里的一致
+        if (e.target.classList.contains('ld-note-export')) {
+          const fmt = e.target.value;
+          e.target.value = '';
+          if (!fmt || !window.pdfBridge || !window.pdfBridge.exportNoteBundle) return;
+          const key = state.selectedKey;
+          if (!key) return;
+          // 这条笔记可能有未落盘的编辑，先保存
+          const rich = box.querySelector('.ld-note-rich');
+          if (rich) saveNoteRich(box, true);
+          const r = await window.pdfBridge.exportNoteBundle({ key, noteId: box.dataset.noteId, fmt, title: '' });
+          if (r && r.ok) window.App && window.App.toast && window.App.toast(r.images ? '笔记已导出（含 ' + r.images + ' 张图片）' : '笔记已导出');
+          else if (r && !r.canceled && window.App && window.App.toast) window.App.toast('导出失败：' + ((r && r.error) || '未知错误'));
+          return;
+        }
         // 段落样式下拉（正文 / 标题 / 小标题 / 引用）
         if (e.target.matches('select[data-rt="formatBlock"]')) {
           const rich = box.querySelector('.ld-note-rich');

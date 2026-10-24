@@ -221,6 +221,8 @@ const NativeAnnos = window.NativeAnnos = (() => {
     const counts = {};
     let total = 0, skipped = 0;
     for (let n = 1; n <= max; n++) {
+      // 调用方传入的 stale()（文档已切换 / 已关闭）：立即停手，别再解析后面的页
+      if (o.stale && o.stale()) break;
       let r;
       try { r = await scanPage(pdfDoc, n, pdfjsLib); } catch (_) { continue; }
       skipped += r.skipped;
@@ -258,7 +260,18 @@ const NativeAnnos = window.NativeAnnos = (() => {
   async function run(opts) {
     const s = window.App && App.state;
     if (!s || !s.pdfDoc || s.mode !== 'pdf') return { ok: false, error: '没有打开的 PDF' };
-    const scanned = await scan(s.pdfDoc, opts);
+    // R01：App.state 是共享单例——扫描的 await 期间用户可能切到别的文档，
+    // 之后 s.pdfDoc / s.annos / s.filePath 已经是别人的了。开始时钉住这份文档的
+    // 身份，之后每一步 await 都核对；不匹配就取消，绝不把 A 的批注并进 B 的
+    // 内存标注或写到 B 的 sidecar。
+    const ownerDoc = s.pdfDoc;
+    const ownerPath = s.filePath;
+    const ownerAnnos = s.annos;
+    const stale = () => s.pdfDoc !== ownerDoc || s.filePath !== ownerPath || s.annos !== ownerAnnos;
+    const scanned = await scan(s.pdfDoc, Object.assign({}, opts, { stale }));
+    if (stale()) {
+      return { ok: false, canceled: true, error: '导入期间文档已切换，已取消；请回到原文档重新导入' };
+    }
     if (!scanned.total) return { ok: true, added: 0, skipped: 0, total: 0, counts: scanned.counts, pages: 0 };
     const merged = merge(scanned, s.annos);
     if (merged.added) {
@@ -281,7 +294,12 @@ const NativeAnnos = window.NativeAnnos = (() => {
     if (!key || (hint.seen && hint.seen.has(key))) return { ok: false };
     if (!hint.seen) hint.seen = new Set();
     hint.seen.add(key);
-    const scanned = await scan(s.pdfDoc, { maxPages: Math.min(30, s.numPages) });
+    const ownerDoc = s.pdfDoc;
+    const ownerPath = s.filePath;
+    const stale = () => s.pdfDoc !== ownerDoc || s.filePath !== ownerPath;
+    const scanned = await scan(s.pdfDoc, { maxPages: Math.min(30, s.numPages), stale });
+    // 提示只属于原文档（R01）：扫描期间切走了就不 toast，别把 A 的批注提示盖到 B 上
+    if (stale()) return { ok: false };
     if (!scanned.total) return { ok: true, total: 0 };
     const kinds = Object.keys(scanned.counts).map((k) => k + ' ' + scanned.counts[k]).join('、');
     if (window.App && App.toast) App.toast('这份 PDF 自带 ' + scanned.total + ' 条批注（' + kinds + '），可在「批注」面板点「导入 PDF 批注」', 6000);

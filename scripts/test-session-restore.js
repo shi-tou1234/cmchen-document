@@ -112,6 +112,49 @@ try {
   fs.writeFileSync(path.join(dir, 'ud-off', 'settings.json'), JSON.stringify(offSettings));
   const r3 = runProbe({ probe: path.join(dir, 'probe3.cjs'), env: env3, args: args3, label: 'session-restore-off' });
   assert.equal(r3.fail, 0);
+
+  // ---- R06（2026-10-24 复核）：超过 8 个标签必须全量恢复，激活项在第 9 个之后也要回来；
+  // 恢复期间不许用中间状态覆盖源快照。10 个标签（含一份第 3 个位置的失联文件）→ 恢复 9 个，
+  // 激活第 10 个，会话最终按实际打开的清单落盘。----
+  const ud4 = path.join(dir, 'ud-ten');
+  fs.mkdirSync(ud4, { recursive: true });
+  const tenPaths = [];
+  for (let i = 1; i <= 10; i++) {
+    const p = path.join(dir, 'doc-' + (i < 10 ? '0' + i : i) + '.pdf');
+    fs.copyFileSync(path.join(__dirname, '../assets/sample.pdf'), p);
+    tenPaths.push(p);
+  }
+  fs.rmSync(tenPaths[2]);   // 第 3 个失联
+  const fwdTen = tenPaths.map((p) => p.replace(/\\/g, '/'));
+  fs.writeFileSync(path.join(ud4, 'settings.json'), JSON.stringify({ restoreTabs: true }));
+  fs.writeFileSync(path.join(ud4, 'session.json'), JSON.stringify({
+    saved: Date.now(), active: fwdTen[9],
+    tabs: tenPaths.map((p, i) => ({ path: p.replace(/\\/g, '/'), name: path.basename(p), kind: 'pdf', itemKey: '', page: Math.min(3, i + 1) })),
+  }));
+  const probe4 = `(async()=>{
+    const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+    const checks=[];const push=(n,v,d)=>checks.push([n,!!v,d===undefined?'':String(d)]);
+    const waitFor=async(fn,ms)=>{const t0=Date.now();while(Date.now()-t0<(ms||20000)){if(fn())return true;await sleep(100);}return !!fn();};
+    const tabs=()=>document.querySelectorAll('#tabs .tab');
+    const restored=await waitFor(()=>tabs().length===9,25000);
+    push('10 个标签恢复 9 个（失联跳过）',restored,String(tabs().length));
+    if(!restored)return {checks};
+    const cur=window.App.tabs.find(t=>t.id===window.App.activeTabId);
+    push('激活项恢复为第 10 个',cur&&/doc-10/.test((cur.filePath||'').replace(/\\\\/g,'/')),cur&&cur.filePath);
+    const t10=window.App.tabs.find(t=>/doc-10/.test((t.filePath||'').replace(/\\\\/g,'/')));
+    push('第 10 个标签页码正确',t10&&t10.page===3,String(t10&&t10.page));
+    await sleep(2000);   // 恢复结束、去抖保存落定
+    return {checks};})()`;
+  fs.writeFileSync(path.join(dir, 'probe4.cjs'), 'module.exports=' + JSON.stringify(probe4));
+  const r4 = runProbe({ probe: path.join(dir, 'probe4.cjs'),
+    env: { PDFREADER_LIBRARY: path.join(dir, 'library.json'), PDFREADER_DATA_DIR: dir, PDFREADER_NO_AUTO_INDEX: '1' },
+    args: ['--user-data-dir=' + ud4], label: 'session-restore-ten' });
+  assert.equal(r4.fail, 0);
+  // Node 侧：会话没有被中间状态截断——恢复结束后按实际打开的 9 个落盘（不再是无提示的 8 个）
+  const sess4 = JSON.parse(fs.readFileSync(path.join(ud4, 'session.json'), 'utf8'));
+  assert.equal(sess4.tabs.length, 9, '恢复后会话按实际打开落盘（9 条，失联条目移除）：' + sess4.tabs.length);
+  const activeNorm = String(sess4.active || '').replace(/\\/g, '/');
+  assert.ok(activeNorm.endsWith('doc-10.pdf'), '激活项保留：' + activeNorm);
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }
