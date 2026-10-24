@@ -373,8 +373,16 @@
       slots.img.push('![' + (alt ? alt[1] : '') + '](' + (src ? src[1] : '') + ')');
       return '\u0003I' + (slots.img.length - 1) + '\u0003';
     });
-    s = s.replace(/<a[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, txt) => {
-      slots.a.push('[' + stripTags(txt).trim() + '](' + href + ')');
+    s = s.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (whole, attrs, txt) => {
+      // M01：应用内占位链接（data-md-link + href="javascript:void(0)"，经富文本清洗
+      // 后 href 变成 "#"）——真实 URL 在 data-md-link 里。优先取它并过协议白名单，
+      // 没有再退回 href；都不可用就降级成纯文本，与 linkTag 的行为一致。
+      const mdAttr = /data-md-link\s*=\s*"([^"]*)"/i.exec(attrs);
+      const hrefAttr = /href\s*=\s*"([^"]*)"/i.exec(attrs);
+      let url = mdAttr ? decode(mdAttr[1]) : '';
+      if (!safeHref(url)) url = hrefAttr ? decode(hrefAttr[1]) : '';
+      if (!safeHref(url)) return stripTags(txt).trim();
+      slots.a.push('[' + stripTags(txt).trim() + '](' + url + ')');
       return '\u0003A' + (slots.a.length - 1) + '\u0003';
     });
     // 2. 行内样式

@@ -3011,7 +3011,9 @@ window.LibraryUI = (function () {
         const link = e.target.closest('.ld-note-rich a');
         if (link) {
           e.preventDefault();
-          const url = link.getAttribute('href') || '';
+          // M01：应用占位链接的真实 URL 在 data-md-link 里（富文本清洗会把
+          // href 改写成 #），优先取它，原生 href 兜底。
+          const url = link.dataset.mdLink || link.getAttribute('href') || '';
           if (e.altKey && window.pdfBridge && window.pdfBridge.openExternal) {
             const r = await window.pdfBridge.openExternal(url);
             if (!r || !r.ok) window.App && window.App.toast && window.App.toast('打不开这个链接：' + ((r && r.error) || url));
