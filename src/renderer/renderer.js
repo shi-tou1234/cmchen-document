@@ -529,7 +529,7 @@ async function switchTab(id, page) {
   const t = tabById(id);
   if (!t) return;
   if (id === App.activeTabId) {
-    if (page) scrollToPage(page);
+    if (page) scrollToPage(page, false, true);
     return;
   }
   syncActiveTab();
@@ -611,7 +611,7 @@ async function openDocument(payload, opts) {
   const same = p ? App.tabs.find((t) => t.filePath === p) : null;
   if (same && !o.forceNew) {
     if (same.id === App.activeTabId) {
-      if (payload.startPage) scrollToPage(payload.startPage);
+      if (payload.startPage) scrollToPage(payload.startPage, false, true);
     } else switchTab(same.id, payload.startPage);
     return;
   }
@@ -962,7 +962,7 @@ function gotoSearchHit(step) {
   s.search.hitIndex = i;
   const h = hits[i];
   if (s.mode === 'rich') {
-    scrollToPage(h.page, true);
+    scrollToPage(h.page, true, true);
     if (h.mark && h.mark.isConnected) {
       h.mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -970,7 +970,7 @@ function gotoSearchHit(step) {
     setStatus('第 ' + (i + 1) + ' / ' + hits.length + ' 处命中 · ' + s.search.query);
     return;
   }
-  scrollToPage(h.page);
+  scrollToPage(h.page, false, true);
   const pageEl = App.pageEl(h.page);
   if (pageEl) {
     const vr = App.els.viewer.getBoundingClientRect();
@@ -1005,7 +1005,7 @@ function initSidebar() {
   // 搜索结果点击跳转（委托）
   $('sb-annos').addEventListener('click', (e) => {
     const r = e.target.closest('[data-goto]');
-    if (r) { scrollToPage(+r.dataset.goto); return; }
+    if (r) { scrollToPage(+r.dataset.goto, false, true); return; }
     const del = e.target.closest('[data-anno-del]');
     if (del) { deleteAnno(+del.dataset.annoPage, +del.dataset.annoIdx); return; }
     const cmt = e.target.closest('[data-anno-comment]');
@@ -1013,7 +1013,7 @@ function initSidebar() {
     const tagBtn = e.target.closest('[data-anno-tag]');
     if (tagBtn) { e.stopPropagation(); addAnnoTag(tagBtn, +tagBtn.dataset.annoPage, +tagBtn.dataset.annoIdx); return; }
     const jump = e.target.closest('[data-anno-jump]');
-    if (jump) scrollToPage(+jump.dataset.annoJump);
+    if (jump) scrollToPage(+jump.dataset.annoJump, false, true);
     const ex = e.target.closest('[data-note-fmt]');
     if (ex) exportAnnoNote(ex.dataset.noteFmt);
   });
@@ -1062,7 +1062,7 @@ async function buildOutlinePane() {
       pg.className = 'opg';
       pg.textContent = 'P' + n;
       btn.appendChild(pg);
-      btn.addEventListener('click', () => scrollToPage(n));
+      btn.addEventListener('click', () => scrollToPage(n, false, true));
       host.appendChild(btn);
       // 页内标题也列出来，长文档找小节更快
       const pageEl = document.getElementById('page-' + n);
@@ -1075,7 +1075,7 @@ async function buildOutlinePane() {
         st.textContent = (h.textContent || '').trim().slice(0, 80);
         sub.appendChild(st);
         sub.addEventListener('click', () => {
-          scrollToPage(n, true);
+          scrollToPage(n, true, true);
           h.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
         host.appendChild(sub);
@@ -1114,7 +1114,7 @@ async function buildOutlinePane() {
         p.className = 'opg';
         p.textContent = 'P' + pg;
         btn.appendChild(p);
-        btn.addEventListener('click', () => scrollToPage(pg));
+        btn.addEventListener('click', () => scrollToPage(pg, false, true));
       }
       wrap.appendChild(btn);
       if (node.items && node.items.length) wrap.appendChild(await build(node.items, depth + 1));
@@ -1142,7 +1142,7 @@ function buildThumbsPane() {
       d.dataset.page = String(n);
       d.innerHTML = '<div class="doc-thumb-card"><span class="tno">' + n + '</span>' +
         '<span class="doc-thumb-title">' + escHtml(p.title || ('第 ' + n + ' 页')) + '</span></div>';
-      d.addEventListener('click', () => scrollToPage(n));
+      d.addEventListener('click', () => scrollToPage(n, false, true));
       host.appendChild(d);
     }
     markCurrentThumb();
@@ -1162,7 +1162,7 @@ function buildThumbsPane() {
     d.className = 'thumb';
     d.dataset.page = String(n);
     d.innerHTML = '<div class="tph"></div><div class="tno">' + n + '</div>';
-    d.addEventListener('click', () => scrollToPage(n));
+    d.addEventListener('click', () => scrollToPage(n, false, true));
     host.appendChild(d);
     thumbIO.observe(d);
   }
@@ -1919,10 +1919,13 @@ App.setViewMode = function (mode) {
   return m;
 };
 
-function scrollToPage(n, instant) {
+function scrollToPage(n, instant, record) {
   n = Math.min(App.state.numPages, Math.max(1, n));
   const el = App.pageEl(n);
   if (!el) return;
+  // v33：显式跳转（目录 / 搜索结果 / 批注 / 页码输入 / 缩略图）记入导航历史，
+  // Alt+←/→ 或鼠标侧键可返回。初始落页与逐页翻阅不记——后者记了会让「后退」变成一页一页倒。
+  if (record && n !== App.state.currentPage) navRecord(n);
   if (App.state.mode === 'rich') {
     if (App.state.viewMode === 'page') {
       applyPageVisibility(n);
@@ -1950,6 +1953,48 @@ function scrollToPage(n, instant) {
 }
 const nextPage = () => scrollToPage(App.state.currentPage + 1);
 const prevPage = () => scrollToPage(App.state.currentPage - 1);
+
+// ---------- 阅读导航历史（v33：返回上一个阅读位置） ----------
+// 历史挂在标签页对象上（t.nav），切标签不丢；只记录显式跳转，纯滚动产生的
+// 「位置漂移」在后退那一刻补记，前进时能回到漂移后的位置。栈上限 60，超出丢最老的。
+function navRecord(dest) {
+  const t = currentTab();
+  if (!t) return;
+  if (!t.nav) t.nav = { stack: [], idx: -1 };
+  const nav = t.nav;
+  const cur = App.state.currentPage || 1;
+  nav.stack = nav.stack.slice(0, nav.idx + 1);
+  if (nav.stack[nav.idx] !== cur) { nav.stack.push(cur); nav.idx++; }
+  if (nav.stack[nav.idx] !== dest) { nav.stack.push(dest); nav.idx++; }
+  while (nav.stack.length > 60) { nav.stack.shift(); nav.idx--; }
+}
+function navBack() {
+  const t = currentTab();
+  const nav = t && t.nav;
+  if (!nav || nav.idx <= 0) { toast('没有更早的阅读位置'); return; }
+  const cur = App.state.currentPage || 1;
+  if (nav.stack[nav.idx] !== cur) {   // 滚动离开过栈顶：补记当前位置，前进时能回来
+    nav.stack = nav.stack.slice(0, nav.idx + 1);
+    nav.stack.push(cur); nav.idx++;
+  }
+  nav.idx--;
+  scrollToPage(nav.stack[nav.idx], true, false);
+  setStatus('阅读位置：后退到第 ' + nav.stack[nav.idx] + ' 页（Alt+→ 前进）');
+}
+function navForward() {
+  const t = currentTab();
+  const nav = t && t.nav;
+  if (!nav || nav.idx >= nav.stack.length - 1) { toast('没有更靠后的阅读位置'); return; }
+  nav.idx++;
+  scrollToPage(nav.stack[nav.idx], true, false);
+  setStatus('阅读位置：前进到第 ' + nav.stack[nav.idx] + ' 页');
+}
+App.navBack = navBack;
+App.navForward = navForward;
+App.navState = () => {
+  const t = currentTab();
+  return t && t.nav ? { stack: t.nav.stack.slice(), idx: t.nav.idx } : null;
+};
 
 // ---------- 缩放控制 ----------
 // 缩放前后页面高度变了，滚动位置会漂；先记住当前页顶边相对视口的位置，改完再补回来
@@ -2433,7 +2478,7 @@ function bind() {
 
   E.prev.addEventListener('click', prevPage);
   E.next.addEventListener('click', nextPage);
-  E.pageInput.addEventListener('change', () => scrollToPage(parseInt(E.pageInput.value, 10) || 1));
+  E.pageInput.addEventListener('change', () => scrollToPage(parseInt(E.pageInput.value, 10) || 1, false, true));
   E.save.addEventListener('click', doSave);
 
   // 侧栏 + 全文搜索
@@ -2498,6 +2543,13 @@ function bind() {
     }
     if (e.key === 'F11') { App.setFocusMode(); e.preventDefault(); return; }
     if (e.key === 'F3') { gotoSearchHit(e.shiftKey ? -1 : 1); e.preventDefault(); return; }
+    // Alt+←/→：阅读导航历史。必须在下面 ArrowLeft/Right 的翻页分支之前拦截
+    //（按住 Alt 时 e.key 仍是 ArrowLeft，不拦就会边后退边翻页）。
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      if (e.key === 'ArrowLeft') navBack(); else navForward();
+      e.preventDefault();
+      return;
+    }
     switch (e.key) {
       case 'ArrowLeft': case 'PageUp': prevPage(); e.preventDefault(); break;
       case 'ArrowRight': case 'PageDown': nextPage(); e.preventDefault(); break;
@@ -2506,12 +2558,22 @@ function bind() {
         if (zoomMode.on) { zoomMode.space = true; e.preventDefault(); break; }
         nextPage(); e.preventDefault();
         break;
-      case 'Home': scrollToPage(1); e.preventDefault(); break;
-      case 'End': scrollToPage(App.state.numPages); e.preventDefault(); break;
+      case 'Home': scrollToPage(1, false, true); e.preventDefault(); break;
+      case 'End': scrollToPage(App.state.numPages, false, true); e.preventDefault(); break;
       case '+': case '=': if (e.ctrlKey) { setNumericScale(App.state.scale * 1.25); e.preventDefault(); } break;
       case '-': if (e.ctrlKey) { setNumericScale(App.state.scale / 1.25); e.preventDefault(); } break;
       case '0': if (e.ctrlKey) { App.state.scaleMode = 'page-width'; E.scale.value = 'page-width'; applyLayout(); e.preventDefault(); } break;
     }
+  });
+
+  // 鼠标侧键（按键 3/4）= 阅读位置后退 / 前进，和浏览器的前进后退一个手感；
+  // 库覆盖层开着时不响应，避免在库里误触翻到后台文档。
+  document.addEventListener('mouseup', (e) => {
+    if (e.button !== 3 && e.button !== 4) return;
+    if (window.LibraryUI && window.LibraryUI.isOpen()) return;
+    if (!App.state.filePath) return;
+    e.preventDefault();
+    if (e.button === 3) navBack(); else navForward();
   });
 
   // Ctrl+滚轮缩放；普通滚轮保持原生连续滚动（不劫持）。

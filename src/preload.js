@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   saveImageAnno: (info) => ipcRenderer.invoke('anno-save-image', info),
   // 批注导出为纯文本笔记
   exportNote: (info) => ipcRenderer.invoke('export-note', info),
+  // v33：导出一条库内笔记为自包含文件（HTML 含图片 / Markdown 带相对图片目录）
+  exportNoteBundle: (info) => ipcRenderer.invoke('export-note-bundle', info),
   // 菜单命令：专注阅读模式 / 导出当前页图片（主进程菜单触发）
   onToggleFocusMode: (cb) => { ipcRenderer.on('toggle-focus-mode', () => cb()); },
   onExportPagePng: (cb) => { ipcRenderer.on('export-page-png', () => cb()); },

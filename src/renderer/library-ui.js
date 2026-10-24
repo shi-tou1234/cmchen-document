@@ -1271,6 +1271,58 @@ window.LibraryUI = (function () {
     }
   }
 
+  // v33：笔记模板 —— 课程笔记 / 论文卡片 / 摘录汇总三种（评审报告 6.5 的轻量模板）。
+  // 全部用现有 Markdown 语法（::: 容器、任务列表、引用卡），预览直接能渲染；
+  // 摘录位置留「—— 作者：《标题》，年份，第 N 页」的出处行，和摘录/批注的出处格式一致。
+  const NOTE_TEMPLATES = {
+    course: '## 课程笔记：课程主题\n\n' +
+      ':::tip[课程信息]\n课程：\xa0\xa0·\xa0\xa0日期：\xa0\xa0·\xa0\xa0讲师：\n:::\n\n' +
+      '### 课堂要点\n- 要点 1\n- 要点 2\n\n' +
+      '### 重点推导\n:::derivation\n**推导过程：**\n\n在此填写推导内容…\n:::\n\n' +
+      '### 疑问与待办\n- [ ] 待弄清的问题\n',
+    paper: '## 论文卡片：论文标题\n\n' +
+      ':::quote\n「核心摘录：作者最重要的观点或结论」\n\n<right>—— 作者：《标题》，年份，第 N 页</right>\n:::\n\n' +
+      '### 研究问题\n\n### 方法与数据\n\n### 结论与启发\n\n### 我的评价\n',
+    excerpt: '## 摘录汇总：主题\n\n' +
+      ':::quote\n「摘录 1」\n\n<right>—— 作者：《标题》，年份，第 N 页</right>\n:::\n\n' +
+      ':::quote\n「摘录 2」\n\n<right>—— 出处</right>\n:::\n\n' +
+      '### 综合笔记\n',
+  };
+  function nvApplyTemplate(v) {
+    const tpl = NOTE_TEMPLATES[v];
+    if (!tpl) return;
+    const ta = $('nv-md');
+    if (!ta) return;
+    // 空笔记直接铺开模板；已有内容则作为新板块接在后面，不打断已有正文
+    if (!ta.value.trim()) {
+      ta.value = tpl;
+      ta.focus();
+      nvAfterEdit();
+      nvStatus('已套用模板');
+      return;
+    }
+    nvInsertBlock(tpl);
+    nvStatus('已在末尾插入模板');
+  }
+
+  // v33：导出这条笔记（HTML 自带图片 / Markdown 带相对图片目录）。先落盘再导出，
+  // 保存失败就不导——导出去的内容必须和库里的一致，不做「假导出」。
+  async function nvExportNote(fmt) {
+    if (!nv.open || !window.pdfBridge || !window.pdfBridge.exportNoteBundle) return;
+    const saved = await nvSaveNow();
+    if (saved === false) { nvStatus('保存失败，已取消导出'); return; }
+    const r = await window.pdfBridge.exportNoteBundle({
+      key: nv.key, noteId: nv.noteId, fmt,
+      title: ($('nv-title') && $('nv-title').value.trim()) || '',
+    });
+    if (!r) { nvStatus('导出失败'); return; }
+    if (r.canceled) { nvStatus('已取消导出'); return; }
+    if (!r.ok) { nvStatus('导出失败：' + (r.error || '未知错误')); return; }
+    const imgs = (r.images || 0) + (r.skipped ? ' 张缺失' : '');
+    nvStatus(r.images ? ('已导出到 ' + r.path + '（图片 ' + imgs + '）') : ('已导出到 ' + r.path));
+    window.App && window.App.toast && window.App.toast(r.images ? '笔记已导出（含 ' + r.images + ' 张图片）' : '笔记已导出');
+  }
+
 
   // v9：笔记改成富文本（像 Word 一样直接排版，不再是「写 Markdown 再切预览」）
   const RICH_BAR = '<div class="rt-bar">' +
@@ -3109,6 +3161,15 @@ window.LibraryUI = (function () {
     // 全屏笔记编辑器（Markdown）
     const nvBack = $('nv-back');
     if (nvBack) nvBack.addEventListener('click', closeNoteEditor);
+    // v33：模板 / 导出下拉——用完归位到「模板…」/「导出…」，同一项可以连续用
+    const nvTpl = $('nv-template');
+    if (nvTpl) nvTpl.addEventListener('change', () => {
+      if (nvTpl.value) { nvApplyTemplate(nvTpl.value); nvTpl.value = ''; }
+    });
+    const nvExportSel = $('nv-export');
+    if (nvExportSel) nvExportSel.addEventListener('change', () => {
+      if (nvExportSel.value) { const f = nvExportSel.value; nvExportSel.value = ''; nvExportNote(f); }
+    });
     const nvSaveBtn = $('nv-save');
     if (nvSaveBtn) nvSaveBtn.addEventListener('click', async () => {
       const saved = await nvSaveNow();

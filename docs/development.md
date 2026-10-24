@@ -81,12 +81,12 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 }
 ```
 
-这样会跑 68 个 Node 驱动的脚本（72 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
+这样会跑 70 个 Node 驱动的脚本（74 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
 
 | 类型 | 数量 | 怎么跑 |
 |---|---|---|
 | 纯 Node | 16 | `node scripts/test-library.js` 等，不需要 Electron |
-| Electron 回归 | 46 | `node scripts/test-*.js`，多数经 `probe-runner` spawn Electron 并用 `PDFREADER_PROBE` 注入探针 |
+| Electron 回归 | 54 | `node scripts/test-*.js`，多数经 `probe-runner` spawn Electron 并用 `PDFREADER_PROBE` 注入探针 |
 | 打包冒烟 | 1 | `node scripts/test-packaged.js build\Trove-1.2.0-portable.exe` |
 | 直跑 Electron | 3 | `electron.exe scripts/test-pen.js` 等，需要真实输入 / 手势 |
 
@@ -109,6 +109,7 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 - **测试不搬家**。`main.js` 里 `ISOLATED_USER_DATA` 为真时跳过 `runUserDataMigration()`。否则临时 userData 会被塞进真实用户的最近打开和页码——打包冒烟曾因此稳定打开到第 3 页，看起来像"PDF 渲染坏了"。
 - **单实例测试要保留锁**。`test-single-instance.js` 用 `PDFREADER_HIDDEN` + `--user-data-dir`，但**不能**被当成 `TEST_MODE`，否则锁被关掉，测试失去意义。
 - **隐藏窗口不重绘**。靠截图核对布局时要开 `PDFREADER_PROBE_VISIBLE=1`，否则抓到的是旧帧。
+- **隐藏窗口的平滑滚动不可靠**（v33 踩过）：rAF 被限到 ~1Hz，`scrollIntoView({behavior:'smooth'})` 不真正发生，迟到的 IntersectionObserver 还会把页码纠正回实际可见页。断言"跳到第 N 页"的探针先 `App.setViewMode('page')` 切单页模式（不走滚动），或开 `PDFREADER_PROBE_VISIBLE=1`。
 - **`--user-data-dir` 会改 Electron 的 userData**（所以迁移逻辑必须跳过它），但库 / 索引的路径仍以 `PDFREADER_DATA_DIR` 为准；测试里两个都设最稳。
 
 ### 加一条回归

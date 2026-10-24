@@ -2011,6 +2011,110 @@ ipcMain.handle('export-note', async (_e, info) => {
   catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 });
 
+// v33：导出一条库内笔记为自包含文件——HTML 自带图片，Markdown 带相对图片目录。
+// 正文里的 snapshots/ 引用和 note.image 字段一并带走：复制到 <文件名>.files/，
+// 引用改写成相对路径；HTML 里图片用真实 src（Md.render 对本地路径只出 data-md-img 占位，
+// 这里渲染后统一换成 src）。缺文件跳过并计数，不静默丢。
+ipcMain.handle('export-note-bundle', async (_e, info) => {
+  const Md = require('./markdown.js');
+  const key = info && info.key;
+  const fmt = info && info.fmt === 'md' ? 'md' : 'html';
+  const it = key ? library.findItem(key) : null;
+  if (!it) return { ok: false, error: '找不到这条笔记所属的条目' };
+  const notes = it.notes || [];
+  const note = notes.find((n) => n.id === info.noteId) || notes[0];
+  if (!note) return { ok: false, error: '这条条目还没有笔记内容' };
+  let text = String(note.text || '');
+  if (!text.trim() && note.html) {
+    try { text = Md.fromHtml(note.html); } catch (_) { text = ''; }
+  }
+  if (!text.trim()) return { ok: false, error: '笔记是空的' };
+
+  // 收集图片引用（数据目录内相对路径，只认 snapshots/ 前缀，和 note-image 的守卫一致）
+  const refs = [];
+  const seenRef = new Set();
+  const addRef = (p) => {
+    p = String(p || '');
+    if (!/^snapshots\/[^\\/]+$/i.test(p) || seenRef.has(p)) return;
+    seenRef.add(p);
+    refs.push(p);
+  };
+  addRef(note.image);
+  const imgRe = /!\[[^\]]*\]\((snapshots\/[^)\s]+)\)/g;
+  let m;
+  while ((m = imgRe.exec(text))) addRef(m[1]);
+
+  const rawTitle = String((info && info.title) || it.title || '未命名笔记').trim() || '未命名笔记';
+  const safeTitle = rawTitle.replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 80);
+  const ext = fmt === 'md' ? 'md' : 'html';
+  let filePath = '';
+  if (info && info.outPath) {
+    filePath = String(info.outPath);   // 测试 / 脚本直写，不弹对话框
+  } else {
+    const picked = await dialog.showSaveDialog(win, {
+      title: fmt === 'md' ? '导出笔记（Markdown，图片在同目录的 .files 文件夹）' : '导出笔记（HTML，图片在同目录的 .files 文件夹）',
+      defaultPath: path.join(appState.lastDir || '', safeTitle + '.' + ext),
+      filters: [{ name: fmt === 'md' ? 'Markdown' : 'HTML', extensions: [ext] }],
+    });
+    if (picked.canceled || !picked.filePath) return { ok: false, canceled: true };
+    filePath = picked.filePath;
+  }
+
+  try {
+    const dataRoot = path.resolve(currentDataDir());
+    const filesDirName = path.basename(filePath, path.extname(filePath)) + '.files';
+    const filesDir = path.join(path.dirname(filePath), filesDirName);
+    const rewrite = new Map();   // snapshots/x.png → <files>/x.png
+    let copied = 0, skipped = 0;
+    if (refs.length) {
+      fs.mkdirSync(filesDir, { recursive: true });
+      const used = new Set();
+      for (const rel of refs) {
+        const src = path.resolve(dataRoot, rel);
+        if (!src.startsWith(dataRoot + path.sep) || !fs.existsSync(src)) { skipped++; continue; }
+        let name = path.basename(rel);
+        if (used.has(name)) {
+          const dot = name.lastIndexOf('.');
+          name = (dot > 0 ? name.slice(0, dot) : name) + '-' + Date.now().toString(36) + (dot > 0 ? name.slice(dot) : '');
+        }
+        used.add(name);
+        fs.copyFileSync(src, path.join(filesDir, name));
+        rewrite.set(rel, filesDirName + '/' + name);
+        copied++;
+      }
+    }
+    // 引用改写（Markdown 语法里的链接目标）
+    let outText = text.replace(imgRe, (whole, rel) => rewrite.has(rel) ? whole.replace(rel, rewrite.get(rel)) : whole);
+    if (fmt === 'md') {
+      atomicWrite(filePath, outText);
+      appState.lastDir = path.dirname(filePath);
+      return { ok: true, path: filePath, images: copied, skipped };
+    }
+    let html = Md.render(outText);
+    // 本地图片：占位属性换成真实相对 src。注意 Markdown 里的引用已先被改写成
+    // <文件名>.files/xxx 路径，所以属性值以图片目录前缀开头的就是复制成功的图；
+    // 其余（复制失败保留了 snapshots/ 原路径）给出可见说明，不留破图标。
+    html = html.replace(/<img class="md-img" data-md-img="([^"]+)"([^>]*)>/g, (_w, rel, rest) => {
+      if (rel.indexOf(filesDirName + '/') === 0) return '<img class="md-img" src="' + rel + '"' + rest + '>';
+      return '<span class="md-img-missing">[图片缺失：' + rel + ']</span>';
+    });
+    const page = '<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+      '<title>' + Md.esc(rawTitle) + '</title>\n' +
+      '<style>body{font-family:Georgia,"Noto Serif SC",serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.75;color:#24211d;background:#fdfcf9}' +
+      'h1,h2,h3{line-height:1.35}img.md-img{max-width:100%;height:auto}blockquote{margin:1em 0;padding:.4em 1em;border-left:3px solid #c9b98a;background:#f6f1e3;color:#4c4436}' +
+      'table{border-collapse:collapse}td,th{border:1px solid #d8d2c4;padding:4px 10px}code{background:#f0ece1;border-radius:3px;padding:1px 5px}' +
+      'pre{background:#f0ece1;padding:12px;overflow:auto;border-radius:5px}pre code{padding:0;background:none}' +
+      '.md-img-missing{color:#a05a2c;font-size:.9em}.q-from{color:#6f6656;font-size:.92em}</style>\n</head>\n<body>\n' +
+      html + '\n</body>\n</html>\n';
+    atomicWrite(filePath, page);
+    appState.lastDir = path.dirname(filePath);
+    return { ok: true, path: filePath, images: copied, skipped };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 // v21：把**所有**文档的批注汇总成一份 Markdown（写论文时一次导出所有读书笔记）
 async function exportAllNotesToFile(outPath) {
   try {

@@ -224,6 +224,8 @@ doi: url: volume: issue: pages: language:      14 个字段限定
 - **`javascript:` 链接降级**成纯文本；外链点击经 `open-external`（只放行 http/https/mailto）用系统浏览器打开；本地图片走 IPC 读 dataURL，渲染层不碰 `file://`。
 - **`fromHtml()`**：旧的富文本笔记第一次打开时自动转成 Markdown，不丢内容。
 - **公式仍是等宽源码**（`$…$` / `$$…$$`）：项目没有数学排版引擎，预览面板会明说，不假装支持。
+- **笔记模板（v33）**：顶栏「模板…」下拉三种（课程笔记 / 论文卡片 / 摘录汇总），全是现有 Markdown 语法的字符串常量（`NOTE_TEMPLATES`），空笔记铺开、有内容追加；摘录出处行与摘录 / 批注的 `—— 作者：《标题》，年份` 格式一致。
+- **自包含导出（v33，`export-note-bundle` IPC）**：先落盘再导出；`snapshots/` 图片复制到导出文件旁 `<文件名>.files/`（同名避让），Markdown 引用改写成相对路径；HTML 由 `Md.render` 出正文后把本地图片的 `data-md-img` 占位换成真实 `src`（改写后的路径以 `.files/` 前缀判定），缺失图片输出可见的「[图片缺失：…]」并计数返回。`outPath` 参数旁路保存对话框，测试用。
 - **`richtext.js`（UMD）**：HTML 白名单清洗（删 script/style/iframe、去 on* 事件与 `javascript:` 链接、未知标签只留文字）+ 纯文本提取。**落库前和渲染前都过一遍**。
 - **保存时序**：`closeNoteEditor` 先 `await` 落库再刷新列表，否则卡片摘要会显示旧内容。
 
@@ -249,6 +251,7 @@ doi: url: volume: issue: pages: language:      14 个字段限定
 - 标签页活在当前进程里，同一路径再次打开会切到已有标签，不新开。
 - **会话恢复（v33，`settings.restoreTabs`）**：标签清单（路径 / 类型 / 条目 / 页码，不含文档字节）由渲染层在标签变动、翻页（去抖 600ms）和 `pagehide` 时经 `session-save` 写入 `<userData>/session.json`（上限 20 条、按路径去重）。主进程在 `did-finish-load` 且**无命令行文件**、设置开启、会话非空时推送 `session-restore`；渲染层逐个用 `open-doc-path`（与库内打开同链路、含引用信息、不写「最近打开」）取回并打开，最多 8 个，失联文件跳过，最后切回记录的激活标签。页码恢复以库 / 最近打开里记的为准，会话快照只是兜底。冒烟 / 探针模式不恢复，保持测试路径单一。
 - 切换标签不销毁 PDF 文档；关闭标签只释放渲染资源，不删 PDF、不删标注文件。
+- **阅读导航历史（v33）**：显式跳转（目录 / 搜索命中 / 批注 / 页码输入 / 缩略图 / Home/End）经 `scrollToPage(n, instant, record)` 的第三参入栈，栈挂在标签页对象 `t.nav` 上（上限 60）；`Alt+←/→` 与鼠标侧键（button 3/4）后退前进；纯滚动漂移在后退时补记；初始落页与逐页翻阅不入栈。库覆盖层打开时快捷键不响应。
 - **单实例**：`app.requestSingleInstanceLock()`；第二个实例把命令行里的文档转交给第一个后退出。探针 / 测试模式跳过这把锁（`test-single-instance` 除外，它专门验证锁）。
 - **数据目录迁移必须先于单实例锁**：如果两个实例一个用旧目录、一个用新目录，锁会落在不同位置，等于允许双开。
 

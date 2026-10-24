@@ -383,6 +383,17 @@
       <input id="nv-title" type="text" placeholder="未命名笔记" title="笔记标题（改完自动保存）" />
       <span id="nv-status" class="ld-hint"></span>
       <span class="grow"></span>
+      <select id="nv-template" title="插入笔记模板（课程笔记 / 论文卡片 / 摘录汇总）">
+        <option value="">模板…</option>
+        <option value="course">课程笔记</option>
+        <option value="paper">论文卡片</option>
+        <option value="excerpt">摘录汇总</option>
+      </select>
+      <select id="nv-export" title="导出这条笔记（HTML 自带图片，Markdown 带相对图片目录）">
+        <option value="">导出…</option>
+        <option value="html">HTML（含图片）</option>
+        <option value="md">Markdown（含图片目录）</option>
+      </select>
       <button id="nv-preview-toggle" class="tbtn" title="显示 / 隐藏实时预览" aria-pressed="true">预览</button>
       <button id="nv-save" class="tbtn" title="保存（Ctrl+S）">保存</button>
     </header>
