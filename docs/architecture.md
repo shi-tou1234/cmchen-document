@@ -116,8 +116,9 @@ library.json  items[].annoIds   ← 与 annoMeta.itemKey 双向
 
 ### 设置与窗口状态
 
-- `settings.json`：`dataDir`、`defaultSort`、`theme`、`autoIndex`、`hintSeen`、`invertPages`、`viewMode`、`fetchEmail`（Unpaywall 的联系邮箱）。字段白名单，读坏回退默认值。
+- `settings.json`：`dataDir`、`defaultSort`、`theme`、`autoIndex`、`restoreTabs`（恢复上次标签页）、`hintSeen`、`invertPages`、`viewMode`、`fetchEmail`（Unpaywall 的联系邮箱）。字段白名单，读坏回退默认值。
 - `window-state.json`：窗口位置 / 尺寸 / 最近打开（最多 8 条，含每份文件的页码）。
+- `session.json`：上次会话的标签清单（路径 / 页码 / 激活项），`restoreTabs` 开启时启动恢复用（见「标签页、会话与单实例」）。
 - `fulltext/<sha1(path)>.json`：全文索引，按 `mtime + size` 判断新鲜度，可重建，不进备份。
 - `snapshots/`、`styles/`、`attachments/`：托管资源随迁移和 JSON 备份携带，资源总量上限 60 MB（超限报错，不截断）。备份保留 `format:1` 与旧 `images` 字段，并增加 `resources`、`sourceDataDir` 用于恢复路径。
 - `atomic-file.js`：同目录临时文件写完再替换，失败不直写旧文件；库和设置仅在落盘成功后确认状态，库失败时回滚缓存，撤销栈保留重试机会。
@@ -245,7 +246,8 @@ doi: url: volume: issue: pages: language:      14 个字段限定
 
 ## 标签页、会话与单实例
 
-- 标签页只活在当前进程里（`settings.restoreTabs` 预留但未启用）。同一路径再次打开会切到已有标签，不新开。
+- 标签页活在当前进程里，同一路径再次打开会切到已有标签，不新开。
+- **会话恢复（v33，`settings.restoreTabs`）**：标签清单（路径 / 类型 / 条目 / 页码，不含文档字节）由渲染层在标签变动、翻页（去抖 600ms）和 `pagehide` 时经 `session-save` 写入 `<userData>/session.json`（上限 20 条、按路径去重）。主进程在 `did-finish-load` 且**无命令行文件**、设置开启、会话非空时推送 `session-restore`；渲染层逐个用 `open-doc-path`（与库内打开同链路、含引用信息、不写「最近打开」）取回并打开，最多 8 个，失联文件跳过，最后切回记录的激活标签。页码恢复以库 / 最近打开里记的为准，会话快照只是兜底。冒烟 / 探针模式不恢复，保持测试路径单一。
 - 切换标签不销毁 PDF 文档；关闭标签只释放渲染资源，不删 PDF、不删标注文件。
 - **单实例**：`app.requestSingleInstanceLock()`；第二个实例把命令行里的文档转交给第一个后退出。探针 / 测试模式跳过这把锁（`test-single-instance` 除外，它专门验证锁）。
 - **数据目录迁移必须先于单实例锁**：如果两个实例一个用旧目录、一个用新目录，锁会落在不同位置，等于允许双开。

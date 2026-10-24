@@ -81,12 +81,12 @@ Get-ChildItem scripts\test-*.js | Where-Object { $skip -notcontains $_.Name } | 
 }
 ```
 
-这样会跑 65 个 Node 驱动的脚本（69 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
+这样会跑 68 个 Node 驱动的脚本（72 个减去下面 4 个）；`test-packaged.js` 和 3 个直跑 Electron 的脚本单独跑（见下）。
 
 | 类型 | 数量 | 怎么跑 |
 |---|---|---|
 | 纯 Node | 16 | `node scripts/test-library.js` 等，不需要 Electron |
-| Electron 回归 | 43 | `node scripts/test-*.js`，多数经 `probe-runner` spawn Electron 并用 `PDFREADER_PROBE` 注入探针 |
+| Electron 回归 | 46 | `node scripts/test-*.js`，多数经 `probe-runner` spawn Electron 并用 `PDFREADER_PROBE` 注入探针 |
 | 打包冒烟 | 1 | `node scripts/test-packaged.js build\Trove-1.2.0-portable.exe` |
 | 直跑 Electron | 3 | `electron.exe scripts/test-pen.js` 等，需要真实输入 / 手势 |
 

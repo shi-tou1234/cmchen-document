@@ -13,7 +13,7 @@ const DEFAULTS = {
   defaultSort: 'added',   // added | modified | title | year
   theme: 'light',         // light | dark | system
   autoIndex: true,        // 启动后自动建全文索引
-  restoreTabs: false,     // 预留：下次启动恢复标签页（本版不启用）
+  restoreTabs: false,     // v33：下次启动恢复上次打开的标签页（session.json）
   hintSeen: false,        // v19：首次上手提示是否已经看过
   invertPages: false,     // v20：深色模式下把页面反色（护眼）
   viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页

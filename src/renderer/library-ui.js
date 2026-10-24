@@ -25,11 +25,12 @@ window.LibraryUI = (function () {
     annos: [],            // 标注条目化 —— 汇总起来的标注
     annoTags: {},         // 标注 id → 标签
     annoLoaded: false,
+    annoFilter: { kinds: new Set(), colors: new Set() },  // v33：标注视图按类型 / 颜色筛选（多选，命中任一即可）
     tagFilter: new Set(),   // v14：标签选择器（多选，命中任一即可）
     citeStyle: 'gbt7714',   // v14：引用样式
     citekeys: new Map(),    // v27：条目 key → 确定性 citekey
     secOpen: { searches: false, tags: false },  // v19：进阶分区默认折叠（新手少看两眼）
-    ft: { query: '', results: [], stats: null, loading: false, error: '' },
+    ft: { query: '', results: [], stats: null, loading: false, error: '', type: 'all', show: 20, total: 0, counts: {} },
     settings: { theme: 'light', defaultSort: 'added', autoIndex: true, dataDir: '' },
     dupGroups: [],
     sortTouched: false,
@@ -159,6 +160,9 @@ window.LibraryUI = (function () {
     if (isAnnoScope()) {
       let list = state.annos.map(annoItem);
       if (state.tagFilter.size) list = list.filter((x) => (x.tags || []).some((t) => state.tagFilter.has(t)));
+      // v33：类型 / 颜色筛选（多选，命中任一即可；kind 是主进程给好的中文类型名）
+      if (state.annoFilter.kinds.size) list = list.filter((x) => x._anno && state.annoFilter.kinds.has(x._anno.kind));
+      if (state.annoFilter.colors.size) list = list.filter((x) => x._anno && state.annoFilter.colors.has(x._anno.color || ''));
       const q = state.query.trim().toLowerCase();
       if (q) list = list.filter((x) => matchesQuery(x, q));
       return sortItems(list);
@@ -438,7 +442,7 @@ window.LibraryUI = (function () {
     el.count.textContent = isAnnoScope() ? (list.length + ' 条标注') : (list.length + ' 条');
     el.empty.hidden = list.length !== 0;
     el.empty.textContent = isTrash() ? '回收站是空的。'
-      : isAnnoScope() ? '还没有标注。在文档里选中文字做高亮 / 批注，或加一条便签，这里就会出现。'
+      : isAnnoScope() ? (state.annos.length ? '没有符合筛选条件的标注。' : '还没有标注。在文档里选中文字做高亮 / 批注，或加一条便签，这里就会出现。')
       : (state.query.trim() || saved) ? '没有匹配的条目。'
       : '还没有条目。点右上角「添加文档」，或把 PDF / Word / PPT / Excel / Markdown 等文件拖进来。';
     if (el.selectAll) {
@@ -449,6 +453,10 @@ window.LibraryUI = (function () {
     }
     // 标注视图不是条目表格，列头和搜索提示都换一套
     if (el.columns) el.columns.hidden = isAnnoScope();
+    if (el.annoFilter) {
+      el.annoFilter.hidden = !isAnnoScope();
+      if (isAnnoScope()) renderAnnoFilter();
+    }
     // placeholder 别塞语法说明：输入框只有 190px 宽，长文案会被截断（用户看到的"文字被切断"）
     if (el.search) {
       el.search.placeholder = isAnnoScope() ? '搜索标注文字…' : '搜索标题 / 作者 / 全文…';
@@ -457,6 +465,38 @@ window.LibraryUI = (function () {
     const keepTop = el.grid.scrollTop;
     renderRows(list, keepTop);
     el.grid.scrollTop = keepTop;
+  }
+
+  // v33：标注视图筛选条 —— 类型（主进程给好的中文类型名，按固定顺序展示）+ 颜色圆点。
+  // 多选、命中任一即可；出现过的类型 / 颜色才显示，避免一排空筛选。
+  const ANNO_KIND_ORDER = ['高亮', '摘录', '批注', '下划线', '手绘', '文字', '便签', '图片', '矩形', '箭头', '直线', '选区'];
+  function renderAnnoFilter() {
+    if (!el.annoFilter) return;
+    const kinds = new Map();   // kind → 数量
+    const colors = new Map();  // color → 数量
+    for (const a of state.annos) {
+      const k = a.kind || '标注';
+      kinds.set(k, (kinds.get(k) || 0) + 1);
+      const c = a.color || '';
+      if (c) colors.set(c, (colors.get(c) || 0) + 1);
+    }
+    const f = state.annoFilter;
+    const kindList = [...kinds.keys()].sort((a, b) => {
+      const ia = ANNO_KIND_ORDER.indexOf(a), ib = ANNO_KIND_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    const colorList = [...colors.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    const kindChips = kindList.map((k) =>
+      '<button class="af-chip' + (f.kinds.has(k) ? ' on' : '') + '" data-anno-kind="' + esc(k) + '">' +
+      esc(k) + ' <span class="af-n">' + kinds.get(k) + '</span></button>').join('');
+    const colorChips = colorList.map(([c, n]) =>
+      '<button class="af-dot' + (f.colors.has(c) ? ' on' : '') + '" data-anno-color="' + esc(c) + '" ' +
+      'title="颜色 ' + esc(c) + ' · ' + n + ' 条"><span class="af-dotc" style="background:' + esc(c) + '"></span>' +
+      '<span class="af-n">' + n + '</span></button>').join('');
+    const clear = (f.kinds.size || f.colors.size)
+      ? '<button class="af-clear" data-anno-clear="1">清除筛选</button>' : '';
+    el.annoFilter.innerHTML = (kindChips ? '<span class="af-lbl">类型</span>' + kindChips : '') +
+      (colorChips ? '<span class="af-lbl">颜色</span>' + colorChips : '') + clear;
   }
 
   // 条目渲染成「学术表格」的一行：标题 / 作者·年份·来源 / 类型 / 收藏集 / 标签 / 操作
@@ -549,7 +589,7 @@ window.LibraryUI = (function () {
       '<label class="lc-check" title="选择标注"><input type="checkbox" data-select-key="' + esc(it.key) + '"' + (picked ? ' checked' : '') + ' /></label>' +
       '<div class="lctitle" data-anno-open="' + esc(it.key) + '" title="打开到这一页">' + esc(it.title) + '</div>' +
       '<div class="lcmeta">' + src + '</div>' +
-      '<div class="lcmeta2"><span class="lctype">标注</span>' + (a.comment ? '<span class="lcprog">有批注</span>' : '') + owner + '</div>' +
+      '<div class="lcmeta2"><span class="lctype">' + (a.color ? '<span class="af-dotc" style="background:' + esc(a.color) + '" title="标注颜色 ' + esc(a.color) + '"></span>' : '') + '标注</span>' + (a.comment ? '<span class="lcprog">有批注</span>' : '') + owner + '</div>' +
       '<div class="lccolls"></div>' +
       '<div class="lctags">' + tags + '<span class="lc-addtag" data-addtag="' + esc(it.key) + '" title="加标签">＋</span></div>' +
       '<div class="lcbar">' +
@@ -792,6 +832,20 @@ window.LibraryUI = (function () {
   }
 
   // ---------- 库级全文检索结果 ----------
+  // v33：结果面板 = 类型切换（全部/文献/正文/批注/笔记）+ 分页。
+  // 首次拉 FT_PAGE 条（主进程默认 120），界面先显示 FT_STEP 条，「展开更多」逐步放行；
+  // 已载入的看完了但主进程还有（total > 已载入），再按 offset 续拉，不整段重来。
+  const FT_PAGE = 120;
+  const FT_STEP = 20;
+  const FT_TYPES = [
+    ['item', '文献'], ['fulltext', '正文'], ['annotation', '批注'], ['note', '笔记'],
+  ];
+
+  function ftFiltered() {
+    const list = state.ft.results || [];
+    return state.ft.type === 'all' ? list : list.filter((r) => (r.type || 'fulltext') === state.ft.type);
+  }
+
   function renderFt() {
     if (!el.ft) return;
     const q = state.query.trim();
@@ -816,11 +870,25 @@ window.LibraryUI = (function () {
         '<span class="ld-hint">' + esc(hint) + '</span></div>';
       return;
     }
-    el.ft.innerHTML = '<div class="lib-ft-head"><span class="lib-ft-title">全文检索：“' + esc(q) + '” · ' + list.length + ' 处命中</span>' +
+    const counts = state.ft.counts || {};
+    const total = state.ft.total || list.length;
+    // 类型过滤粘在会话上：这次搜索没有该类型时自动回「全部」，避免空面板
+    if (state.ft.type !== 'all' && !counts[state.ft.type]) state.ft.type = 'all';
+    const chips = ['<button class="lib-ft-chip' + (state.ft.type === 'all' ? ' on' : '') + '" data-ft-type="all">全部 ' + total + '</button>']
+      .concat(FT_TYPES.filter(([k]) => counts[k]).map(([k, label]) =>
+        '<button class="lib-ft-chip' + (state.ft.type === k ? ' on' : '') + '" data-ft-type="' + k + '">' + label + ' ' + counts[k] + '</button>'))
+      .join('');
+    const filtered = ftFiltered();
+    const showN = Math.min(state.ft.show || FT_STEP, filtered.length);
+    const more = showN < filtered.length || list.length < total
+      ? '<button class="lib-ft-more" data-ft-more="1">展开更多（已显示 ' + showN + ' / 共 ' + total + ' 处）</button>'
+      : '';
+    el.ft.innerHTML = '<div class="lib-ft-head"><span class="lib-ft-title">全文检索：“' + esc(q) + '” · 共 ' + total + ' 处命中</span>' +
       '<span class="ld-hint">全文 / 摘录 / 批注 / 笔记合并搜索，按相关性排序；支持 "短语"、-排除、title: 等字段限定</span></div>' +
-      list.map((r) => {
+      '<div class="lib-ft-chips">' + chips + '</div>' +
+      filtered.slice(0, showN).map((r) => {
         const kind = r.type || 'fulltext';
-        const label = r.label || (kind === 'note' ? '笔记' : kind === 'annotation' ? '批注' : '全文');
+        const label = r.label || (kind === 'note' ? '笔记' : kind === 'annotation' ? '批注' : kind === 'item' ? '条目' : '全文');
         return '<button class="lib-ft-row" data-ft-key="' + esc(r.key) + '" data-ft-page="' + (r.page || 1) + '"' +
           (r.noteId ? ' data-ft-note="' + esc(r.noteId) + '"' : '') + '>' +
           '<span class="lib-ft-type ' + esc(kind) + '">' + esc(label) + '</span>' +
@@ -828,7 +896,7 @@ window.LibraryUI = (function () {
           '<span class="lib-ft-pg">P' + (r.page || '?') + '</span>' +
           '<span class="lib-ft-snip">' + esc(r.snippet || '') + '</span>' +
           '</button>';
-      }).join('');
+      }).join('') + more;
   }
 
   function scheduleFulltext() {
@@ -840,22 +908,53 @@ window.LibraryUI = (function () {
     if (!L() || !L().searchFull) return;
     const q = state.query.trim();
     if (!q || isTrash()) {
-      state.ft = { query: q, results: [], stats: null, loading: false, error: '' };
+      state.ft = { query: q, results: [], stats: null, loading: false, error: '', type: 'all', show: FT_STEP, total: 0, counts: {} };
       renderFt();
       return;
     }
-    state.ft = { query: q, results: [], stats: state.ft.stats, loading: true, error: '' };
+    state.ft = { query: q, results: [], stats: state.ft.stats, loading: true, error: '', type: state.ft.type || 'all', show: FT_STEP, total: 0, counts: {} };
     renderFt();
     try {
-      const r = await L().searchFull(q);
+      const r = await L().searchFull(q, { limit: FT_PAGE });
       if (state.query.trim() !== q) return;
       state.ft = {
         query: q, results: (r && r.results) || [], stats: (r && r.stats) || null,
+        total: (r && r.total) || ((r && r.results) || []).length,
+        counts: (r && r.counts) || {},
         loading: false, error: (r && r.ok === false) ? (r.error || '检索失败') : '',
+        type: state.ft.type, show: FT_STEP,
       };
     } catch (err) {
-      state.ft = { query: q, results: [], stats: null, loading: false, error: '检索失败：' + (err && err.message ? err.message : err) };
+      state.ft = { query: q, results: [], stats: null, loading: false, error: '检索失败：' + (err && err.message ? err.message : err), type: 'all', show: FT_STEP, total: 0, counts: {} };
     }
+    renderFt();
+  }
+
+  // 「展开更多」：先放行已载入的下一批；已载入看完而主进程还有，就按 offset 续拉一页
+  async function ftMore() {
+    const ft = state.ft;
+    if (ft.loading) return;
+    const filtered = ftFiltered();
+    if (ft.show < filtered.length) {
+      ft.show += FT_STEP;
+      renderFt();
+      return;
+    }
+    if (!L() || !L().searchFull) return;
+    if ((ft.results || []).length >= (ft.total || 0)) return;
+    const q = ft.query;
+    ft.loading = true;
+    try {
+      const r = await L().searchFull(q, { offset: (ft.results || []).length, limit: FT_PAGE });
+      if (state.ft.query !== q || state.query.trim() !== q) { ft.loading = false; return; }
+      if (r && r.ok !== false) {
+        ft.results = (ft.results || []).concat((r && r.results) || []);
+        ft.total = (r && r.total) || ft.total;
+        ft.counts = (r && r.counts) || ft.counts;
+        ft.show += FT_STEP;
+      }
+    } catch (_) { /* 续拉失败保持现状，用户可重点一次 */ }
+    ft.loading = false;
     renderFt();
   }
 
@@ -1744,6 +1843,7 @@ window.LibraryUI = (function () {
     if (el.setTheme) el.setTheme.value = state.settings.theme || 'light';
     if (el.setSort) el.setSort.value = state.settings.defaultSort || 'added';
     if (el.setAutoIndex) el.setAutoIndex.checked = state.settings.autoIndex !== false;
+    if (el.setRestoreTabs) el.setRestoreTabs.checked = !!state.settings.restoreTabs;
     if (el.setInvertPages) el.setInvertPages.checked = !!state.settings.invertPages;
     if (el.setFetchEmail) el.setFetchEmail.value = state.settings.fetchEmail || '';
     if (el.setViewMode) el.setViewMode.value = state.settings.viewMode === 'page' ? 'page' : 'scroll';
@@ -1765,6 +1865,7 @@ window.LibraryUI = (function () {
       theme: el.setTheme ? el.setTheme.value : 'light',
       defaultSort: el.setSort ? el.setSort.value : 'added',
       autoIndex: el.setAutoIndex ? el.setAutoIndex.checked : true,
+      restoreTabs: el.setRestoreTabs ? el.setRestoreTabs.checked : false,
       invertPages: el.setInvertPages ? el.setInvertPages.checked : false,
       viewMode: el.setViewMode ? el.setViewMode.value : 'scroll',
       fetchEmail: el.setFetchEmail ? el.setFetchEmail.value.trim() : '',
@@ -2674,13 +2775,13 @@ window.LibraryUI = (function () {
       columns: document.querySelector('#lib-main .lib-columns'),
       bulkEdit: $('lib-bulk-edit'), bulkBib: $('lib-bulk-bib'), bulkTrash: $('lib-bulk-trash'),
       bulkFetch: $('lib-bulk-fetch'),
-      annoTools: $('lib-anno-tools'), annoTagInput: $('lib-anno-tag-input'),
+      annoTools: $('lib-anno-tools'), annoTagInput: $('lib-anno-tag-input'), annoFilter: $('lib-anno-filter'),
       annoTagAdd: $('lib-anno-tag-add'), annoExport: $('lib-anno-export'), annoNote: $('lib-anno-note'),
       dup: $('lib-dup'), importRefs: $('lib-import-refs'), exportRefs: $('lib-export-refs'),
       newNote: $('lib-new-note'), undo: $('lib-undo'), redo: $('lib-redo'),
       settingsBtn: $('lib-settings'),
       settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
-      setAutoIndex: $('set-auto-index'), setInvertPages: $('set-invert-pages'), setFetchEmail: $('set-fetch-email'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
+      setAutoIndex: $('set-auto-index'), setRestoreTabs: $('set-restore-tabs'), setInvertPages: $('set-invert-pages'), setFetchEmail: $('set-fetch-email'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
       setFtStatus: $('set-ft-status'), setIndex: $('set-index'), setReindex: $('set-reindex'),
       dupModal: $('dup-modal'), dupBody: $('dup-body'), dupStatus: $('dup-status'),
       bulkModal: $('bulk-modal'), bulkTitle: $('bulk-title'), bulkType: $('bulk-type'), bulkColl: $('bulk-add-coll'),
@@ -2961,9 +3062,41 @@ window.LibraryUI = (function () {
       }
     });
     if (el.ft) el.ft.addEventListener('click', (e) => {
+      // v33：类型切换片 + 「展开更多」；行点击仍走原来的跳页逻辑
+      const chip = e.target.closest('[data-ft-type]');
+      if (chip) {
+        // 已展开深度跨类型保留：切走再切回来，不用重新点「展开更多」
+        state.ft.type = chip.dataset.ftType || 'all';
+        renderFt();
+        return;
+      }
+      if (e.target.closest('[data-ft-more]')) { ftMore(); return; }
       const row = e.target.closest('[data-ft-key]');
       // v9：点全文结果 → 打开到那一页，并把搜索词在页面上高亮出来
       if (row) openItem(row.dataset.ftKey, +row.dataset.ftPage || 1, { highlight: state.query.trim() });
+    });
+    // v33：标注筛选条 —— 点类型 / 颜色片切换（再点一次取消），「清除筛选」复位
+    if (el.annoFilter) el.annoFilter.addEventListener('click', (e) => {
+      const clear = e.target.closest('[data-anno-clear]');
+      if (clear) {
+        state.annoFilter.kinds.clear();
+        state.annoFilter.colors.clear();
+        render();
+        return;
+      }
+      const kindBtn = e.target.closest('[data-anno-kind]');
+      if (kindBtn) {
+        const k = kindBtn.dataset.annoKind;
+        state.annoFilter.kinds.has(k) ? state.annoFilter.kinds.delete(k) : state.annoFilter.kinds.add(k);
+        render();
+        return;
+      }
+      const colorBtn = e.target.closest('[data-anno-color]');
+      if (colorBtn) {
+        const c = colorBtn.dataset.annoColor;
+        state.annoFilter.colors.has(c) ? state.annoFilter.colors.delete(c) : state.annoFilter.colors.add(c);
+        render();
+      }
     });
     if (el.dup) el.dup.addEventListener('click', openDuplicates);
     if (el.importRefs) el.importRefs.addEventListener('click', importRefs);

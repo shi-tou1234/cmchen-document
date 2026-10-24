@@ -210,8 +210,37 @@ function schedulePageReport() {
     if (App.state.filePath && window.pdfBridge.reportPage) {
       window.pdfBridge.reportPage(App.state.filePath, App.state.currentPage);
     }
+    saveSessionNow();   // 页码变了，会话里激活标签的进度也跟着新
   }, 500);
 }
+
+// ---------- 阅读会话（v33：restoreTabs） ----------
+// 标签变动 / 翻页 / 关窗时把轻量清单（路径 + 页码，不含文档字节）交给主进程存 session.json。
+// 页码恢复以库 / 最近打开里记的为准，这里只是兜底。
+function sessionTabs() {
+  const tabs = [];
+  for (const t of App.tabs) {
+    if (!t.filePath) continue;
+    tabs.push({
+      path: t.filePath, name: t.fileName || '',
+      kind: t.kind === 'rich' ? 'rich' : 'pdf',
+      itemKey: t.itemKey || '', page: Math.max(1, Math.floor(+t.page || 1)),
+    });
+  }
+  const cur = currentTab();
+  return { tabs, active: (cur && cur.filePath) || App.state.filePath || '' };
+}
+function saveSessionNow() {
+  try {
+    if (window.pdfBridge && window.pdfBridge.saveSession) window.pdfBridge.saveSession(sessionTabs());
+  } catch (_) {}
+}
+let sessionSaveTimer = null;
+function scheduleSessionSave() {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(saveSessionNow, 600);
+}
+window.addEventListener('pagehide', saveSessionNow);
 
 // ---------- 载入 PDF ----------
 // 载入代际号：快速切标签/连续打开时，两个 loadPdf 可能交错。
@@ -476,6 +505,7 @@ function renderTabs() {
     '<span class="tab-title">' + escHtml(t.fileName || '未命名.pdf') + '</span>' +
     '<button class="tab-x" data-tab-close="' + t.id + '" title="关闭标签页">✕</button>' +
     '</div>').join('');
+  scheduleSessionSave();   // v33：标签增删 / 切换后同步会话清单
 }
 
 function loadTab(tab) {
@@ -2301,6 +2331,25 @@ function bind() {
     if (res.smoke) loadPdf(res.data, res.fileName, true, res);
     else openDocument(res, { newTab: true });
   });
+  // v33：启动恢复上次会话。主进程只在「无命令行文件 + 设置开启 + 有会话」时推送；
+  // 这里逐个按路径取回文档字节打开，文件已移走的跳过并计数。
+  if (window.pdfBridge.onSessionRestore) {
+    window.pdfBridge.onSessionRestore(async (info) => {
+      const tabs = (info && info.tabs) || [];
+      let opened = 0, activeId = null;
+      for (const t of tabs.slice(0, 8)) {
+        try {
+          const payload = await window.pdfBridge.openDocPath({ path: t.path, page: t.page });
+          if (!payload || !payload.ok) continue;
+          await openDocument(payload, { newTab: true });
+          opened++;
+          if (info.active && t.path === info.active) activeId = App.activeTabId;
+        } catch (_) {}
+      }
+      if (activeId && activeId !== App.activeTabId) await switchTab(activeId);
+      if (opened > 1) toast('已恢复上次打开的 ' + opened + ' 个标签页');
+    });
+  }
   // v9：库里按条目元数据重命名了附件文件，把打开的标签 / 当前会话的路径跟着换掉
   if (window.pdfBridge.onFilesRenamed) {
     window.pdfBridge.onFilesRenamed((info) => {

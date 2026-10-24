@@ -71,6 +71,11 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   // 应用设置（v11）
   getSettings: () => ipcRenderer.invoke('settings-get'),
   setSettings: (patch) => ipcRenderer.invoke('settings-set', patch),
+  // v33：阅读会话（restoreTabs）——标签清单存取 + 按路径取回文档 + 启动恢复事件
+  saveSession: (info) => ipcRenderer.send('session-save', info),
+  getSession: () => ipcRenderer.invoke('session-get'),
+  openDocPath: (info) => ipcRenderer.invoke('open-doc-path', info),
+  onSessionRestore: (cb) => { ipcRenderer.on('session-restore', (_e, info) => cb(info)); },
   // 菜单/主进程改动库后通知库界面刷新
   onLibChanged: (cb) => { ipcRenderer.on('lib-changed', () => cb()); },
   onOpenSettings: (cb) => { ipcRenderer.on('open-settings', () => cb()); },
@@ -117,7 +122,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     revealItem: (key) => ipcRenderer.invoke('lib-reveal-item', { key }),
     relinkItem: (key) => ipcRenderer.invoke('lib-relink-item', { key }),
     // v11：库级全文检索 / 备份 / 数据目录
-    searchFull: (query) => ipcRenderer.invoke('lib-search-full', { query }),
+    // v33：opts.offset / opts.limit 翻页；返回带 total 与各类命中数 counts
+    searchFull: (query, opts) => ipcRenderer.invoke('lib-search-full', Object.assign({ query }, opts || {})),
     ftStatus: () => ipcRenderer.invoke('lib-ft-status'),
     indexAll: (force) => ipcRenderer.invoke('lib-ft-index', { force: !!force }),
     ftClear: () => ipcRenderer.invoke('lib-ft-clear'),

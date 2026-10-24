@@ -76,6 +76,7 @@ if (!TEST_MODE) {
 
 // ---------- 设置 / 存储位置（v11） ----------
 const USER_DATA = app.getPath('userData');
+const sessionFile = () => path.join(USER_DATA, 'session.json');
 settings.init(USER_DATA);
 let appSettings = settings.get();
 
@@ -196,6 +197,65 @@ function citationInfo(it) {
   }
 }
 
+// ---------- 阅读会话（v33：restoreTabs 启用） ----------
+// 标签页列表 + 激活项存 <userData>/session.json。渲染层在每次标签变动和关窗前上报，
+// 主进程启动时（无命令行文件、设置开启、有会话）把轻量清单推给渲染层，
+// 渲染层再逐个按路径取回文档字节打开——恢复不写入「最近打开」，避免搅乱该列表。
+const MAX_SESSION_TABS = 20;
+function saveSessionInfo(info) {
+  try {
+    const raw = (info && Array.isArray(info.tabs)) ? info.tabs : [];
+    const seen = new Set();
+    const tabs = [];
+    for (const t of raw) {
+      if (!t || typeof t.path !== 'string' || !t.path) continue;
+      if (seen.has(t.path)) continue;
+      seen.add(t.path);
+      tabs.push({
+        path: t.path,
+        name: String(t.name || path.basename(t.path)).slice(0, 200),
+        kind: t.kind === 'rich' ? 'rich' : 'pdf',
+        itemKey: String(t.itemKey || '').slice(0, 64),
+        page: Math.max(1, Math.min(999999, Math.floor(+t.page) || 1)),
+      });
+      if (tabs.length >= MAX_SESSION_TABS) break;
+    }
+    atomicWrite(sessionFile(), JSON.stringify({ saved: Date.now(), active: String((info && info.active) || ''), tabs }));
+    return true;
+  } catch (_) { return false; }
+}
+function readSessionInfo() {
+  try {
+    const obj = JSON.parse(fs.readFileSync(sessionFile(), 'utf8'));
+    const tabs = Array.isArray(obj.tabs) ? obj.tabs : [];
+    return {
+      saved: Number(obj.saved) || 0,
+      active: String(obj.active || ''),
+      tabs: tabs.filter((t) => t && typeof t.path === 'string' && t.path).map((t) => ({
+        path: t.path, name: String(t.name || ''),
+        kind: t.kind === 'rich' ? 'rich' : 'pdf',
+        itemKey: String(t.itemKey || ''),
+        page: Math.max(1, Math.floor(+t.page) || 1),
+      })).slice(0, MAX_SESSION_TABS),
+    };
+  } catch (_) { return { saved: 0, active: '', tabs: [] }; }
+}
+ipcMain.on('session-save', (_e, info) => { saveSessionInfo(info); });
+ipcMain.handle('session-get', () => Object.assign({ ok: true }, readSessionInfo()));
+// 按路径读文档给恢复用：与库内打开同一条链（含引用信息），但不记「最近打开」
+ipcMain.handle('open-doc-path', async (_e, info) => {
+  const p = info && info.path;
+  if (!p || typeof p !== 'string') return { ok: false, error: '路径为空' };
+  const page = Math.max(1, Math.floor(+(info && info.page)) || 1);
+  const payload = await readDocPayload(p, { startPage: page });
+  if (!payload.ok) return payload;
+  const libItem = library.findItemByPath(p);
+  if (libItem) Object.assign(payload, citationInfo(libItem), { itemKey: libItem.key });
+  // 页码以库 / 最近打开里记的为准（随翻页实时更新），会话快照只在没记录时兜底
+  payload.startPage = payload.startPage || page;
+  return payload;
+});
+
 // 窗口可能还没加载完（冷启动带文件参数时一定会），所以未就绪时排队，等 did-finish-load 再投
 let pendingOpen = null;
 async function openFromPath(filePath) {
@@ -263,7 +323,15 @@ function createWindow(opts = {}) {
   // 冷启动带文件参数时，命令行比页面就绪更早，这里统一补投
   win.webContents.on('did-finish-load', () => {
     win.__loaded = true;
-    if (pendingOpen) { win.webContents.send('pdf-opened', pendingOpen); pendingOpen = null; }
+    if (pendingOpen) { win.webContents.send('pdf-opened', pendingOpen); pendingOpen = null; return; }
+    // v33：会话恢复。只在「没有命令行 / 菜单打开的文件」时进行，避免双开；
+    // 冒烟与探针模式不恢复，保持测试路径单一。
+    if (process.env.SMOKE_PDF) return;
+    try {
+      if (!settings.get().restoreTabs) return;
+      const sess = readSessionInfo();
+      if (sess.tabs.length) win.webContents.send('session-restore', sess);
+    } catch (_) {}
   });
 
   // 冒烟模式：隐藏窗口里自动加载样本 PDF，渲染完成后回报结果并退出。
@@ -1053,7 +1121,13 @@ function noteResults(q, ast) {
   return out;
 }
 
-function fulltextResults(queryRaw) {
+// v33：搜索支持分页与结果类型计数。
+// 默认仍返回前 120 条（老行为），加 offset/limit 可以翻页；counts/total 覆盖全部命中，
+// 不受本页条数限制——UI 用它显示「全部 / 文献 / 正文 / 批注 / 笔记」各自的命中数。
+function fulltextResults(queryRaw, opts) {
+  const o = opts || {};
+  const limit = Math.min(500, Math.max(1, Math.floor(+o.limit) || 120));
+  const offset = Math.max(0, Math.floor(+o.offset) || 0);
   const ast = query.parseQuery(queryRaw);
   const hit = fulltext.search(queryRaw);
   const items = library.load().items;
@@ -1062,6 +1136,12 @@ function fulltextResults(queryRaw) {
   for (const it of items) if (!it.deletedAt && it.attachment && !byPath.has(it.attachment.path)) byPath.set(it.attachment.path, it);
   const out = [];
   const seen = new Set();
+  const pageOf = (list) => {
+    const total = list.length;
+    const counts = {};
+    for (const r of list) counts[r.type] = (counts[r.type] || 0) + 1;
+    return { ok: true, query: ast.raw, results: list.slice(offset, offset + limit), stats: hit.stats, total, counts, offset, limit };
+  };
   // 带字段限定（title:/author:/tag:…）时，正文命中还要过一遍条目字段；
   // 只有字段限定、没有正文词时，直接按条目级字段过滤出结果。
   const hasFields = ((ast.fieldTokens && ast.fieldTokens.length) || Object.keys(ast.fields || {}).length) > 0;
@@ -1078,9 +1158,8 @@ function fulltextResults(queryRaw) {
         type: 'item', label: '条目',
         snippet: makeSnippet(query.itemHaystack(it), ast), path: (it.attachment && it.attachment.path) || '',
       });
-      if (out.length >= 120) break;
     }
-    return { ok: true, query: ast.raw, results: out, stats: hit.stats };
+    return pageOf(out);
   }
   for (const r of hit.results) {
     const it = byPath.get(r.path);
@@ -1118,12 +1197,32 @@ function fulltextResults(queryRaw) {
   const priority = { note: 0, annotation: 1, fulltext: 2 };
   const compare = (a, b) => (b.score || 0) - (a.score || 0) || priority[a.type] - priority[b.type] || a.key.localeCompare(b.key) || a.page - b.page;
   out.sort(compare);
-  // Keep the best hit from each matching source when the global limit is reached.
-  const reserved = [...new Set(out.map(r => r.type))].map(type => out.find(r => r.type === type));
-  const results = reserved.concat(out.filter(r => !reserved.includes(r)).slice(0, 120 - reserved.length)).sort(compare);
-  return { ok: true, query: ast.raw, results, stats: hit.stats };
+  // 饱和场景：正文先占满第一页时，批注 / 笔记会被挤掉（F05）。
+  // 老做法是把各类最佳命中保留进前 120 条、丢掉被挤出的结果——只有一页时没问题，
+  // 分页后丢掉的就再也看不到了。改成「交换」：把每个类型的最佳命中换进第一页末尾，
+  // 被换出的结果放回原位置。整份 out 仍是同一批结果的排列，翻页不丢不重；
+  // 第一页末尾的提升项按 compare 排序，保持页内得分单调。
+  // 注意：这个置换必须与 offset 无关——每次调用都构建同一份置换序列，
+  // 任何一页都是这份序列的切片；否则第二页会从原始排序取数，和第一页重叠。
+  if (out.length > limit) {
+    const promoted = [];
+    for (const type of [...new Set(out.map(r => r.type))]) {
+      const idx = out.findIndex(r => r.type === type);
+      if (idx >= limit) promoted.push({ idx, item: out[idx] });
+    }
+    if (promoted.length && promoted.length < limit) {
+      promoted.sort((a, b) => compare(a.item, b.item));
+      const displaced = [];
+      for (let s = 0; s < promoted.length; s++) displaced.push(out[limit - promoted.length + s]);
+      for (let s = 0; s < promoted.length; s++) out[limit - promoted.length + s] = promoted[s].item;
+      displaced.sort(compare);
+      promoted.sort((a, b) => a.idx - b.idx);
+      for (let s = 0; s < promoted.length; s++) out[promoted[s].idx] = displaced[s];
+    }
+  }
+  return pageOf(out);
 }
-ipcMain.handle('lib-search-full', (_e, info) => fulltextResults(info && info.query));
+ipcMain.handle('lib-search-full', (_e, info) => fulltextResults(info && info.query, info));
 ipcMain.handle('lib-ft-status', () => {
   const s = fulltext.stats();
   const items = library.summary().items.filter((x) => !x.deletedAt && x.attachment);

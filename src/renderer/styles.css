@@ -874,6 +874,43 @@ body.tool-eraser .textlayer { pointer-events: none; }
 .lib-ft-doc { flex: 0 0 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-serif); }
 .lib-ft-pg { flex: 0 0 auto; color: var(--accent); font-size: 10.5px; font-family: var(--font-mono); }
 .lib-ft-snip { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+/* v33：结果类型切换片 + 分页「展开更多」 */
+.lib-ft-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 2px 0 6px; }
+.lib-ft-chip {
+  border: 1px solid var(--rule); background: var(--surface-2); color: var(--ink-2);
+  border-radius: 10px; padding: 2px 10px; font: inherit; font-size: 11px; cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.lib-ft-chip:hover { background: var(--surface-1); color: var(--ink); }
+.lib-ft-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.lib-ft-more {
+  display: block; width: 100%; margin-top: 4px; border: 1px dashed var(--rule); background: transparent;
+  color: var(--ink-2); border-radius: var(--r); padding: 5px 6px; font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.lib-ft-more:hover { color: var(--accent); border-color: var(--accent); }
+
+/* v33：标注视图筛选条（类型 / 颜色） */
+.lib-anno-filter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 18px; border-bottom: 1px solid var(--rule); background: var(--surface-3); }
+.lib-anno-filter[hidden] { display: none; }
+.af-lbl { font-size: 11px; color: var(--ink-2); margin: 0 2px 0 6px; }
+.af-chip {
+  display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--rule);
+  background: var(--surface-2); color: var(--ink-2); border-radius: 10px;
+  padding: 2px 10px; font: inherit; font-size: 11px; cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.af-chip:hover { background: var(--surface-1); color: var(--ink); }
+.af-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.af-n { font-size: 10px; opacity: .75; font-family: var(--font-mono); }
+.af-dot {
+  display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--rule);
+  background: var(--surface-2); border-radius: 10px; padding: 2px 8px; cursor: pointer;
+}
+.af-dot.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.af-dotc { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0,0,0,.18); vertical-align: -1px; }
+.af-clear { border: none; background: transparent; color: var(--ink-2); font: inherit; font-size: 11px; cursor: pointer; text-decoration: underline; padding: 2px 6px; }
+.af-clear:hover { color: var(--danger); }
+.lctype .af-dotc { margin-right: 4px; }
 
 .ld-fetch-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: -2px; }
 .ld-fetch-row .ld-hint { font-size: 11px; }
@@ -1622,6 +1659,7 @@ body.theme-dark .md-body .rainbow-text { filter: brightness(1.2); }
 }
 .lib-ft-type.note { background: #e8f0e6; color: #3f6b3a; }
 .lib-ft-type.annotation { background: #f6ead9; color: #8a5a1d; }
+.lib-ft-type.item { background: #e3e9f2; color: #3d5a80; }
 
 /* 文献库右键菜单 */
 .lib-ctx button:disabled { opacity: .4; cursor: default; }

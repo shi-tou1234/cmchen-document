@@ -243,6 +243,8 @@
         </span>
         <button id="lib-bulk-clear" class="tbtn">取消选择</button>
       </div>
+      <!-- v33：标注视图的筛选条（按类型 / 颜色），只在该视图显示 -->
+      <div id="lib-anno-filter" class="lib-anno-filter" hidden></div>
       <div class="lib-columns" role="row">
         <button type="button" class="lib-sort-h" data-sort="title" title="按标题排序">标题<span class="sort-ind"></span></button>
         <button type="button" class="lib-sort-h" data-sort="creator" title="按第一作者排序">作者 · 年份 · 来源<span class="sort-ind"></span></button>
@@ -502,6 +504,7 @@
           </label>
         </div>
         <label class="set-check"><input id="set-auto-index" type="checkbox" /> 启动时自动建立全文索引</label>
+        <label class="set-check"><input id="set-restore-tabs" type="checkbox" /> 下次启动恢复上次打开的标签页</label>
         <label class="set-check"><input id="set-invert-pages" type="checkbox" /> 深色模式下把页面反色（夜读护眼）</label>
         <label class="ld-row"><span class="ld-lbl">抓取联系邮箱</span>
           <input id="set-fetch-email" type="text" placeholder="可选；填了才能用 Unpaywall 找开放获取全文" />
