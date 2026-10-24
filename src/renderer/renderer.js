@@ -2387,22 +2387,29 @@ function bind() {
       const tabs = (info && info.tabs) || [];
       // R06：恢复全部记录（上限与保存一致，主进程已按 20 条裁剪），不再截断前 8 个；
       // 恢复期间挂起会话写入，结束后按实际打开的清单落一次盘并提示跳过数。
+      // N05：后台标签只建标签对象、不启动加载——openDocument 会在 PDF 尚在异步加载时
+      // 就返回，下一个标签的 syncActiveTab 会把还没就位的页码覆盖掉。标签对象自带
+      // 文档字节，切到哪个标签 loadTab 就加载哪个，页码各归各的。
       let opened = 0, activeId = null;
       sessionRestoring = true;
       try {
         for (const t of tabs) {
           try {
             const payload = await window.pdfBridge.openDocPath({ path: t.path, page: t.page });
-            if (!payload || !payload.ok) continue;
-            await openDocument(payload, { newTab: true });
+            if (!payload || !payload.ok || !payload.filePath) continue;
+            const tab = makeTab(payload);
+            App.tabs.push(tab);
             opened++;
-            if (info.active && t.path === info.active) activeId = App.activeTabId;
+            if (info.active && t.path === info.active) activeId = tab.id;
           } catch (_) {}
         }
       } finally {
         sessionRestoring = false;
       }
-      if (activeId && activeId !== App.activeTabId) await switchTab(activeId);
+      renderTabs();
+      // 只加载激活项（没有记录就落在最后一个），其余标签等用户切换时再加载
+      const target = (activeId && tabById(activeId)) || App.tabs[App.tabs.length - 1];
+      if (target) loadTab(target);
       saveSessionNow();
       const skipped = tabs.length - opened;
       if (opened && skipped) toast('已恢复上次打开的 ' + opened + ' 个标签页；' + skipped + ' 个文件未能打开，已跳过', 5000);

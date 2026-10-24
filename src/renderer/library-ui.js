@@ -1320,9 +1320,11 @@ window.LibraryUI = (function () {
     if (!r) { nvStatus('导出失败'); return; }
     if (r.canceled) { nvStatus('已取消导出'); return; }
     if (!r.ok) { nvStatus('导出失败：' + (r.error || '未知错误')); return; }
-    const imgs = (r.images || 0) + (r.skipped ? ' 张缺失' : '');
-    nvStatus(r.images ? ('已导出到 ' + r.path + '（图片 ' + imgs + '）') : ('已导出到 ' + r.path));
-    window.App && window.App.toast && window.App.toast(r.images ? '笔记已导出（含 ' + r.images + ' 张图片）' : '笔记已导出');
+    const bits = [];
+    if (r.images) bits.push('图片 ' + r.images + ' 张');
+    if (r.skipped) bits.push(r.skipped + ' 张缺失');
+    nvStatus('已导出到 ' + r.path + (bits.length ? '（' + bits.join('，') + '）' : ''));
+    window.App && window.App.toast && window.App.toast('笔记已导出' + (bits.length ? '（' + bits.join('，') + '）' : ''), r.skipped ? 5000 : 0);
   }
 
 
@@ -1404,25 +1406,29 @@ window.LibraryUI = (function () {
 
   // 富文本正文保存：html 落库，同时提纯文本给搜索/摘要；不重建列表（免得丢焦点）
   const noteSaveTimers = new Map();
+  // N01：返回明确的保存结果——true = 已保存 / 无需保存，false = 保存失败。
+  // 之前异常被吞掉，调用方（导出）无法知道「导出的内容和库里的是否一致」。
   async function saveNoteRich(noteEl, immediate) {
     const key = state.selectedKey;
     const id = noteEl && noteEl.dataset.noteId;
     const box = noteEl && noteEl.querySelector('.ld-note-rich');
-    if (!key || !id || !box || !window.RichText) return;
+    if (!key || !id || !box || !window.RichText) return true;
     const clear = () => { const t = noteSaveTimers.get(id); if (t) { clearTimeout(t); noteSaveTimers.delete(id); } };
     if (!immediate) {
       const prev = noteSaveTimers.get(id);
       if (prev) clearTimeout(prev);
       noteSaveTimers.set(id, setTimeout(() => { noteSaveTimers.delete(id); saveNoteRich(noteEl, true); }, 700));
-      return;
+      return true;
     }
     clear();
     const html = window.RichText.sanitize(box.innerHTML);
     const text = window.RichText.toText(html);
     try {
-      await L().updateNote(key, id, { html, text });
+      const r = await L().updateNote(key, id, { html, text });
+      if (r && r.ok === false) return false;
       await reloadItemsQuiet();
-    } catch (_) {}
+      return true;
+    } catch (_) { return false; }
   }
 
   // 刷新条目数据但不重绘详情表单（免得把用户没保存的其它字段冲掉）
@@ -2903,19 +2909,28 @@ window.LibraryUI = (function () {
       el.ld.notes.addEventListener('change', async (e) => {
         const box = e.target.closest('[data-note-id]');
         if (!box) return;
-        // R04：子笔记导出——导出前先落盘，导出的内容必须和库里的一致
+        // R04：子笔记导出——先保存并确认成功再导出（N01：保存失败就终止，
+        // 不能拿着旧内容导出还提示成功）；结果提示带上缺失数量（N03）。
         if (e.target.classList.contains('ld-note-export')) {
           const fmt = e.target.value;
           e.target.value = '';
           if (!fmt || !window.pdfBridge || !window.pdfBridge.exportNoteBundle) return;
           const key = state.selectedKey;
           if (!key) return;
-          // 这条笔记可能有未落盘的编辑，先保存
           const rich = box.querySelector('.ld-note-rich');
-          if (rich) saveNoteRich(box, true);
+          if (rich && (await saveNoteRich(box, true)) === false) {
+            window.App && window.App.toast && window.App.toast('笔记保存失败，已取消导出；内容仍保留在编辑器里，可重试', 5000);
+            return;
+          }
           const r = await window.pdfBridge.exportNoteBundle({ key, noteId: box.dataset.noteId, fmt, title: '' });
-          if (r && r.ok) window.App && window.App.toast && window.App.toast(r.images ? '笔记已导出（含 ' + r.images + ' 张图片）' : '笔记已导出');
-          else if (r && !r.canceled && window.App && window.App.toast) window.App.toast('导出失败：' + ((r && r.error) || '未知错误'));
+          if (r && r.ok) {
+            const bits = [];
+            if (r.images) bits.push('含 ' + r.images + ' 张图片');
+            if (r.skipped) bits.push(r.skipped + ' 张图片缺失');
+            window.App && window.App.toast && window.App.toast('笔记已导出' + (bits.length ? '（' + bits.join('，') + '）' : ''), r.skipped ? 5000 : 0);
+          } else if (r && !r.canceled && window.App && window.App.toast) {
+            window.App.toast('导出失败：' + ((r && r.error) || '未知错误'));
+          }
           return;
         }
         // 段落样式下拉（正文 / 标题 / 小标题 / 引用）

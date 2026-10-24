@@ -40,7 +40,9 @@
   }
 
   function imageTag(alt, rawUrl) {
-    const u = String(rawUrl || '').trim();
+    // N04：rawUrl 来自 inline() 转义过的整行——直接再 esc 会双重编码（& → &amp;amp;），
+    // 应用内点击与导出链接的查询参数都会坏。先还原成原始 URL，只转义一次。
+    const u = decode(String(rawUrl || '').trim());
     if (/^https?:\/\//i.test(u)) {
       return '<img class="md-img" src="' + esc(u) + '" alt="' + esc(alt) + '" loading="lazy" />';
     }
@@ -50,7 +52,7 @@
   }
 
   function linkTag(text, rawUrl) {
-    const href = safeHref(rawUrl);
+    const href = safeHref(decode(rawUrl));   // N04：同 imageTag，只转义一次
     if (!href) return '<span class="md-plain-link">' + text + '</span>';
     return '<a class="md-link" data-md-link="' + esc(href) + '" href="javascript:void(0)">' + text + '</a>';
   }

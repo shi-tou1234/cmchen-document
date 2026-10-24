@@ -2024,11 +2024,15 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
   const notes = it.notes || [];
   const note = notes.find((n) => n.id === info.noteId) || notes[0];
   if (!note) return { ok: false, error: '这条条目还没有笔记内容' };
-  let text = String(note.text || '');
-  if (!text.trim() && note.html) {
+  // N02：富文本笔记同时存 html（正文，带标题/加粗/链接）和 text（检索用纯文本）——
+  // 导出必须以 html 为源（经 fromHtml 转回 Markdown），用 text 会把结构丢成摘要；
+  // Markdown 笔记（html 为空）直接用 text。
+  let text = '';
+  if (String(note.html || '').trim()) {
     try { text = Md.fromHtml(note.html); } catch (_) { text = ''; }
   }
-  // R04：纯截图笔记（正文空、只有批注截图）也允许导出，截图会作为正文插图带出去
+  if (!text.trim()) text = String(note.text || '');
+  // R04/N03：纯截图笔记（正文空、只有批注截图）也允许导出，截图会作为正文插图带出去
   const hasImageField = !!(note.image && /^snapshots\/[^\\/]+$/i.test(String(note.image)));
   if (!text.trim() && !hasImageField) return { ok: false, error: '笔记是空的' };
 
@@ -2091,10 +2095,11 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
     }
     // 引用改写（Markdown 语法里的链接目标）
     let outText = text.replace(imgRe, (whole, rel) => rewrite.has(rel) ? whole.replace(rel, rewrite.get(rel)) : whole);
-    // R04：批注截图存在 note.image 字段、正文里未必有引用——导出时统一带进正文
-    //（正文已引用同一张图时不重复插图）。
-    if (hasImageField && rewrite.has(note.image) && !text.includes('](' + note.image + ')')) {
-      outText = '![' + Md.esc('批注截图') + '](' + rewrite.get(note.image) + ')\n\n' + outText;
+    // R04/N03：批注截图存在 note.image 字段、正文里未必有引用——导出时统一带进正文
+    //（正文已引用同一张图时不重复插图）。文件已缺失时保留 snapshots/ 原引用：
+    // HTML 侧的缺失占位逻辑会把它变成可见的「[图片缺失：…]」，不静默消失。
+    if (hasImageField && !text.includes('](' + note.image + ')')) {
+      outText = '![' + Md.esc('批注截图') + '](' + (rewrite.get(note.image) || note.image) + ')\n\n' + outText;
     }
     if (fmt === 'md') {
       atomicWrite(filePath, outText);

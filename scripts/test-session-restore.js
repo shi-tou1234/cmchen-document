@@ -155,6 +155,71 @@ try {
   assert.equal(sess4.tabs.length, 9, '恢复后会话按实际打开落盘（9 条，失联条目移除）：' + sess4.tabs.length);
   const activeNorm = String(sess4.active || '').replace(/\\/g, '/');
   assert.ok(activeNorm.endsWith('doc-10.pdf'), '激活项保留：' + activeNorm);
+
+  // ---- N05（2026-10-24 二次核查）：逐标签页码保真。6 个标签页码 2,1,3,1,2,3，
+  // 激活第一个——恢复后内存页码与落盘页码逐一核对，并实际切到后台标签确认按需
+  // 加载的页码正确。旧实现（后台也启动加载）会把未就位标签的页码覆盖成 1。----
+  const ud5 = path.join(dir, 'ud-pages');
+  fs.mkdirSync(ud5, { recursive: true });
+  const sixPaths = [];
+  for (let i = 1; i <= 6; i++) {
+    const p = path.join(dir, 'pg-' + i + '.pdf');
+    fs.copyFileSync(path.join(__dirname, '../assets/sample.pdf'), p);
+    sixPaths.push(p);
+  }
+  const pagePlan = [2, 1, 3, 1, 2, 3];
+  fs.writeFileSync(path.join(ud5, 'settings.json'), JSON.stringify({ restoreTabs: true }));
+  fs.writeFileSync(path.join(ud5, 'session.json'), JSON.stringify({
+    saved: Date.now(), active: sixPaths[0].replace(/\\/g, '/'),
+    tabs: sixPaths.map((p, i) => ({ path: p.replace(/\\/g, '/'), name: path.basename(p), kind: 'pdf', itemKey: '', page: pagePlan[i] })),
+  }));
+  const probe5 = `(async()=>{
+    const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+    const checks=[];const push=(n,v,d)=>checks.push([n,!!v,d===undefined?'':String(d)]);
+    const waitFor=async(fn,ms)=>{const t0=Date.now();while(Date.now()-t0<(ms||15000)){if(fn())return true;await sleep(80);}return !!fn();};
+    const norm=(p)=>String(p||'').replace(/\\\\/g,'/');
+    const plan=[${pagePlan.join(',')}];
+    const tabsReady=await waitFor(()=>window.App&&App.tabs.length===6,15000);
+    push('6 个标签全部恢复',tabsReady,String(window.App&&App.tabs.length));
+    if(!tabsReady)return {checks};
+    // 恢复刚结束就逐个核对内存页码（旧实现此时后台标签已被覆盖成 1）
+    const memOk=App.tabs.every((t,i)=>t.page===plan[i]);
+    push('内存页码逐一正确',memOk,JSON.stringify(App.tabs.map(t=>t.page)));
+    const cur=App.tabs.find(t=>t.id===App.activeTabId);
+    push('激活项是第一个标签',cur&&/pg-1/.test(norm(cur.filePath)),cur&&norm(cur.filePath));
+    // 单页模式保证断言确定性；等激活项加载到第 2 页
+    App.setViewMode('page');
+    const firstOk=await waitFor(()=>App.state.currentPage===2,6000);
+    push('激活标签加载到第 2 页',firstOk,String(App.state.currentPage));
+    // 实际切到后台标签：按需加载后页码正确
+    const t3=App.tabs.find(t=>/pg-3/.test(norm(t.filePath)));
+    await App.switchTab(t3.id);
+    const thirdOk=await waitFor(()=>App.state.currentPage===3,6000);
+    push('切到后台标签页码正确（3）',thirdOk,String(App.state.currentPage));
+    const t5=App.tabs.find(t=>/pg-5/.test(norm(t.filePath)));
+    await App.switchTab(t5.id);
+    const fifthOk=await waitFor(()=>App.state.currentPage===2,6000);
+    push('切到另一个后台标签页码正确（2）',fifthOk,String(App.state.currentPage));
+    // 切回第一个标签，页码仍应是 2（没有被恢复过程覆盖成 1）
+    const t1=App.tabs.find(t=>/pg-1/.test(norm(t.filePath)));
+    await App.switchTab(t1.id);
+    const backOk=await waitFor(()=>App.state.currentPage===2,6000);
+    push('切回第一个标签页码仍正确（2）',backOk,String(App.state.currentPage));
+    const memAfter=App.tabs.every((t,i)=>t.page===plan[i]);
+    push('往返切换后内存页码仍逐一正确',memAfter,JSON.stringify(App.tabs.map(t=>t.page)));
+    const sess=await pdfBridge.getSession();
+    const snapOk=sess&&sess.tabs&&sess.tabs.length===6&&sess.tabs.every((t,i)=>t.page===plan[i]);
+    push('落盘快照页码逐一正确',snapOk,JSON.stringify(sess&&sess.tabs&&sess.tabs.map(t=>t.page)));
+    return {checks};})()`;
+  fs.writeFileSync(path.join(dir, 'probe5.cjs'), 'module.exports=' + JSON.stringify(probe5));
+  const r5 = runProbe({ probe: path.join(dir, 'probe5.cjs'),
+    env: { PDFREADER_LIBRARY: path.join(dir, 'library.json'), PDFREADER_DATA_DIR: dir, PDFREADER_NO_AUTO_INDEX: '1' },
+    args: ['--user-data-dir=' + ud5], label: 'session-restore-pages' });
+  assert.equal(r5.fail, 0);
+  // Node 侧：会话文件页码逐一核对
+  const sess5 = JSON.parse(fs.readFileSync(path.join(ud5, 'session.json'), 'utf8'));
+  assert.equal(sess5.tabs.length, 6, '会话保留 6 条');
+  assert.deepEqual(sess5.tabs.map((t) => t.page), pagePlan, '会话页码逐一正确：' + JSON.stringify(sess5.tabs.map((t) => t.page)));
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }
