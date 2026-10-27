@@ -15,7 +15,8 @@
  *
  * 刻意不做的：
  *   - 已经扁平化进页面内容的“批注”无法恢复，getAnnotations() 读不到；
- *   - 回复关系只保留为评论文本（「↳ 作者：内容」），不建树；
+ *   - 回复关系（/IRT）按 id 记成 shape.replyTo，列表里显示「↳ 回复」标记；
+ *     不重排成嵌套树（扁平化批注依旧无法恢复）；
  *   - Popup / Stamp / Polygon / Circle 等第一版跳过，计入 skipped 而不是静默丢弃。
  *
  * 坐标：PDF 用户空间（左下原点）→ 页面单位坐标（左上原点），统一走
@@ -204,6 +205,9 @@ const NativeAnnos = window.NativeAnnos = (() => {
         // 作者与原生时间戳只用于展示，不参与布局
         if (author) sh.author = author;
         if (a.modificationDate) sh.nativeDate = String(a.modificationDate);
+        // 回复关系（/IRT）：PDF.js 把它解析成父批注的 id（与 nativeId 同一套 ref 格式），
+        // 存下这层关系，批注列表 / 标注库就能显示「回复」层级。
+        if (a.inReplyTo) sh.replyTo = String(a.inReplyTo);
         shapes.push(sh);
         if (shapes.length >= MAX_SHAPES) break;
       }

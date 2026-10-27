@@ -1,6 +1,6 @@
 {
   "name": "trove",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "本地优先的文档阅读器与文献库（PDF / Word / PPT / Excel / Markdown / EPUB）",
   "main": "src/main.js",
   "author": "me",
@@ -14,6 +14,7 @@
     "@iarna/rtf-to-html": "^1.1.0",
     "iconv-lite": "^0.6.3",
     "jszip": "^3.10.2",
+    "katex": "^0.19.1",
     "mammoth": "^1.13.0",
     "marked": "^4.3.0",
     "pdf-lib": "^1.17.1",
@@ -43,6 +44,9 @@
       "node_modules/pdfjs-dist/build/pdf.worker.js",
       "node_modules/pdfjs-dist/cmaps/**/*",
       "node_modules/pdfjs-dist/standard_fonts/**/*",
+      "node_modules/katex/package.json",
+      "node_modules/katex/dist/katex.min.js",
+      "node_modules/katex/dist/fonts/**/*",
       "!**/*.map"
     ],
     "win": {

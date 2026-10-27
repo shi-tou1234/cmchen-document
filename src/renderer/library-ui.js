@@ -163,19 +163,26 @@ window.LibraryUI = (function () {
       // v33：类型 / 颜色筛选（多选，命中任一即可；kind 是主进程给好的中文类型名）
       if (state.annoFilter.kinds.size) list = list.filter((x) => x._anno && state.annoFilter.kinds.has(x._anno.kind));
       if (state.annoFilter.colors.size) list = list.filter((x) => x._anno && state.annoFilter.colors.has(x._anno.color || ''));
-      const q = state.query.trim().toLowerCase();
+      // 不要先 toLowerCase：OR / AND 是大小写敏感运算符（小写 or 是普通英文词），
+      // 提前转小写会让 `title:a OR title:b` 变成三个词去找。词本身由 Query.fold 折叠。
+      const q = state.query.trim();
       if (q) list = list.filter((x) => matchesQuery(x, q));
       return sortItems(list);
     }
     let list = state.items.filter((x) => (isTrash() ? !!x.deletedAt : !x.deletedAt));
     if (state.scope.type === 'uncollected') list = list.filter((x) => !itemCollections(x).length);
     else if (state.scope.type === 'coll') list = list.filter((x) => itemCollections(x).includes(state.scope.id));
+    else if (state.scope.type === 'colls') {
+      // v35：多选收藏集取并集（Ctrl / Cmd + 点击），同一篇在多个集合里只出现一次
+      const ids = new Set(state.scope.ids);
+      list = list.filter((x) => itemCollections(x).some((id) => ids.has(id)));
+    }
     // v14 标签选择器：选中多个标签时命中任一即可（与 Zotero 的标签选择器一致）
     if (state.tagFilter.size) {
       list = list.filter((x) => (x.tags || []).some((t) => state.tagFilter.has(t)));
     }
     const saved = scopeSearch();
-    const q = (saved ? saved.query : state.query).trim().toLowerCase();
+    const q = (saved ? saved.query : state.query).trim();   // 保留大小写：OR / AND 是运算符
     if (q) list = list.filter((x) => matchesQuery(x, q));
     return sortItems(list);
   }
@@ -206,6 +213,12 @@ window.LibraryUI = (function () {
   }
 
   function collName(id) { const c = state.collections.find((x) => x.id === id); return c ? c.name : ''; }
+  function collsTitle(ids) {
+    const names = (ids || []).map(collName).filter(Boolean);
+    if (!names.length) return '收藏集并集';
+    const head = names.slice(0, 3).join('、');
+    return '收藏集并集：' + (names.length > 3 ? head + ' 等 ' + names.length + ' 个' : head);
+  }
   function collDepth(id) {
     const byId = new Map(state.collections.map((c) => [c.id, c]));
     let d = 0, c = byId.get(id), guard = 0;
@@ -307,6 +320,9 @@ window.LibraryUI = (function () {
     const active = state.items.filter((x) => !x.deletedAt).length;
     const trash = state.items.filter((x) => !!x.deletedAt).length;
     const uncoll = state.items.filter((x) => !x.deletedAt && !itemCollections(x).length).length;
+    // v35：多选收藏集时所有被选中的行都保持高亮
+    const selIds = state.scope.type === 'colls' ? new Set(state.scope.ids)
+      : (state.scope.type === 'coll' ? new Set([state.scope.id]) : new Set());
     let html = '';
     html += collRow('all', '全部条目', active, state.scope.type === 'all');
     html += collRow('uncollected', '未分类', uncoll, state.scope.type === 'uncollected');
@@ -314,8 +330,10 @@ window.LibraryUI = (function () {
       const cnt = state.items.filter((x) => !x.deletedAt && itemCollections(x).includes(c.id)).length;
       const pad = 8 + Math.min(6, collDepth(c.id)) * 14;
       const color = c.color || '';
-      html += '<button class="lib-coll' + (state.scope.type === 'coll' && state.scope.id === c.id ? ' active' : '') + '"' +
-        ' data-scope="coll" data-id="' + esc(c.id) + '" data-drop-coll="' + esc(c.id) + '" style="padding-left:' + pad + 'px">' +
+      const on = selIds.has(c.id);
+      html += '<button class="lib-coll' + (on ? ' active' : '') + '"' +
+        ' data-scope="coll" data-id="' + esc(c.id) + '" data-drop-coll="' + esc(c.id) + '"' +
+        ' title="Ctrl / Cmd + 点击：多选收藏集（取并集）" style="padding-left:' + pad + 'px">' +
         '<span class="ccolor" data-coll-color="' + esc(c.id) + '" title="设置收藏集颜色"' +
           (color ? ' style="background:' + esc(color) + '"' : '') + '></span>' +
         '<span class="cname" data-coll-rename="' + esc(c.id) + '" title="双击重命名">' + esc(c.name) + '</span>' +
@@ -341,7 +359,7 @@ window.LibraryUI = (function () {
       html += '<div class="lib-side-empty">搜索后点下方按钮保存条件</div>';
     } else {
       for (const s of state.searches) {
-        const q = String(s.query || '').toLowerCase();
+        const q = String(s.query || '');
         const cnt = state.items.filter((x) => !x.deletedAt && matchesQuery(x, q)).length;
         html += '<button class="lib-coll lib-search-row' + (active && state.scope.id === s.id ? ' active' : '') + '"' +
           ' data-search="' + esc(s.id) + '" title="' + esc(s.query) + '">' +
@@ -438,6 +456,7 @@ window.LibraryUI = (function () {
       state.scope.type === 'trash' ? '回收站' :
       state.scope.type === 'annotations' ? '标注' :
       state.scope.type === 'search' ? ('智能收藏集：' + (saved ? saved.name : '')) :
+      state.scope.type === 'colls' ? collsTitle(state.scope.ids) :
       collName(state.scope.id);
     el.count.textContent = isAnnoScope() ? (list.length + ' 条标注') : (list.length + ' 条');
     el.empty.hidden = list.length !== 0;
@@ -534,7 +553,12 @@ window.LibraryUI = (function () {
       if (!c) return '';
       return '<span class="lccoll">' + (c.color ? '<span class="ccolor" style="background:' + esc(c.color) + '"></span>' : '') + esc(c.name) + '</span>';
     }).join('');
-    const progress = it.page > 1 ? '<span class="lcprog">第 ' + it.page + ' 页</span>' : '';
+    // 阅读进度：page = 读到的页，pageTotal = 总页数（阅读器上报）。两者都有才画进度条。
+    // 进度条绝对定位在卡片底边（styles.css），不参与六列网格，避免挤掉收藏集列；
+    // 页码文字仍放在类型格里，视觉与屏幕阅读器都读得到，条形本身只是装饰。
+    const readPct = it.page && it.pageTotal ? Math.min(100, Math.max(1, Math.round(it.page / it.pageTotal * 100))) : 0;
+    const progress = it.page > 1 ? '<span class="lcprog">第 ' + it.page + ' 页' + (readPct ? ' · ' + readPct + '%' : '') + '</span>' : '';
+    const readBar = readPct ? '<div class="lc-readbar" aria-hidden="true" title="读到第 ' + esc(it.page) + ' / ' + esc(it.pageTotal) + ' 页（约 ' + readPct + '%）"><i style="width:' + readPct + '%"></i></div>' : '';
     const openAttr = trashed ? '' : ' data-open="' + esc(it.key) + '"';
     // 2026-10-21 用户反馈：点条目名字应该进阅读，不该弹重命名（Zotero 也是这么做的：
     // 列表里单击=选中/打开，标题编辑在右侧详情面板）。重命名入口 = 详情面板的标题字段。
@@ -566,6 +590,7 @@ window.LibraryUI = (function () {
       '<div class="lctags">' + tags + tagAdd + '</div>' +
       '<div class="lcbar">' + actions + '</div>' +
       note +
+      readBar +
     '</div>';
   }
 
@@ -589,7 +614,7 @@ window.LibraryUI = (function () {
       '<label class="lc-check" title="选择标注"><input type="checkbox" data-select-key="' + esc(it.key) + '"' + (picked ? ' checked' : '') + ' /></label>' +
       '<div class="lctitle" data-anno-open="' + esc(it.key) + '" title="打开到这一页">' + esc(it.title) + '</div>' +
       '<div class="lcmeta">' + src + '</div>' +
-      '<div class="lcmeta2"><span class="lctype">' + (a.color ? '<span class="af-dotc" style="background:' + esc(a.color) + '" title="标注颜色 ' + esc(a.color) + '"></span>' : '') + '标注</span>' + (a.comment ? '<span class="lcprog">有批注</span>' : '') + owner + '</div>' +
+      '<div class="lcmeta2"><span class="lctype">' + (a.color ? '<span class="af-dotc" style="background:' + esc(a.color) + '" title="标注颜色 ' + esc(a.color) + '"></span>' : '') + '标注</span>' + (a.replyTo ? '<span class="lcprog" title="这条批注是对另一条批注的回复（PDF /IRT）">↳ 回复</span>' : '') + (a.comment ? '<span class="lcprog">有批注</span>' : '') + owner + '</div>' +
       '<div class="lccolls"></div>' +
       '<div class="lctags">' + tags + '<span class="lc-addtag" data-addtag="' + esc(it.key) + '" title="加标签">＋</span></div>' +
       '<div class="lcbar">' +
@@ -1119,7 +1144,37 @@ window.LibraryUI = (function () {
     const md = $('nv-md'), box = $('nv-preview');
     if (!box || !window.Md) return;
     box.innerHTML = window.Md.render(md ? md.value : '');
+    if (window.TroveMath) TroveMath.enhance(box);   // $…$ / $$…$ 换成 KaTeX 排版；无 katex 时保留源码
     nvLoadLocalImages(box);   // 本地图片（snapshots/xx.png）走 IPC 读 dataURL
+    const st = $('nv-preview-status');
+    if (st) st.textContent = window.TroveMath && TroveMath.available()
+      ? 'Markdown · $…$ 公式已用 KaTeX 排版'
+      : 'Markdown · $…$ 公式按源码显示（KaTeX 资源未就位）';
+    // 反向链接：扫全部独立笔记正文里的 [[本条标题]]，追加在预览末尾（Obsidian 式）
+    const bl = wikiBacklinks(nv.key, $('nv-title') ? $('nv-title').value : '');
+    if (bl.length) {
+      const div = document.createElement('div');
+      div.className = 'nv-backlinks';
+      div.innerHTML = '<div class="nv-bl-title">反向链接 · ' + bl.length + ' 条笔记提到了这条</div>'
+        + bl.map((b) => '<button class="nv-bl-item" data-bl-open="' + esc(b.key) + '">' + esc(b.title || '（无标题）') + '</button>').join('');
+      box.appendChild(div);
+    }
+  }
+
+  // [[标题]] 反向链接：只扫独立笔记（note 条目），自引用排除；标题精确匹配
+  function wikiBacklinks(selfKey, title) {
+    const t = String(title || '').trim();
+    if (!t) return [];
+    const safe = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('\\[\\[\\s*' + safe + '\\s*\\]\\]');
+    const out = [];
+    for (const it of state.items) {
+      if (it.itemType !== 'note' || it.attachment) continue;
+      if (it.key === selfKey) continue;
+      const n = (it.notes || [])[0];
+      if (n && re.test(String(n.text || ''))) out.push({ key: it.key, title: it.title });
+    }
+    return out;
   }
 
   function nvSchedulePreview() {
@@ -1360,6 +1415,7 @@ window.LibraryUI = (function () {
       const body = n0 ? ((window.Md && window.Md.render(n0.text || '')) || '') : '';
       el.ld.notes.innerHTML = openBtn
         + '<div class="ld-note-md ld-note-readonly">' + (body || '<div class="ld-hint">还没有内容，点上面的按钮去写。</div>') + '</div>';
+      if (window.TroveMath) TroveMath.enhance(el.ld.notes);
       nvLoadLocalImages(el.ld.notes);
       return;
     }
@@ -1580,7 +1636,42 @@ window.LibraryUI = (function () {
     el.ld.citePreview.classList.toggle('empty', !text);
     if (el.ld.citeCopy) el.ld.citeCopy.disabled = trashed || !text;
     if (el.ld.citeStatus) el.ld.citeStatus.textContent = '';
+    renderAtc();
   }
+
+  // ---------- 文内引注（cite.js 的 citeInText；编号制用当前列表位次当编号） ----------
+  function atcNumber(it) {
+    // 编号 = 该条目在当前可见列表里的位次（与「参考文献表」按同一列表编号一致）
+    const list = visibleItems().filter((x) => x.itemType !== 'annotation');
+    const i = list.findIndex((x) => x.key === it.key);
+    return i >= 0 ? i + 1 : 1;
+  }
+  function atcOfForm() {
+    const it = selectedItem();
+    if (!it || !window.Cite) return '';
+    let merged = it;
+    try { merged = Object.assign({}, it, readDetailForm()); } catch (_) { merged = it; }
+    try {
+      return window.Cite.citeInText(merged, {
+        style: state.citeStyle,
+        num: atcNumber(it),
+        locator: el.ld.atcLocator ? el.ld.atcLocator.value : '',
+      });
+    } catch (_) { return ''; }
+  }
+  function renderAtc() {
+    if (!el.ld.atcPreview) return;
+    const text = atcOfForm();
+    el.ld.atcPreview.textContent = text || '（先填标题）';
+    el.ld.atcPreview.hidden = !text;
+  }
+  async function copyAtCitation() {
+    const text = atcOfForm();
+    if (!text) { feedStatusText(el.ld.citeStatus, '先填标题'); return; }
+    try { await navigator.clipboard.writeText(text); if (el.ld.citeStatus) el.ld.citeStatus.textContent = '文内引注已复制'; }
+    catch (_) { feedStatusText(el.ld.citeStatus, '复制失败（剪贴板不可用）'); }
+  }
+  function feedStatusText(node, t) { if (node) node.textContent = t; }
 
   async function copyCitation() {
     const text = citeOfForm();
@@ -1685,6 +1776,8 @@ window.LibraryUI = (function () {
       '<div class="ld-fpath' + (missing ? ' ld-missing' : '') + '">' + esc(it.attachment.path) +
         (missing ? ' · 文件已移动或删除' : '') + '</div>' +
       '<div class="ld-attach-actions">' +
+        (it.page > 0 && !missing ? '<button class="ld-mini" data-ld-resume="1" title="从上次读到的位置继续（第 ' + esc(it.page) + ' 页'
+          + (it.pageTotal ? ' / ' + esc(it.pageTotal) : '') + ')">继续阅读' + (it.pageTotal ? ' · ' + Math.min(100, Math.max(1, Math.round(it.page / it.pageTotal * 100))) + '%' : '') + '</button>' : '') +
         '<button class="ld-mini" data-ld-reveal="1"' + (missing ? ' disabled' : '') + '>在文件夹中显示</button>' +
         '<button class="ld-mini" data-ld-relink="1"' + (trashed ? ' disabled' : '') + '>重新定位…</button>' +
         '<button class="ld-mini" data-ld-rename="1"' + (trashed || missing ? ' disabled' : '')
@@ -1907,12 +2000,15 @@ window.LibraryUI = (function () {
     if (el.setSort) el.setSort.value = state.settings.defaultSort || 'added';
     if (el.setAutoIndex) el.setAutoIndex.checked = state.settings.autoIndex !== false;
     if (el.setRestoreTabs) el.setRestoreTabs.checked = !!state.settings.restoreTabs;
+    if (el.setSplitView) el.setSplitView.checked = !!state.settings.splitView;
     if (el.setInvertPages) el.setInvertPages.checked = !!state.settings.invertPages;
     if (el.setFetchEmail) el.setFetchEmail.value = state.settings.fetchEmail || '';
-    if (el.setViewMode) el.setViewMode.value = state.settings.viewMode === 'page' ? 'page' : 'scroll';
+    if (el.setViewMode) el.setViewMode.value = ['page', 'spread'].includes(state.settings.viewMode) ? state.settings.viewMode : 'scroll';
     if (window.App && App.setViewMode && state.settings.viewMode) {
-      App.state.viewMode = state.settings.viewMode === 'page' ? 'page' : 'scroll';
-      document.body.classList.toggle('view-page', App.state.viewMode === 'page');
+      const m = ['page', 'spread'].includes(state.settings.viewMode) ? state.settings.viewMode : 'scroll';
+      App.state.viewMode = m;
+      document.body.classList.toggle('view-page', m === 'page');
+      document.body.classList.toggle('view-spread', m === 'spread');
     }
     if (el.setDataDir) el.setDataDir.textContent = state.settings.dataDir || '（默认 userData）';
     setSettingsStatus('');
@@ -1922,6 +2018,219 @@ window.LibraryUI = (function () {
 
   function closeSettings() { if (el.settingsModal) el.settingsModal.hidden = true; }
 
+  // 库统计面板：数据全从本地 summary 现算（LibStats），不联网。Calibre 的 reading stats 思路。
+  // （esc 用外面 43 行那个，不重复定义）
+  function barRows(rows, labelFn, valueFn) {
+    const max = Math.max(1, ...rows.map((r) => valueFn(r)));
+    return rows.map((r) => {
+      const v = valueFn(r);
+      return '<div class="st-row"><span class="st-lbl">' + esc(labelFn(r)) + '</span>'
+        + '<span class="st-bar"><i style="width:' + Math.round(v / max * 100) + '%"></i></span>'
+        + '<span class="st-num">' + esc(v) + '</span></div>';
+    }).join('');
+  }
+  async function openStats() {
+    if (!el.statsModal || !el.statsBody || !window.LibStats) return;
+    el.statsBody.innerHTML = '<div class="ld-hint">统计中…</div>';
+    el.statsModal.hidden = false;
+    // 统计永远算全库：state.items 可能正被搜索 / 收藏集筛选着，不能用
+    const sum = await L().summary();
+    state.itemTypes = sum.itemTypes || state.itemTypes;
+    const st = window.LibStats.compute(sum.items || []);
+    const pct = (n) => st.total ? Math.round(n / st.total * 100) : 0;
+    const yearRows = st.byYear.filter((r) => r.count > 0);
+    const createdRows = (st.byCreated || []).filter((r) => r.count > 0);
+    // 阅读时长（readingstats.js + userData/reading-stats.json；失败静默跳过该区）
+    let rsHtml = '';
+    try {
+      if (window.ReadingStats && pdfBridge.readingStatsLoad) {
+        // 先把渲染进程里攒着的增量落盘，否则面板最多滞后约 150 秒
+        if (window.App && App.readingFlushNow) await App.readingFlushNow();
+        const rs = await pdfBridge.readingStatsLoad();
+        const agg = ReadingStats.aggregate(rs && rs.stats ? rs.stats : ReadingStats.empty(), { nDays: 84 });
+        const max = Math.max(1, ...agg.byDay.map((d) => d.seconds));
+        const weekTotal = agg.byDay.slice(-7).reduce((a, b) => a + b.seconds, 0);
+        const cells = agg.byDay.map((d) => {
+          const lvl = d.seconds <= 0 ? 0 : Math.min(4, Math.ceil(d.seconds / max * 4));
+          return '<i class="rs-cell rs-l' + lvl + '" title="' + esc(d.day) + ' · ' + esc(ReadingStats.fmtDuration(d.seconds)) + '"></i>';
+        }).join('');
+        const topRows = agg.byDoc.slice(0, 5).map((d) => {
+          const name = String(d.path).split(/[\/]/).pop();
+          return '<div class="rs-doc"><span class="rs-doc-name">' + esc(name) + '</span><span class="lcprog">' + esc(ReadingStats.fmtDuration(d.seconds)) + '</span></div>';
+        }).join('');
+        rsHtml = '<div class="set-sec"><div class="set-title">阅读时长（打开文档且窗口可见时累计，每 15 秒记一次）</div>'
+          + '<div class="st-overview">'
+          + '<div class="st-cell"><b>' + esc(ReadingStats.fmtDuration(weekTotal)) + '</b><span>最近 7 天</span></div>'
+          + '<div class="st-cell"><b>' + esc(ReadingStats.fmtDuration(agg.totalSeconds)) + '</b><span>累计</span></div>'
+          + '</div>'
+          + '<div class="rs-heatmap">' + cells + '</div>'
+          + (topRows ? '<div class="rs-top">' + topRows + '</div>' : '')
+          + '</div>';
+      }
+    } catch (_) { rsHtml = ''; }
+    el.statsBody.innerHTML =
+      '<div class="set-sec"><div class="set-title">总览</div>'
+      + '<div class="st-overview">'
+      + '<div class="st-cell"><b>' + esc(st.total) + '</b><span>条目</span></div>'
+      + '<div class="st-cell"><b>' + esc(st.withPdf) + '</b><span>有 PDF（' + pct(st.withPdf) + '%）</span></div>'
+      + '<div class="st-cell"><b>' + esc(st.withAttachment) + '</b><span>有附件</span></div>'
+      + '<div class="st-cell"><b>' + esc(st.withNotes) + '</b><span>写过笔记（' + pct(st.withNotes) + '%）</span></div>'
+      + '<div class="st-cell"><b>' + esc(st.withAnnos) + '</b><span>有批注</span></div>'
+      + (st.trashed ? '<div class="st-cell"><b>' + esc(st.trashed) + '</b><span>回收站</span></div>' : '')
+      + '</div></div>'
+      + rsHtml
+      + '<div class="set-sec"><div class="set-title">条目类型</div>'
+      + barRows(st.byType.slice(0, 12), (r) => typeLabel(r.type), (r) => r.count) + '</div>'
+      + '<div class="set-sec"><div class="set-title">出版年份</div>'
+      + (yearRows.length ? barRows(yearRows, (r) => r.year, (r) => r.count) : '<div class="ld-hint">还没有带出版年份的条目</div>') + '</div>'
+      + '<div class="set-sec"><div class="set-title">入库年份</div>'
+      + (createdRows.length ? barRows(createdRows, (r) => r.year, (r) => r.count) : '<div class="ld-hint">还没有条目</div>') + '</div>'
+      + '<div class="set-sec"><div class="set-title">标签 Top ' + esc(st.topTags.length) + '</div>'
+      + (st.topTags.length ? barRows(st.topTags, (r) => r.tag, (r) => r.count) : '<div class="ld-hint">还没有标签</div>') + '</div>'
+      + '<div class="set-sec"><div class="set-title">最近添加</div>'
+      + (st.recent.length ? '<ol class="st-recent">' + st.recent.map((r) => '<li>' + esc(r.title || '（无标题）') + '</li>').join('') + '</ol>' : '<div class="ld-hint">还没有条目</div>')
+      + '</div>';
+  }
+  function closeStats() { if (el.statsModal) el.statsModal.hidden = true; }
+
+  // ---------- RSS 订阅面板（按需联网：点「添加订阅 / 刷新」才拉取） ----------
+  const feedsState = { selected: '', entriesBy: {}, feeds: [], usedUrls: new Set() };
+  function feedSetStatus(t) { if (el.feedStatus) el.feedStatus.textContent = t || ''; }
+  function feedRenderList() {
+    if (!el.feedList) return;
+    if (!feedsState.feeds.length) {
+      el.feedList.innerHTML = '<div class="ld-hint">还没有订阅。贴一个 RSS / Atom 地址试试（期刊官网或 arXiv 分类页都有）。</div>';
+      return;
+    }
+    el.feedList.innerHTML = feedsState.feeds.map((f) =>
+      '<div class="feed-row' + (feedsState.selected === f.id ? ' selected' : '') + '" data-feed-id="' + esc(f.id) + '">'
+      + '<span class="feed-title">' + esc(f.title) + '</span>'
+      + '<span class="feed-url">' + esc(f.url) + '</span>'
+      + '<button class="ld-mini feed-open" data-feed-open="' + esc(f.id) + '">' + (feedsState.entriesBy[f.id] ? '看条目' : '拉取') + '</button>'
+      + '<button class="ld-mini feed-del" data-feed-del="' + esc(f.id) + '" title="取消订阅">✕</button>'
+      + '</div>').join('');
+  }
+  function feedMarkUsed() {
+    feedsState.usedUrls = new Set(state.items.map((x) => String(x.url || '').trim()).filter(Boolean));
+  }
+  function feedRenderEntries(feedId) {
+    if (!el.feedEntries) return;
+    const feed = feedsState.feeds.find((f) => f.id === feedId);
+    const entries = feedsState.entriesBy[feedId] || [];
+    if (!feed || !entries.length) { el.feedEntries.innerHTML = ''; return; }
+    el.feedEntries.innerHTML = '<div class="feed-entries-title">' + esc(feed.title) + ' · ' + entries.length + ' 条</div>'
+      + entries.map((en, i) => {
+        const used = en.url && feedsState.usedUrls.has(en.url);
+        return '<div class="feed-entry">'
+          + '<div class="fe-main"><div class="fe-title">' + esc(en.title) + '</div>'
+          + '<div class="fe-meta">' + esc(en.authors && en.authors.length ? en.authors.join(', ') : feed.title)
+          + (en.date ? ' · ' + new Date(en.date).toISOString().slice(0, 10) : '') + '</div>'
+          + (en.summary ? '<div class="fe-summary">' + esc(en.summary) + '</div>' : '') + '</div>'
+          + '<button class="ld-mini feed-add-item" data-feed-entry="' + i + '"' + (used ? ' disabled title="这条已经在文献库里"' : '') + '>'
+          + (used ? '已入库' : '收进文献库') + '</button>'
+          + '</div>';
+      }).join('');
+    el.feedEntries.querySelectorAll('[data-feed-entry]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
+        const en = (feedsState.entriesBy[feedId] || [])[+btn.dataset.feedEntry];
+        if (!en) return;
+        const rec = window.FeedParse ? FeedParse.entryToRecord(en, feed.title) : { itemType: 'webpage', title: en.title, url: en.url };
+        btn.disabled = true; btn.textContent = '入库中…';
+        const r = await pdfBridge.addItem(rec);
+        if (r && r.ok) { btn.textContent = '已入库'; feedMarkUsed(); await refresh(); }
+        else { btn.disabled = false; btn.textContent = '收进文献库'; feedSetStatus('入库失败：' + ((r && r.error) || '未知错误')); }
+      });
+    });
+  }
+  async function feedFetchEntries(feedId) {
+    const feed = feedsState.feeds.find((f) => f.id === feedId);
+    if (!feed) return;
+    feedSetStatus('正在拉取 ' + feed.title + ' …');
+    const r = await pdfBridge.feedFetch(feed.url);
+    if (!r || !r.ok) { feedSetStatus('拉取失败：' + ((r && r.error) || '未知错误')); return; }
+    feedsState.entriesBy[feedId] = r.entries || [];
+    feedsState.selected = feedId;
+    feedSetStatus(feed.title + '：' + (r.entries || []).length + ' 条');
+    feedRenderList();
+    feedRenderEntries(feedId);
+  }
+  async function openFeeds() {
+    if (!el.feedsModal || !el.feedList) return;
+    el.feedsModal.hidden = false;
+    feedSetStatus('');
+    const sum = await L().summary();
+    feedsState.feeds = sum.feeds || [];
+    feedMarkUsed();
+    if (el.feedUrl) el.feedUrl.value = '';
+    if (!feedsState.selected && feedsState.feeds.length) feedsState.selected = feedsState.feeds[0].id;
+    feedRenderList();
+    feedRenderEntries(feedsState.selected);
+  }
+  function closeFeeds() { if (el.feedsModal) el.feedsModal.hidden = true; }
+
+  // ---------- 可视化条件构建器（纯逻辑在 query.js：buildQuery / parseQueryToRows） ----------
+  const QB_FIELDS = [
+    ['', '全文'], ['title', '标题'], ['author', '作者'], ['year', '年份'],
+    ['publication', '期刊'], ['tag', '标签'], ['note', '笔记'], ['abstract', '摘要'], ['doi', 'DOI'],
+  ];
+  // 查询里出现但下拉没有的字段（type / file / url / volume…）也要能回填，
+  // 否则选中项会落回「全文」，一应用就把条件改没了。
+  const QB_FIELD_LABELS = { type: '类型', file: '附件', url: 'URL', volume: '卷', issue: '期', pages: '页码', language: '语言' };
+  function qbFieldOptions(selected) {
+    const opts = QB_FIELDS.map((f) => ({ value: f[0], label: f[1] }));
+    if (selected && !opts.some((o) => o.value === selected)) {
+      opts.push({ value: selected, label: QB_FIELD_LABELS[selected] || selected });
+    }
+    return opts;
+  }
+  function qbAppendRow(row) {
+    const box = $('qb-rows');
+    if (!box) return;
+    const div = document.createElement('div');
+    div.className = 'qb-row';
+    div.innerHTML = '<select class="qb-field">'
+      + qbFieldOptions(row.field).map((f) => '<option value="' + esc(f.value) + '"' + (row.field === f.value ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('')
+      + '</select>'
+      + '<label class="qb-ex"><input type="checkbox" class="qb-not"' + (row.op === 'exclude' ? ' checked' : '') + ' />排除</label>'
+      + '<input type="text" class="qb-value" value="' + esc(row.value || '') + '" placeholder="关键词" />'
+      + '<button class="qb-del" title="删掉这行">×</button>';
+    // 原串行：这段语法拆不成条件行，标记出来让用户知道应用时是原样使用
+    if (row.raw) { div.dataset.raw = '1'; div.classList.add('qb-raw'); }
+    div.querySelector('.qb-del').addEventListener('click', () => div.remove());
+    box.appendChild(div);
+  }
+  function qbSetNotice(text) {
+    const n = $('qb-notice');
+    if (!n) return;
+    n.textContent = text || '';
+    n.hidden = !text;
+  }
+  function qbFillRows() {
+    const box = $('qb-rows');
+    if (!box) return;
+    box.innerHTML = '';
+    const rows = window.Query ? Query.parseQueryToRows(el.search ? el.search.value : '') : [];
+    if (!rows.length) rows.push({ field: '', op: 'contains', value: '' });
+    for (const r of rows) qbAppendRow(r);
+    const raw = rows.some((r) => r.raw);
+    qbSetNotice(raw
+      ? '这条查询含 OR / 括号等语法，条件构建器无法无损拆成条件行。应用时按原文执行，不会改写你的查询。'
+      : '');
+    const add = $('qb-add');
+    if (add) add.disabled = raw;
+  }
+  function qbReadRows() {
+    const box = $('qb-rows');
+    if (!box) return [];
+    return Array.from(box.querySelectorAll('.qb-row')).map((div) => ({
+      field: div.querySelector('.qb-field').value,
+      op: div.querySelector('.qb-not').checked ? 'exclude' : 'contains',
+      value: div.querySelector('.qb-value').value,
+      raw: div.dataset.raw === '1' || undefined,
+    }));
+  }
+
   async function saveSettings() {
     if (!window.pdfBridge || !window.pdfBridge.setSettings) return;
     const patch = {
@@ -1929,6 +2238,7 @@ window.LibraryUI = (function () {
       defaultSort: el.setSort ? el.setSort.value : 'added',
       autoIndex: el.setAutoIndex ? el.setAutoIndex.checked : true,
       restoreTabs: el.setRestoreTabs ? el.setRestoreTabs.checked : false,
+      splitView: el.setSplitView ? el.setSplitView.checked : false,
       invertPages: el.setInvertPages ? el.setInvertPages.checked : false,
       viewMode: el.setViewMode ? el.setViewMode.value : 'scroll',
       fetchEmail: el.setFetchEmail ? el.setFetchEmail.value.trim() : '',
@@ -1941,7 +2251,10 @@ window.LibraryUI = (function () {
     if (el.sort) el.sort.value = state.sort;
     applyTheme(state.settings.theme);
     if (window.App && App.applyInvert) App.applyInvert(!!state.settings.invertPages);
-    if (window.App && App.setViewMode) App.setViewMode(state.settings.viewMode === 'page' ? 'page' : 'scroll');
+    if (window.App && App.setViewMode) App.setViewMode(state.settings.viewMode);
+    if (window.App && App.setSplitView && App.state && App.state.split !== !!state.settings.splitView) {
+      App.setSplitView(!!state.settings.splitView, { persist: false });
+    }
     await refresh();
     setSettingsStatus('设置已保存');
     window.App && window.App.toast && window.App.toast('设置已保存');
@@ -2828,6 +3141,8 @@ window.LibraryUI = (function () {
   function bind() {
     el = {
       root: $('library'), search: $('lib-search'), collections: $('lib-collections'),
+      qbBtn: $('lib-query-btn'), qbPanel: $('lib-query-panel'), qbRows: $('qb-rows'),
+      feedsBtn: $('lib-feeds'), feedsModal: $('feeds-modal'), feedList: $('feed-list'), feedEntries: $('feed-entries'), feedStatus: $('feed-status'), feedUrl: $('feed-url'),
       searches: $('lib-searches'), saveSearch: $('lib-save-search'),
       back: $('lib-back'),   // 「阅读」分段（点击由 modeswitch.js 处理）
       tagList: $('lib-tags'),
@@ -2843,8 +3158,9 @@ window.LibraryUI = (function () {
       dup: $('lib-dup'), importRefs: $('lib-import-refs'), exportRefs: $('lib-export-refs'),
       newNote: $('lib-new-note'), undo: $('lib-undo'), redo: $('lib-redo'),
       settingsBtn: $('lib-settings'),
+      statsBtn: $('lib-stats'), statsModal: $('stats-modal'), statsBody: $('stats-body'),
       settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
-      setAutoIndex: $('set-auto-index'), setRestoreTabs: $('set-restore-tabs'), setInvertPages: $('set-invert-pages'), setFetchEmail: $('set-fetch-email'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
+      setAutoIndex: $('set-auto-index'), setRestoreTabs: $('set-restore-tabs'), setSplitView: $('set-split-view'), setInvertPages: $('set-invert-pages'), setFetchEmail: $('set-fetch-email'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
       setFtStatus: $('set-ft-status'), setIndex: $('set-index'), setReindex: $('set-reindex'),
       dupModal: $('dup-modal'), dupBody: $('dup-body'), dupStatus: $('dup-status'),
       bulkModal: $('bulk-modal'), bulkTitle: $('bulk-title'), bulkType: $('bulk-type'), bulkColl: $('bulk-add-coll'),
@@ -2866,6 +3182,8 @@ window.LibraryUI = (function () {
         del: $('ld-delete'), close: $('ld-close'),
         citeStyle: $('ld-cite-style'), citeCopy: $('ld-cite-copy'),
         citeStatus: $('ld-cite-status'), citePreview: $('ld-cite-preview'),
+        atcBtn: $('ld-atc-btn'), atcRow: $('ld-atc-row'), atcLocator: $('ld-atc-locator'),
+        atcCopy: $('ld-atc-copy'), atcPreview: $('ld-atc-preview'),
         citekey: $('ld-citekey'), citekeyCopy: $('ld-citekey-copy'),
         citekeyAt: $('ld-citekey-at'), citekeyStatus: $('ld-citekey-status'),
         relations: $('ld-relations'), relSelect: $('ld-rel-select'), relAdd: $('ld-rel-add'),
@@ -2884,6 +3202,34 @@ window.LibraryUI = (function () {
     // 搜索框：每次按键都重画整张列表，条目一多就会卡。去抖一下（90ms），
     // 全文检索那边本来就�� 320ms 去抖。
     let searchTimer = null;
+    // 可视化条件构建器
+    const qb = $('lib-query-btn'), qbp = $('lib-query-panel');
+    if (qb && qbp) {
+      qb.addEventListener('click', () => {
+        if (qbp.hidden) { qbFillRows(); qbp.hidden = false; }
+        else qbp.hidden = true;
+      });
+      const qbRows = $('qb-rows');
+      $('qb-add').addEventListener('click', () => qbAppendRow({ field: '', op: 'contains', value: '' }));
+      $('qb-apply').addEventListener('click', () => {
+        const rows = qbReadRows();
+        // 原串行（OR / 括号等）由 buildQuery 原样返回，绝不重新拼装成短语
+        const q = window.Query ? Query.buildQuery(rows) : '';
+        el.search.value = q;
+        state.query = q;
+        renderGrid();
+        qbp.hidden = true;
+      });
+      $('qb-clear').addEventListener('click', () => {
+        qbRows.innerHTML = '';
+        qbAppendRow({ field: '', op: 'contains', value: '' });
+        qbSetNotice('');
+        const add = $('qb-add');
+        if (add) add.disabled = false;
+      });
+      $('qb-close').addEventListener('click', () => { qbp.hidden = true; });
+    }
+
     el.search.addEventListener('input', () => {
       state.query = el.search.value;
       if (state.scope.type === 'search') state.scope = { type: 'all' };
@@ -3059,8 +3405,17 @@ window.LibraryUI = (function () {
     if (el.ld.citeStyle) el.ld.citeStyle.addEventListener('change', () => {
       state.citeStyle = el.ld.citeStyle.value || 'gbt7714';
       renderCite(selectedItem(), false);
+      renderAtc();
     });
     if (el.ld.citeCopy) el.ld.citeCopy.addEventListener('click', copyCitation);
+    // 文内引注：按钮展开定位符输入行；输入 / 切样式即时更新预览
+    if (el.ld.atcBtn) el.ld.atcBtn.addEventListener('click', () => {
+      if (!el.ld.atcRow) return;
+      el.ld.atcRow.hidden = !el.ld.atcRow.hidden;
+      if (!el.ld.atcRow.hidden) { renderAtc(); if (el.ld.atcLocator) el.ld.atcLocator.focus(); }
+    });
+    if (el.ld.atcLocator) el.ld.atcLocator.addEventListener('input', renderAtc);
+    if (el.ld.atcCopy) el.ld.atcCopy.addEventListener('click', copyAtCitation);
     if (el.ld.citekeyCopy) el.ld.citekeyCopy.addEventListener('click', () => copyCitekey(false));
     if (el.ld.citekeyAt) el.ld.citekeyAt.addEventListener('click', () => copyCitekey(true));
     if (el.ld.relAdd) el.ld.relAdd.addEventListener('click', async () => {
@@ -3194,6 +3549,60 @@ window.LibraryUI = (function () {
     if (el.undo) el.undo.addEventListener('click', () => doUndo(false));
     if (el.redo) el.redo.addEventListener('click', () => doUndo(true));
     if (el.settingsBtn) el.settingsBtn.addEventListener('click', openSettings);
+    if (el.statsBtn) el.statsBtn.addEventListener('click', openStats);
+    const statsClose = $('stats-close'), statsClose2 = $('stats-close2');
+    if (statsClose) statsClose.addEventListener('click', closeStats);
+    if (statsClose2) statsClose2.addEventListener('click', closeStats);
+    // RSS 订阅
+    const feedsClose = $('feeds-close'), feedsClose2 = $('feeds-close2');
+    if (el.feedsBtn) el.feedsBtn.addEventListener('click', openFeeds);
+    if (feedsClose) feedsClose.addEventListener('click', closeFeeds);
+    if (feedsClose2) feedsClose2.addEventListener('click', closeFeeds);
+    if (el.feedList) {
+      el.feedList.addEventListener('click', async (e) => {
+        const del = e.target.closest('[data-feed-del]');
+        if (del) {
+          const r = await pdfBridge.feedRemove(del.dataset.feedDel);
+          if (r && r.ok) {
+            delete feedsState.entriesBy[del.dataset.feedDel];
+            const sum = await L().summary();
+            feedsState.feeds = sum.feeds || [];
+            if (feedsState.selected === del.dataset.feedDel) feedsState.selected = feedsState.feeds.length ? feedsState.feeds[0].id : '';
+            feedRenderList();
+            feedRenderEntries(feedsState.selected);
+          } else feedSetStatus('删除失败：' + ((r && r.error) || '未知错误'));
+          return;
+        }
+        const open = e.target.closest('[data-feed-open]');
+        if (open) { await feedFetchEntries(open.dataset.feedOpen); return; }
+        const row = e.target.closest('.feed-row');
+        if (row) {
+          feedsState.selected = row.dataset.feedId;
+          feedRenderList();
+          feedRenderEntries(feedsState.selected);
+        }
+      });
+    }
+    const feedAddBtn = $('feed-add-btn'), feedRefreshBtn = $('feed-refresh-btn');
+    if (feedAddBtn) feedAddBtn.addEventListener('click', async () => {
+      const inp = $('feed-url');
+      const url = inp ? inp.value.trim() : '';
+      if (!url) { feedSetStatus('先贴一个订阅地址'); return; }
+      feedSetStatus('正在添加订阅 …');
+      const r = await pdfBridge.feedAdd(url);
+      if (!r || !r.ok) { feedSetStatus('添加失败：' + ((r && r.error) || '未知错误')); return; }
+      inp.value = '';
+      feedsState.feeds = (await L().summary()).feeds || [];
+      feedsState.entriesBy[r.feed.id] = r.entries || [];
+      feedsState.selected = r.feed.id;
+      feedSetStatus('已订阅 ' + r.feed.title + '：' + (r.entries || []).length + ' 条');
+      feedRenderList();
+      feedRenderEntries(r.feed.id);
+    });
+    if (feedRefreshBtn) feedRefreshBtn.addEventListener('click', async () => {
+      if (!feedsState.selected) { feedSetStatus('先选一个订阅'); return; }
+      await feedFetchEntries(feedsState.selected);
+    });
 
     // 全屏笔记编辑器（Markdown）
     const nvBack = $('nv-back');
@@ -3248,6 +3657,18 @@ window.LibraryUI = (function () {
         if (fnj) {
           const target = nvPreview.querySelector('[id="' + (fnj.dataset.fnjump || '').replace(/"/g, '') + '"]');
           if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+          return;
+        }
+        const blBtn = e.target.closest('[data-bl-open]');
+        if (blBtn) { e.preventDefault(); openNoteEditor(blBtn.dataset.blOpen); return; }
+        const wl = e.target.closest('[data-wikilink]');
+        if (wl) {
+          e.preventDefault();
+          // 按标题精确找独立笔记（note 条目）；找不到提示，不动当前编辑内容
+          const t = String(wl.dataset.wikilink || '').trim();
+          const hit = state.items.find((x) => x.itemType === 'note' && !x.attachment && String(x.title || '').trim() === t);
+          if (hit) openNoteEditor(hit.key);
+          else window.App && window.App.toast && window.App.toast('没有叫「' + t + '」的独立笔记');
           return;
         }
         const link = e.target.closest('[data-md-link]');
@@ -3397,8 +3818,14 @@ window.LibraryUI = (function () {
       const del = e.target.closest('[data-del]');
       if (del) {
         e.stopPropagation();
-        await L().removeCollection(del.dataset.del);
-        if (state.scope.type === 'coll' && state.scope.id === del.dataset.del) state.scope = { type: 'all' };
+        const gone = del.dataset.del;
+        await L().removeCollection(gone);
+        if (state.scope.type === 'coll' && state.scope.id === gone) state.scope = { type: 'all' };
+        else if (state.scope.type === 'colls') {
+          const ids = state.scope.ids.filter((id) => id !== gone);
+          state.scope = ids.length > 1 ? { type: 'colls', ids }
+            : (ids.length ? { type: 'coll', id: ids[0] } : { type: 'all' });
+        }
         await refresh();
         return;
       }
@@ -3406,6 +3833,19 @@ window.LibraryUI = (function () {
       if (b) {
         const t = b.dataset.scope;
         resetEmptyArm();
+        // v35：Ctrl / Cmd + 点击收藏集 = 多选并集；普通点击仍然只选一个
+        if (t === 'coll' && (e.ctrlKey || e.metaKey)) {
+          const id = b.dataset.id;
+          const cur = state.scope.type === 'colls' ? state.scope.ids.slice()
+            : (state.scope.type === 'coll' ? [state.scope.id] : []);
+          const i = cur.indexOf(id);
+          if (i >= 0) cur.splice(i, 1); else cur.push(id);
+          if (!cur.length) state.scope = { type: 'all' };
+          else if (cur.length === 1) state.scope = { type: 'coll', id: cur[0] };
+          else state.scope = { type: 'colls', ids: cur };
+          render();
+          return;
+        }
         state.scope = t === 'coll' ? { type: 'coll', id: b.dataset.id } : { type: t };
         if (t === 'annotations') {
           // 标注本体在磁盘上，进这个视图时重新读一遍
@@ -3691,7 +4131,10 @@ window.LibraryUI = (function () {
     // 详情附件动作（内容是动态渲染的，用委托）
     el.ld.attach.addEventListener('click', async (e) => {
       const it = selectedItem(); if (!it) return;
-      if (e.target.closest('[data-ld-reveal]')) {
+      if (e.target.closest('[data-ld-resume]')) {
+        // 从上次读到的页继续（页码存在条目 page 字段，openItem 会转成 startPage）
+        openItem(it.key, it.page);
+      } else if (e.target.closest('[data-ld-reveal]')) {
         const r = await L().revealItem(it.key);
         if (!r || !r.ok) window.App && window.App.toast && window.App.toast('无法定位：' + ((r && r.error) || '未知错误'));
       } else if (e.target.closest('[data-ld-rename]')) {

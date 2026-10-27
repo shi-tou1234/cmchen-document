@@ -6,6 +6,9 @@
         content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data:;" />
   <title>Trove</title>
   <link rel="stylesheet" href="styles.css" />
+  <!-- KaTeX：笔记公式渲染。资源由 npm run copy-pdfjs 拷入 renderer/katex/；
+       缺文件时 window.katex 不存在，公式退回源码显示，页面其余功能不受影响 -->
+  <link rel="stylesheet" href="katex/katex.min.css" />
 </head>
 <body>
   <div id="toolbar">
@@ -51,6 +54,9 @@
     <button id="btn-next" class="tbtn" title="下一页">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
     </button>
+    <button id="btn-spread" class="tbtn" title="双页对开：像书一样左右两页（Ctrl+Shift+D）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="8" height="14" rx="1"/><rect x="13" y="5" width="8" height="14" rx="1"/></svg>
+    </button>
     <span class="sep"></span>
     <input id="search-box" type="search" placeholder="搜索全文，回车" title="文档内全文搜索 (Enter)" />
     <span class="sep"></span>
@@ -62,6 +68,16 @@
     </button>
     <button id="btn-print" class="tbtn" title="打印当前文档 (Ctrl+P)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="7" rx="1.5"/><path d="M7 16h10v4H7z"/></svg>
+    </button>
+    <span class="sep"></span>
+    <button id="btn-rotate-left" class="tbtn compact" title="逆时针旋转 90° (Ctrl+[)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9a8 8 0 1 1 2.3 6.7"/><path d="M4 4v5h5"/></svg>
+    </button>
+    <button id="btn-rotate-right" class="tbtn compact" title="顺时针旋转 90° (Ctrl+])">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 9a8 8 0 1 0-2.3 6.7"/><path d="M20 4v5h-5"/></svg>
+    </button>
+    <button id="btn-split" class="tbtn compact" title="分屏参考视图：右侧只读显示另一页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M12 5v14"/></svg>
     </button>
     <span class="grow"></span>
     <button id="file-name" class="filename" title="点击切换文档（当前标签 / 最近打开 / 文献库）">未打开文档</button>
@@ -167,6 +183,26 @@
     <div id="doc-view" hidden></div>
     <div id="empty-hint">打开或拖拽一个文档开始阅读（PDF / Word / PPT / Excel / Markdown / EPUB…）</div>
   </div>
+
+  <!-- v34：只读分屏参考视图。同一 PDF 的另一页，不带标注层，用来看参考文献 / 尾注 -->
+  <aside id="ref-pane" hidden aria-label="参考视图">
+    <header id="ref-head">
+      <span class="ref-title">参考</span>
+      <button id="ref-prev" class="ref-btn" title="上一页">‹</button>
+      <input id="ref-page" type="number" min="1" value="1" title="参考视图页码" />
+      <span id="ref-count">/ 0</span>
+      <button id="ref-next" class="ref-btn" title="下一页">›</button>
+      <label class="ref-follow" title="参考页始终跟着正文的下一页（双页对照）">
+        <input id="ref-follow" type="checkbox" /> 跟随
+      </label>
+      <span class="grow"></span>
+      <button id="ref-close" class="ref-btn" title="关闭分屏">✕</button>
+    </header>
+    <div id="ref-body">
+      <canvas id="ref-canvas" hidden></canvas>
+      <div id="ref-empty">打开 PDF 后在这里对照另一页</div>
+    </div>
+  </aside>
   </div><!-- /main-row -->
 
   <div id="statusbar">
@@ -182,7 +218,21 @@
         <button type="button" id="lib-back" class="mode-tab" data-mode="read" role="tab" aria-selected="false" title="返回阅读器（Esc）">阅读</button>
         <button type="button" class="mode-tab active" data-mode="library" role="tab" aria-selected="true" title="当前视图：文献库">文献库</button>
       </div>
-      <input id="lib-search" type="search" placeholder="搜索标题 / 作者 / 全文…" />
+      <div id="lib-search-wrap">
+        <input id="lib-search" type="search" placeholder="搜索标题 / 作者 / 全文…" />
+        <button id="lib-query-btn" class="tbtn" title="可视化条件构建器：字段 / 排除 / 多条件 AND">☰ 条件</button>
+        <div id="lib-query-panel" class="qb-panel" hidden>
+          <div id="qb-notice" class="qb-notice" hidden></div>
+          <div id="qb-rows"></div>
+          <div class="qb-actions">
+            <button id="qb-add" class="ld-mini" title="再加一行条件">＋ 加条件</button>
+            <button id="qb-apply" class="ld-mini primary">应用搜索</button>
+            <button id="qb-clear" class="ld-mini">清空条件</button>
+            <button id="qb-close" class="ld-mini">关闭</button>
+          </div>
+          <div class="qb-hint">多条件之间是「且」的关系；勾「排除」表示不含这个词。含 OR / 括号的查询会原样保留，不会被改写。</div>
+        </div>
+      </div>
       <div id="lib-collections"></div>
       <button id="lib-new-coll" class="tbtn lib-side-btn">＋ 新建收藏集</button>
       <div class="lib-side-sep"></div>
@@ -225,6 +275,8 @@
           <button id="lib-import" class="tbtn accent" title="添加 PDF / Word / PPT / Excel / Markdown 等文件">添加文档</button>
           <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
           <span class="sep"></span>
+          <button id="lib-feeds" class="tbtn" title="RSS 期刊订阅：添加订阅源，把新文章收进文献库">📡 订阅</button>
+          <button id="lib-stats" class="tbtn" title="库统计：类型 / 年份 / 标签分布">📊 统计</button>
           <button id="lib-settings" class="tbtn" title="设置 / 备份 / 全文索引">⚙ 设置</button>
         </div>
       </header>
@@ -317,8 +369,15 @@
               <option value="mla">MLA 9</option>
             </select>
             <button id="ld-cite-copy" class="ld-mini">复制引用</button>
+            <button id="ld-atc-btn" class="ld-mini" title="生成文内引注（正文中那个 (Smith, 2020, p. 3) / [12]）">文内引注…</button>
             <span id="ld-cite-status" class="ld-hint"></span>
           </div>
+          <div id="ld-atc-row" class="ld-atc-row" hidden>
+            <span class="ld-lbl">定位符</span>
+            <input id="ld-atc-locator" type="text" placeholder="页码 / 章节，如 p. 12，可留空" style="flex:1;min-width:0" />
+            <button id="ld-atc-copy" class="ld-mini primary">复制文内引注</button>
+          </div>
+          <div id="ld-atc-preview" class="ld-cite-preview" hidden></div>
           <div id="ld-cite-preview" class="ld-cite-preview"></div>
           <div class="ld-citekey-row">
             <span class="ld-lbl">引用键</span>
@@ -463,7 +522,7 @@
         placeholder="在这里写笔记内容（Markdown）…&#10;&#10;工具栏一键插入语法；右边实时预览。"></textarea>
       <div id="nv-preview-wrap">
         <div id="nv-preview-head"><span class="nv-ph-title">实时预览</span>
-          <span id="nv-preview-status" class="ld-hint">Markdown · 公式按源码显示</span></div>
+          <span id="nv-preview-status" class="ld-hint">Markdown · $…$ 公式渲染</span></div>
         <div id="nv-preview" class="md-body markdown-content"></div>
       </div>
     </div>
@@ -483,6 +542,37 @@
   </div>
 
   <!-- 设置 / 备份 / 全文索引 -->
+  <div id="feeds-modal" class="modal" hidden>
+    <div class="modal-card">
+      <header class="modal-head">
+        <span>RSS 订阅</span>
+        <span class="grow"></span>
+        <button id="feeds-close" class="ld-x" title="关闭">✕</button>
+      </header>
+      <div class="modal-body">
+        <div class="qb-row">
+          <input id="feed-url" type="text" placeholder="订阅源地址（https://… / RSS 或 Atom）" style="flex:1" />
+          <button id="feed-add-btn" class="ld-mini primary">添加订阅</button>
+          <button id="feed-refresh-btn" class="ld-mini">刷新选中</button>
+        </div>
+        <div id="feed-list" class="feed-list"></div>
+        <div id="feed-status" class="ld-hint"></div>
+        <div id="feed-entries"></div>
+      </div>
+      <footer class="modal-foot"><button id="feeds-close2" class="ld-btn">关闭</button></footer>
+    </div>
+  </div>
+  <div id="stats-modal" class="modal" hidden>
+    <div class="modal-card">
+      <header class="modal-head">
+        <span>库统计</span>
+        <span class="grow"></span>
+        <button id="stats-close" class="ld-x" title="关闭">✕</button>
+      </header>
+      <div class="modal-body" id="stats-body"></div>
+      <footer class="modal-foot"><button id="stats-close2" class="ld-btn">关闭</button></footer>
+    </div>
+  </div>
   <div id="settings-modal" class="modal" hidden>
     <div class="modal-card">
       <header class="modal-head">
@@ -511,11 +601,13 @@
             <select id="set-view-mode">
               <option value="scroll">连续滚动</option>
               <option value="page">单页翻页</option>
+              <option value="spread">双页对开</option>
             </select>
           </label>
         </div>
         <label class="set-check"><input id="set-auto-index" type="checkbox" /> 启动时自动建立全文索引</label>
         <label class="set-check"><input id="set-restore-tabs" type="checkbox" /> 下次启动恢复上次打开的标签页</label>
+        <label class="set-check"><input id="set-split-view" type="checkbox" /> 打开 PDF 时默认显示分屏参考视图</label>
         <label class="set-check"><input id="set-invert-pages" type="checkbox" /> 深色模式下把页面反色（夜读护眼）</label>
         <label class="ld-row"><span class="ld-lbl">抓取联系邮箱</span>
           <input id="set-fetch-email" type="text" placeholder="可选；填了才能用 Unpaywall 找开放获取全文" />
@@ -697,7 +789,13 @@
   <script src="pdfjs/pdf.min.js"></script>
   <script src="../creators.js"></script>
   <script src="../query.js"></script>
+  <script src="katex/katex.min.js"></script>
+  <script src="../smartjump.js"></script>
+  <script src="../libstats.js"></script>
+  <script src="../feedparse.js"></script>
+  <script src="../readingstats.js"></script>
   <script src="../markdown.js"></script>
+  <script src="math.js"></script>
   <script src="../richtext.js"></script>
   <script src="../csl.js"></script>
   <script src="../csl-styles.js"></script>

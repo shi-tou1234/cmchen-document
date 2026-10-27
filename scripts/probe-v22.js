@@ -97,8 +97,9 @@ module.exports = `(async () => {
   }
 
   // ---------- 4. 设置里有阅读方式 ----------
+  // v22 时是 2 项；本轮新增「双页对开」后为 3 项（scroll / page / spread）
   const vm = $('#set-view-mode');
-  push('设置里有阅读方式', !!vm && vm.options.length === 2, vm ? String(vm.options.length) : 'null');
+  push('设置里有阅读方式', !!vm && vm.options.length === 3, vm ? String(vm.options.length) : 'null');
 
   return { checks };
   } catch (e) {

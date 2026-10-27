@@ -35,8 +35,10 @@ function check(name, ok, detail) {
   check('无序列表', Md.render('- a\n- b').indexOf('<ul class="md-list md-ul"><li>a</li><li>b</li></ul>') >= 0, Md.render('- a\n- b'));
   check('有序列表', Md.render('1. a\n2. b').indexOf('<ol class="md-list">') >= 0);
   check('分割线', Md.render('---').indexOf('<hr />') >= 0);
-  check('公式原样等宽', Md.render('$E=mc^2$').indexOf('<span class="md-math">$E=mc^2$</span>') >= 0, Md.render('$E=mc^2$'));
-  check('块级公式原样', Md.render('$$\na^2+b^2\n$$').indexOf('md-math-block') >= 0, Md.render('$$\na^2+b^2\n$$'));
+  check('公式占位带源码', Md.render('$E=mc^2$').indexOf('<span class="md-math" data-md-math="E=mc^2">$E=mc^2$</span>') >= 0, Md.render('$E=mc^2$'));
+  check('行内 $$ 标记块级', Md.render('前 $$x+y$$ 后').indexOf('data-md-display="1"') >= 0, Md.render('前 $$x+y$$ 后'));
+  check('块级公式原样', (() => { const h = Md.render('$$\na^2+b^2\n$$');
+    return h.indexOf('md-math-block" data-md-math="') >= 0 && h.indexOf('a^2+b^2') >= 0; })(), Md.render('$$\na^2+b^2\n$$'));
   // 安全：用户文本绝不能变成标签
   const xss = Md.render('<img src=x onerror="alert(1)"> <script>alert(1)</script>');
   check('HTML 注入被转义', xss.indexOf('<script') < 0 && xss.indexOf('<img src=x') < 0, xss);

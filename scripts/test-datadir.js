@@ -41,6 +41,7 @@ function runMode(mode) {
     version: 3,
     collections: [{ id: 'colA', name: 'A 集合', parentId: null }],
     searches: [{ id: 'sA', name: 'A 搜索', query: 'alpha' }],
+    feeds: [{ id: 'fA', url: 'https://a.example/rss', title: 'A 订阅', addedAt: 100 }],
     items: [item('itA', 'Alpha', SAMPLE), item('itB', 'Beta', SAMPLE)],
   });
   if (mode === 'merge' || mode === 'replace') {
@@ -48,6 +49,7 @@ function runMode(mode) {
       version: 3,
       collections: [{ id: 'colB', name: 'B 集合', parentId: null }],
       searches: [{ id: 'sB', name: 'B 搜索', query: 'gamma' }],
+      feeds: [{ id: 'fB', url: 'https://b.example/rss', title: 'B 订阅', addedAt: 200 }],
       items: [item(mode === 'merge' ? 'itC' : 'itR', mode === 'merge' ? 'Gamma' : 'Replacement', SAMPLE)],
     });
   }
@@ -70,11 +72,13 @@ function runMode(mode) {
     ok('move: 条目 key 一致', !!libB && ['itA', 'itB'].every((k) => libB.items.some((x) => x.key === k)), JSON.stringify(libB && libB.items.map((x) => x.key)));
     ok('move: 原目录文件保留（不破坏）', fs.existsSync(path.join(dataA, 'library.json')));
     ok('move: 集合/搜索一起迁移', !!libB && libB.collections.length === 1 && libB.searches.length === 1);
+    ok('B02 move: 订阅一起迁移', !!libB && (libB.feeds || []).length === 1 && libB.feeds[0].id === 'fA', JSON.stringify(libB && libB.feeds));
   } else if (mode === 'merge') {
     ok('merge: 目标变成 3 条', !!libB && libB.items.length === 3, String(libB && libB.items.length));
     ok('merge: 两边条目都在', !!libB && ['itA', 'itB', 'itC'].every((k) => libB.items.some((x) => x.key === k)), JSON.stringify(libB && libB.items.map((x) => x.key)));
     ok('merge: 集合合并', !!libB && ['colA', 'colB'].every((k) => libB.collections.some((c) => c.id === k)), JSON.stringify(libB && libB.collections.map((c) => c.id)));
     ok('merge: 智能收藏集合并', !!libB && ['sA', 'sB'].every((k) => libB.searches.some((s) => s.id === k)), JSON.stringify(libB && libB.searches.map((s) => s.id)));
+    ok('B02 merge: RSS 订阅合并', !!libB && ['fA', 'fB'].every((k) => (libB.feeds || []).some((f) => f.id === k)), JSON.stringify(libB && (libB.feeds || []).map((f) => f.id)));
   } else {
     ok('replace: 目标只剩自己的 1 条', !!libB && libB.items.length === 1 && libB.items[0].key === 'itR', JSON.stringify(libB && libB.items.map((x) => x.key)));
     ok('replace: 目标集合不被旧库污染', !!libB && libB.collections.length === 1 && libB.collections[0].id === 'colB', JSON.stringify(libB && libB.collections.map((c) => c.id)));

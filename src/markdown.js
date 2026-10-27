@@ -13,7 +13,9 @@
  *   - [ ] / - [x] 任务列表
  *   fromHtml()：旧富文本笔记（html）一次性转成 Markdown，迁移用。
  *
- * 公式：项目里没有数学排版引擎，$...$ / $$...$$ 按等宽原样显示（保留 LaTeX 源码）。
+ * 公式：$...$ / $$...$$ 输出带 data-md-math 属性的占位元素，正文仍是等宽源码；
+ *   渲染进程的 TroveMath（renderer/math.js）在有 KaTeX 时把它换成真正的排版结果，
+ *   没有就保持源码显示。Node 导出走主进程的同一套渲染。
  *
  * UMD：Node 里 require 可测，浏览器里挂 window.Md。
  */
@@ -65,16 +67,21 @@
       codes.push('<code>' + c + '</code>');
       return '\u0001' + (codes.length - 1) + '\u0001';
     });
-    // 公式：$$…$$ 或 $…$ 原样等宽（没有数学渲染器）
+    // 公式：$$…$$ 或 $…$ 先输出等宽源码占位；data-md-math 存 LaTeX 源（此处的文本已转义，
+    // 属性里直接复用是安全的），data-md-display 标记块级。TroveMath / 导出管线负责换真排版。
     const maths = [];
     out = out.replace(/\$\$([^$]+)\$\$/g, (_, m) => {
-      maths.push('<span class="md-math">$$' + m + '$$</span>');
+      maths.push('<span class="md-math" data-md-display="1" data-md-math="' + m + '">$$' + m + '$$</span>');
       return '\u0002' + (maths.length - 1) + '\u0002';
     });
     out = out.replace(/(^|[^\\$])\$([^$\n]+)\$/g, (m, pre, body) => {
-      maths.push('<span class="md-math">$' + body + '$</span>');
+      maths.push('<span class="md-math" data-md-math="' + body + '">$' + body + '$</span>');
       return pre + '\u0002' + (maths.length - 1) + '\u0002';
     });
+    // 双向链接 [[笔记标题]]：只输出占位，点击跳转由笔记编辑器的委托处理（按标题找独立笔记）。
+    // 必须排在图片/普通链接之前，否则 [x](y) 的正则会先吃掉一层括号。
+    out = out.replace(/\[\[([^\[\]\n]+)\]\]/g, (_, t) =>
+      '<span class="md-wikilink" data-wikilink="' + t + '" title="跳到笔记：' + t + '">' + t + '</span>');
     // 图片必须在链接之前（![x](y) 里也含 [x](y)）
     out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, alt, url) => imageTag(alt, url));
     out = out.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, t, url) => linkTag(t, url));
@@ -246,7 +253,8 @@
         const buf = [];
         let first = trimmed.replace(/^\$\$/, '');
         if (/\$\$$/.test(first) && first.length >= 2) {
-          out.push('<div class="md-math-block">$$' + esc(first.slice(0, -2)) + '$$</div>');
+          const src = esc(first.slice(0, -2));
+          out.push('<div class="md-math-block" data-md-math="' + src + '">$$' + src + '$$</div>');
           i++;
           continue;
         }
@@ -254,7 +262,8 @@
         i++;
         while (i < lines.length && !/\$\$\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
         if (i < lines.length) { buf.push(lines[i].replace(/\$\$\s*$/, '')); i++; }
-        out.push('<div class="md-math-block">$$' + esc(buf.join('\n')) + '$$</div>');
+        const src = esc(buf.join('\n'));
+        out.push('<div class="md-math-block" data-md-math="' + src + '">$$' + src + '$$</div>');
         continue;
       }
 
@@ -337,6 +346,7 @@
   function plain(text, max) {
     const s = String(text == null ? '' : text)
       .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/\[\[([^\[\]\n]+)\]\]/g, '$1')   // [[双向链接]] 摘要里只留标题
       .replace(/:::[\w-]*(\[[^\]]*)?[\s\S]*?(:::\s*$|[\n\r])/gm, ' ')
       .replace(/::(github|music)\{[^}]*\}/g, ' ')
       .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')

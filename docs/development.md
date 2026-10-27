@@ -1,6 +1,6 @@
 # 开发、测试与打包
 
-本文面向维护者。用户操作见 [README](../README.md)，数据与异步约定见 [architecture.md](architecture.md)，本轮验证见 [verification-2026-10-24.md](verification-2026-10-24.md)。
+本文面向维护者。用户操作见 [README](../README.md)，数据与异步约定见 [architecture.md](architecture.md)，本轮验证见 [verification-2026-10-26-multi-collection.md](verification-2026-10-26-multi-collection.md)。
 
 ## 环境与启动
 
@@ -17,7 +17,7 @@ PDF.js 的浏览器构建输出到 src/renderer/pdfjs/，该目录受 .gitignore
 
 ## 源码测试
 
-当前有 **79 个 test-*.js 脚本**：75 个用 Node 驱动，3 个直接运行 Electron，1 个验证打包产物。不要将 75 个 Node 驱动脚本全部称为纯 Node 单元测试，其中多数会启动真实 Electron。
+当前有 **96 个 test-*.js 脚本**：92 个用 Node 驱动，3 个直接运行 Electron，1 个验证打包产物。不要将 92 个 Node 驱动脚本全部称为纯 Node 单元测试，其中多数会启动真实 Electron。
 
 项目尚无 npm test 总入口。以下循环在单项失败后继续收集，最终以失败清单判定：
 
@@ -61,6 +61,23 @@ foreach ($name in $direct) {
 | 原生批注归属 | test-native-annos、test-r01-anno-race |
 | 笔记保真与链接 | test-note-templates-export、test-review-r02-r05、test-n02-n04-note-content、test-m01-legacy-md-note |
 | 会话与历史 | test-session、test-session-restore、test-tabs、test-nav-history |
+| 旋转与分屏 | test-reader-rotate-split（含会话二次启动恢复） |
+| 朗读 | test-reader-speech（跨页 / 句级高亮 / 暂停恢复 / 跨启动位置记忆） |
+| 收藏集并集 | test-library-multi-collection（Ctrl 多选 / 去重 / 取消 / 删除收窄） |
+| 笔记公式 | test-math（占位标记 / KaTeX 渲染 / 无 katex 降级 / 导出携带字体） |
+| 智能跳转 | test-smart-jump（标记识别 / 条目匹配 / 反向高亮 / 普通文本不触发） |
+| 双页对开 | test-two-page（搭档规则 / 并排布局 / 旋转下成立 / 设置持久化） |
+| 库统计 | test-lib-stats（回收站口径 / 年份分桶 / 面板渲染） |
+| 阅读进度 | test-reading-progress（page+pageTotal 落库 / 进度条 / 继续阅读） |
+| EndNote XML | test-enw-xml（字段映射 / 实体解码 / 坏 XML / IPC 入库） |
+| 笔记双向链接 | test-wikilinks（占位渲染 / 互跳 / 反链列表 / 不存在提示） |
+| 条件构建器 | test-query-builder（语法生成 / roundtrip / 面板回填 / 排除组合） |
+| 批注回复 | test-anno-reply（IRT 捕获 / replyTo 指向 / 面板前缀 / 去重） |
+| RSS 订阅 | test-feed（解析 / 本地源端到端 / URL 去重 / 跨启动持久） |
+| 文内引注 | test-atc-citation（编号制 / 作者-年份制 / 定位符 / 列表位次编号） |
+| 阅读时长 | test-reading-time（累加 / 非法剔除 / 落盘 / 面板热力图 / 跨重启） |
+| 用户书签 | test-bookmarks（B 键 / 侧栏跳页 / sidecar 共存 / 跨启动） |
+| 审核 B01–B12 + 复查 R01–R04 | test-audit-fixes（书签串行队列与失败回滚 / 合并订阅 / EndNote 样式与混合 CDATA / 条件构建器往返 / 组行下标 / Atom 引号 / 年份口径） |
 | 引用与格式 | test-csl、test-csl-ui、test-bib、test-formats |
 | 懒渲染与缩放 | test-lazy-render、test-zoom-mode，以及相关 reader/v 系列 |
 
@@ -86,6 +103,8 @@ scripts/ 中的 probe 脚本是正式测试辅助文件，不因文件名含 pro
 - IPC 结果和进度事件是不同投递链路；需要等待事件后再解除订阅。
 - 故障注入限定在临时进程和目录。测试保存失败时同时核对编辑器、库缓存、落盘文件、提示与后续重试。
 - 会话恢复要逐个核对内存和磁盘页码，并切到后台标签验证，不能只检查标签数量或激活项。
+- 视图旋转要同时核对「布局槽宽高互换」和「标注坐标不变」；涉及坐标的功能（选区、画笔、灯箱、放大锚点）必须用 `getScreenCTM()` 逆矩阵验一遍，不能只看页面截图。
+- 朗读测试用 `App._setSpeechDriver()` 注入假语音驱动逐句推进，不要依赖机器上是否装了语音引擎，也不要断言真的出声。
 - 修改后运行对应回归；全量通过后，只有新变化或未解决风险才需要重复扩大测试。
 
 ## 打包与产物验证
@@ -102,7 +121,7 @@ npx electron-builder --win dir
 ```powershell
 npx electron-builder --win portable --prepackaged "build/win-unpacked"
 npx electron-builder --win nsis --prepackaged "build/win-unpacked"
-node scripts/test-packaged.js "build/Trove-1.3.0-portable.exe"
+node scripts/test-packaged.js "build/Trove-1.4.0-portable.exe"
 ```
 
 不要对最终 portable 或安装包运行 rcedit：它们包含自解压附加数据，改 PE 资源可能破坏整个包，即使工具退出码为 0。

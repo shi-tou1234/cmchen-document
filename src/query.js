@@ -97,12 +97,19 @@ function tokenize(s) {
       const name = FIELD_ALIASES[fm[0].slice(0, -1).toLowerCase()];
       if (name) { field = name; i += fm[0].length; }
     }
-    // 引号短语
+    // 引号短语（内部连续两个引号表示字面引号，供条件构建器无损往返）
     const q = s[i];
     if (q && CLOSE_QUOTE[q]) {
-      const end = s.indexOf(CLOSE_QUOTE[q], i + 1);
-      const raw = end < 0 ? s.slice(i + 1) : s.slice(i + 1, end);
-      i = end < 0 ? s.length : end + 1;
+      const close = CLOSE_QUOTE[q];
+      let j = i + 1, raw = '';
+      while (j < s.length) {
+        if (s[j] === close) {
+          if (close === '"' && s[j + 1] === '"') { raw += '"'; j += 2; continue; }
+          break;
+        }
+        raw += s[j++];
+      }
+      i = j < s.length ? j + 1 : s.length;
       const tok = makeTerm(raw, true, field);
       if (tok) out.push({ k: 'TERM', tok });
       continue;
@@ -461,11 +468,101 @@ function scoreText(hay, ast) {
   return { count, score: score + count * 1000 / Math.max(60, hay.length) };
 }
 
+// ---------- 可视化条件构建器（检索 UI 的纯逻辑部分，Node 可测） ----------
+// 行模型：{ field: 'title'|'author'|...|''（全文）, op: 'contains'|'exclude', value, raw? }
+// 只生成查询语言里已有的语法：field:词 / -field:词 / 引号短语，多条件 AND。
+//
+// 往返约定（B05）：能被「AND + 字段限定 + 排除 + 短语」表达的查询，拆成行再拼回来语义等价；
+// 表达不了（OR / 括号 / 未闭合引号 / 裸引号）的整串保留成一行 raw，buildQuery 原样返回，
+// 绝不把 `author:Smith year:2024` 这种隐式 AND 拼成 `author:"Smith year:2024"`。
+function quoteValue(v) {
+  // 短语内的双引号用 "" 表示；tokenize 按同样规则还原
+  return '"' + String(v).replace(/"/g, '""') + '"';
+}
+
+function needsQuote(v) {
+  const s0 = String(v);
+  return /\s/.test(s0) || /^[-+]/.test(s0) || /["\u201c\u201d()|]/.test(s0)
+    || s0 === 'AND' || s0 === 'OR' || /^[A-Za-z_]+:/.test(s0);
+}
+
+function buildQuery(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  // 原串行：整条查询原样返回（用户在面板里直接改这段语法也照原样用）
+  if (list.length === 1 && list[0] && list[0].raw) return String(list[0].value || '').trim();
+  const parts = [];
+  for (const r of list) {
+    const v = String((r && r.value) || '').trim();
+    if (!v) continue;
+    const f = String((r && r.field) || '').trim().toLowerCase();
+    const field = (f && FIELD_ALIASES[f]) ? f + ':' : '';
+    parts.push((r.op === 'exclude' ? '-' : '') + field + (needsQuote(v) ? quoteValue(v) : v));
+  }
+  return parts.join(' AND ');
+}
+
+// 把查询串按「隐式 AND / 显式 AND / 字段限定 / 排除 / 引号短语」切成行。
+// 返回 { ok:false } 表示这段语法无法无损拆行（OR、括号、管道、未闭合或裸引号）。
+function scanQueryRows(q) {
+  const rows = [];
+  const n = q.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && /\s/.test(q[i])) i++;
+    if (i >= n) break;
+    const ch = q[i];
+    if (ch === '(' || ch === ')' || ch === '|') return { ok: false };
+    let exclude = false;
+    if (ch === '-' && i + 1 < n && !/\s/.test(q[i + 1])) { exclude = true; i++; }
+    let field = '';
+    const fm = /^([A-Za-z_]+):/.exec(q.slice(i, i + 32));
+    if (fm && FIELD_ALIASES[fm[1].toLowerCase()]) { field = FIELD_ALIASES[fm[1].toLowerCase()]; i += fm[0].length; }
+    if (i >= n) return { ok: false };
+    let value = '';
+    let phrase = false;
+    const qch = q[i];
+    if (CLOSE_QUOTE[qch]) {
+      const close = CLOSE_QUOTE[qch];
+      let j = i + 1, buf = '', closed = false;
+      while (j < n) {
+        if (q[j] === close) {
+          if (close === '"' && q[j + 1] === '"') { buf += '"'; j += 2; continue; }
+          closed = true; j++; break;
+        }
+        buf += q[j++];
+      }
+      if (!closed) return { ok: false };   // 引号没闭合：别猜用户想说什么
+      value = buf; phrase = true; i = j;
+    } else {
+      let j = i;
+      while (j < n && !/[\s()]/.test(q[j])) j++;
+      value = q.slice(i, j); i = j;
+      if (/["\u201c\u201d]/.test(value)) return { ok: false };   // 词中间的裸引号
+    }
+    if (!field && !phrase && value === 'AND') continue;   // 显式 AND 只是分隔符
+    if (!field && !phrase && value === 'OR') return { ok: false };
+    if (!field && value === '-') continue;                // 孤立减号
+    if (!value) return { ok: false };
+    rows.push({ field, op: exclude ? 'exclude' : 'contains', value });
+  }
+  return { ok: true, rows };
+}
+
+// 把查询串反向拆成行。空串返回空数组；无法无损表达的整串保留为 raw 行。
+function parseQueryToRows(query) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const scan = scanQueryRows(q);
+  if (!scan.ok || !scan.rows.length) return [{ field: '', op: 'contains', value: q, raw: true }];
+  return scan.rows;
+}
+
 return {
   fold, hasCJK, parseQuery,
   matchTokens, matchNone, anyToken, countToken, firstHit,
   matchText, evalText, evalNode, eval3, scoreText,
   creatorsText, fieldValues, matchFields, matchFieldsNot, itemHaystack, matchLibraryItem,
+  buildQuery, parseQueryToRows,
   CJK_RE,
 };
 });

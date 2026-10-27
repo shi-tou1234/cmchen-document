@@ -421,6 +421,127 @@ function rwToRecord(tags) {
   };
 }
 
+// ---------- EndNote XML（.xml，EndNote「输出样式 → XML」导出的 <records> 结构） ----------
+// 只用正则做解析（项目约定不引 XML 库）：坏条目跳过、字段救得到就救。
+// 实际的 EndNote XML 是固定结构：<record> 里一层层命名标签，正则按标签名取值够用；
+// 反嵌套的 CDATA / 实体先解码，标签内不再允许出现 <（EndNote 导出会转义）。
+const ENW_XML_TYPES = {
+  'journal article': 'journalArticle', 'book': 'book', 'book section': 'bookSection',
+  'conference paper': 'conferencePaper', 'conference proceedings': 'conferencePaper',
+  'thesis': 'thesis', 'report': 'report', 'web page': 'webpage',
+  'electronic article': 'journalArticle', 'magazine article': 'magazineArticle',
+  'newspaper article': 'newspaperArticle', 'edited book': 'book',
+};
+
+// 只解码、不 trim：字段可能由多段拼成，边界空白由 xmlText 在整段上统一处理（R03）
+function xmlDecode(v) {
+  return String(v == null ? '' : v)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (m, h) => {
+      const n = parseInt(h, 16);
+      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : '';
+    })
+    .replace(/&#(\d+);/g, (m, d) => (+d > 0 && +d < 65536 ? String.fromCharCode(+d) : ''))
+    .replace(/&amp;/g, '&');
+}
+
+// 字段值的「文本内容」：EndNote 会把一段文字包进 <style face="..."> / <i> 之类的内联标签，
+// 这些标签不是正文。先剥内联标签（不插空格，避免把单词拆开），其余标签按空白处理，
+// 再解码实体 —— 顺序很关键：先剥标签再解码，才不会被 &lt;b&gt; 这类合法文本误剥。
+//
+// 注意（R03）：这里不能 trim。字段可能由「普通文本 + CDATA + 普通文本」多段拼成，
+// `Before <![CDATA[Middle]]> After` 逐段 trim 会粘成 `BeforeMiddleAfter`。
+// 各段按原样拼接，最后对整段做一次空白规范化：这样 `pre<![CDATA[fix]]>` 仍是 `prefix`，
+// 而 `Alpha <![CDATA[<Beta>]]> Gamma` 仍是 `Alpha <Beta> Gamma`。
+const INLINE_XML_TAG = /<\/?(?:style|i|b|u|em|strong|sup|sub|span|font|small|big)\b[^>]*>/gi;
+function xmlPlainText(inner) {
+  return String(inner || '')
+    .replace(INLINE_XML_TAG, '')
+    .replace(/<[^>]*>/g, ' ');
+}
+// CDATA 段原样保留（段内不解实体），其余片段剥标签并解实体；拼完再统一规范化空白
+function xmlText(inner) {
+  const s0 = String(inner || '');
+  let out = '', i = 0;
+  while (i < s0.length) {
+    const start = s0.indexOf('<![CDATA[', i);
+    if (start < 0) { out += xmlDecode(xmlPlainText(s0.slice(i))); break; }
+    out += xmlDecode(xmlPlainText(s0.slice(i, start)));
+    const end = s0.indexOf(']]>', start + 9);
+    if (end < 0) { out += s0.slice(start + 9); break; }
+    out += s0.slice(start + 9, end);
+    i = end + 3;
+  }
+  return s(out.replace(/\s+/g, ' '));
+}
+
+// 抓「标签对」里的原始内容（保留内层标签）——只给需要继续按标签下钻的结构用
+function xmlRaw(block, tag) {
+  const m = new RegExp('<' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + tag + '>', 'i').exec(block);
+  return m ? m[1] : '';
+}
+
+// 抓「标签对」里的内容（不跨条目边界；内容里的转义标签不会干扰）
+function xmlTag(block, tag) {
+  const m = new RegExp('<' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + tag + '>', 'i').exec(block);
+  return m ? xmlText(m[1]) : '';
+}
+
+function xmlTagAll(block, tag) {
+  const out = [];
+  const re = new RegExp('<' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + tag + '>', 'gi');
+  let m;
+  while ((m = re.exec(block))) out.push(xmlText(m[1]));
+  return out;
+}
+
+function parseEndNoteXml(text) {
+  const records = [];
+  // 记录边界用「自闭合或成对的 <record>」；EndNote 的 record 不会嵌套
+  const blocks = String(text || '').split(/<record[\s>]/i).slice(1);
+  for (const raw of blocks) {
+    const block = raw.replace(/<\/record>[\s\S]*$/i, '');
+    const title = xmlTag(block, 'title');
+    if (!title && !/<ref-type/i.test(block)) continue;   // 空壳跳过
+    const refTypeMatch = /<ref-type[^>]*\bname\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(block);
+    const refTypeName = refTypeMatch ? (refTypeMatch[1] != null ? refTypeMatch[1] : refTypeMatch[2]) : '';
+    const names = (list, type) => list.map((x) => {
+      const p = Creators.parseName(x);
+      return { firstName: p.firstName, lastName: p.lastName, creatorType: type };
+    }).filter((c) => c.firstName || c.lastName);
+    const keywords = [];
+    for (const k of xmlTagAll(block, 'keyword')) for (const part of k.split(/[;,]/)) if (s(part)) keywords.push(s(part));
+    const doi = xmlTag(block, 'electronic-resource-num') || xmlTag(block, 'doi');
+    const url = xmlTagAll(block, 'url')[0] || '';
+    const pages = xmlTag(block, 'pages');
+    const year = yearOf(xmlTag(block, 'year') || xmlTag(block, 'date'));
+    const contributors = xmlRaw(block, 'contributors') || block;
+    records.push({
+      itemType: ENW_XML_TYPES[String(refTypeName).toLowerCase()] || 'document',
+      title: title || '未命名文献',
+      creators: [
+        ...names(xmlTagAll(contributors, 'author'), 'author'),
+        ...names(xmlTagAll(contributors, 'editor'), 'editor'),
+      ],
+      year,
+      publication: xmlTag(block, 'secondary-title')
+        || xmlTag(xmlRaw(block, 'periodical'), 'full-title')
+        || xmlTag(block, 'full-title'),
+      volume: xmlTag(block, 'volume'),
+      issue: xmlTag(block, 'number'),
+      pages,
+      doi: doi.replace(/^https?:\/\/doi\.org\//i, ''),
+      url,
+      abstract: xmlTag(block, 'abstract'),
+      language: xmlTag(block, 'language'),
+      tags: keywords.slice(0, 20),
+      fields: { issn: xmlTag(block, 'issn'), isbn: xmlTag(block, 'isbn'), publisher: xmlTag(block, 'publisher') },
+    });
+  }
+  return records;
+}
+
 function detectFormat(text, filename) {
   const ext = String(filename || '').toLowerCase().replace(/^.*\./, '');
   if (ext === 'bib' || ext === 'bibtex') return 'bibtex';
@@ -428,11 +549,13 @@ function detectFormat(text, filename) {
   if (ext === 'json') return 'csljson';
   if (ext === 'enw' || ext === 'enlp') return 'endnote';
   if (ext === 'refworks' || ext === 'rw') return 'refworks';
+  if (ext === 'xml' || ext === 'endnotexml') return 'endnotexml';
   if (/^\s*%0\s/m.test(text)) return 'endnote';
   if (/^\s*RT\s+\S/m.test(text) && /^\s*A1\s/m.test(text)) return 'refworks';
   if (/^\s*@[A-Za-z]+\s*[{(]/m.test(text)) return 'bibtex';
   if (/^\s*TY\s{1,2}-/m.test(text)) return 'ris';
   if (/^\s*[\[{]/.test(text) && /"type"\s*:/.test(text)) return 'csljson';
+  if (/<records?[\s>]/i.test(text) && /<\/record>/i.test(text)) return 'endnotexml';
   return 'bibtex';
 }
 
@@ -441,6 +564,10 @@ function parseRefs(text, filename) {
   if (format === 'ris') return { format, records: parseRis(text) };
   if (format === 'endnote') return { format, records: parseEndNote(text) };
   if (format === 'refworks') return { format, records: parseRefWorks(text) };
+  if (format === 'endnotexml') {
+    try { return { format, records: parseEndNoteXml(text) }; }
+    catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
+  }
   if (format === 'csljson') {
     try { return { format, records: parseCslJson(text) }; }
     catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
@@ -639,7 +766,7 @@ function recordsToCslJson(records) {
 }
 
 module.exports = {
-  parseBibtex, parseRis, parseEndNote, parseRefWorks, parseRefs, detectFormat,
+  parseBibtex, parseRis, parseEndNote, parseRefWorks, parseEndNoteXml, parseRefs, detectFormat,
   recordsToBibtex, recordsToRis, parseCslJson, recordsToCslJson,
   _bibToRecord: bibToRecord, _risToRecord: risToRecord, _splitAuthors: splitAuthors,
   _cslToRecord: cslToRecord,

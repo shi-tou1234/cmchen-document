@@ -1,6 +1,6 @@
 'use strict';
 /*
- * 生成《Trove 与 Zotero 功能差距评估报告》更新版 PDF（2026-10-24，评估对象 v1.3.0）。
+ * 生成《Trove 与 Zotero 功能差距评估报告》更新版 PDF（2026-10-27，评估对象 v1.4.0）。
  * 用 Electron 的 printToPDF 渲染 HTML（中文字体走系统，别引额外依赖）。
  * 运行：npx electron scripts/make-report.js
  */
@@ -10,6 +10,8 @@ const os = require('os');
 const path = require('path');
 
 app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
 
 const OUT_DIR = 'C:/Users/24256/Desktop';
 const OUT = path.join(OUT_DIR, 'Trove与Zotero功能差距评估报告.pdf');
@@ -60,65 +62,72 @@ const HTML = `<!DOCTYPE html>
 </style></head><body>
 
 <h1>Trove 与 Zotero 功能差距评估报告</h1>
-<div class="sub">2026-10-24 更新版 · 评估对象：Trove 1.3.0（提交 7d78a8b）· 在 2026-10-22 版基础上同步当前实现状态</div>
+<div class="sub">2026-10-27 更新版 · 评估对象：Trove 1.4.0（tag v1.4.0）· 在 2026-10-24 版基础上同步本轮实现状态</div>
 
 <div class="note">
-  <b>这一版的核心变化</b>：10-22 版列出的剩余硬缺口已全部落地——自研 CSL 引用引擎与多格式参考文献导出、
-  批量抓取与网页快照、检索 OR / 括号嵌套、大库视口挂载、PDF 原生批注导入；另新增搜索结果分页与类型切换、
-  标注类型 / 颜色筛选、阅读会话恢复、阅读导航历史、笔记模板与自包含导出。三轮独立评审核查
-  （R01–R06、N01–N05、M01）共 12 个缺陷全部修复并有回归覆盖。下面按模块重新打分，并列出仍然缺失的能力。
+  <b>这一版的核心变化</b>：上一版列为「建议下一轮单独做」的重交互阅读能力全部落地——双页对开、整篇旋转
+  0/90/180/270、只读分屏参考视图、跨页连续朗读与句级高亮、用户书签；文献库补上 RSS / Atom 期刊订阅、库统计
+  （含阅读时长热力图）、阅读进度与「继续阅读」、检索可视化条件构建器、多集合并集、EndNote XML 导入；笔记补上
+  双向链接与 KaTeX 公式；标注补上 PDF 原生批注的回复关系。同时把三轮外部审核报出的 17 个问题（B01–B12、
+  R01–R05）全部闭环并落成固定回归。下面按模块重新打分。
 </div>
 
 <h2>一、能力对照（上一版 → 当前）</h2>
 
 <table class="avoid-break">
-  <tr><th style="width:16%">模块</th><th style="width:30%">上一版状态（10-22）</th><th style="width:34%">当前状态（1.3.0）</th><th style="width:20%">结论</th></tr>
+  <tr><th style="width:16%">模块</th><th style="width:30%">上一版状态（10-24）</th><th style="width:34%">当前状态（1.4.0）</th><th style="width:20%">结论</th></tr>
   <tr>
     <td><b>检索</b></td>
-    <td>差 OR / 括号嵌套；结果无分页与来源切换</td>
-    <td>OR、显式 AND、括号、整组排除；结果分页（每页 120）+ 全部 / 文献 / 正文 / 批注 / 笔记类型切换与计数 + 展开更多；独立笔记字段限定修复</td>
-    <td class="c"><span class="tag t-done">已补齐</span></td>
+    <td>OR / 括号、分页与类型切换已通；缺可视化条件构建器</td>
+    <td>可视化条件构建器（字段 + 排除 + 多行 AND，无损往返；OR / 括号原串保留不误改）；列表快速筛选与全文检索共用一套语法</td>
+    <td class="c"><span class="tag t-done">已补齐</span>查询仍在主进程</td>
   </tr>
   <tr>
     <td><b>标注</b></td>
-    <td>库对象层完整；缺 PDF 原生批注导入与库级筛选</td>
-    <td>原生批注导入（高亮 / 下划线 / 波浪线 / 删除线 / 便签 / 文字框 / 手绘 / 方框 / 直线，nativeId 去重，旋转页与 CropBox）；标注库按类型 / 颜色筛选；导出跳过数量可见</td>
-    <td class="c"><span class="tag t-done">已补齐</span>缺回复树 / 扁平化</td>
+    <td>原生批注导入与库级筛选已通；缺回复关系</td>
+    <td>原生批注回复关系（/IRT）随导入保留，面板与标注库显示「↳ 回复」；扁平化批注仍无法恢复</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺嵌套回复树</td>
   </tr>
   <tr>
     <td><b>笔记</b></td>
-    <td>Markdown 编辑器完整；缺模板与导出</td>
-    <td>课程笔记 / 论文卡片 / 摘录汇总模板；自包含导出（HTML 含图片包 / Markdown 带相对图片目录）；富文本子笔记结构保真导出；保存失败不假导出</td>
-    <td class="c"><span class="tag t-done">已补齐</span>缺公式 / 表格编辑</td>
+    <td>模板与自包含导出已通；缺公式与双向链接</td>
+    <td>KaTeX 公式渲染（$…$ / $$…$$，无 katex 时降级为原文）；独立笔记 [[标题]] 双向链接与反链列表；表格仍是 Markdown 语法</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺表格可视化编辑</td>
   </tr>
   <tr>
     <td><b>组织</b></td>
-    <td>差大库虚拟滚动</td>
-    <td>列表视口挂载（1 万条刷新约 0.5 秒，整页约 2 千 DOM 节点）；多选 / 批量 / 撤销保持一致</td>
-    <td class="c"><span class="tag t-done">已补齐</span></td>
+    <td>大库视口挂载已通；缺多集合并集</td>
+    <td>收藏集 Ctrl 多选并集视图；库统计面板（类型 / 出版年份 / 入库年份 / 标签 Top / 附件与笔记覆盖率 / 阅读时长热力图）</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺群组库</td>
   </tr>
   <tr>
     <td><b>阅读器</b></td>
-    <td>差会话恢复与导航历史</td>
-    <td>启动恢复上次标签页（20 个、激活项与页码，失联跳过）；导航历史 Alt+←/→ 与鼠标侧键；放大模式（滚轮连续缩放）</td>
-    <td class="c"><span class="tag part">部分补齐</span>缺旋转 / 分屏 / reflow</td>
+    <td>会话恢复、导航历史、放大模式已通；缺旋转 / 分屏 / 对开</td>
+    <td>双页对开（封面独占、偶左奇右）、整篇旋转 0/90/180/270（标注坐标不变）、只读分屏参考视图、跨页连续朗读 + 句级高亮 + 位置记忆、用户书签（B 键，与标注同 sidecar）、阅读进度上报、阅读时长统计</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺 reflow</td>
   </tr>
   <tr>
     <td><b>引用</b></td>
-    <td>5 种硬编码样式，无 CSL、无 Word 导出</td>
-    <td>自研 CSL 1.0.2 子集（macro / group / choose / names / date / number / label / sort / 页码范围）；3 份内置 CSL + 导入任意 .csl；参考文献表导出 HTML / Word(.doc) / RTF</td>
-    <td class="c"><span class="tag t-done">已补齐</span>投稿级逐字一致建议官方样式</td>
+    <td>CSL 子集与多格式导出已通；缺文内引注定位符</td>
+    <td>文内引注定位符（编号制 [n, p. 5] / 作者-年份制 (Smith, 2024, p. 5)）；智能跳转：点 [12] / [Smith, 2020] 跳到参考文献条目，点条目反查正文标记，不依赖文档自带链接</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺同上 / 前引与 Word 活引用</td>
   </tr>
   <tr>
-    <td><b>抓取</b></td>
-    <td>三路抓全文已通；缺快照与批量</td>
-    <td>批量抓取（逐条进度 / 中途取消 / 已有附件跳过）；网页快照 MHTML + 首屏 PNG；下载后自动入索引</td>
-    <td class="c"><span class="tag t-done">已补齐</span>缺机构代理</td>
+    <td><b>抓取与发现</b></td>
+    <td>批量抓取、网页快照已通；缺订阅</td>
+    <td>RSS / Atom 期刊订阅：按需拉取（点开才联网，不后台轮询）、条目一键收录为 webpage 条目并按 URL 防重复；仍不做机构代理</td>
+    <td class="c"><span class="tag part">部分补齐</span>缺机构代理与推送</td>
+  </tr>
+  <tr>
+    <td><b>导入导出</b></td>
+    <td>备份资源闭环 + 笔记导出；缺 EndNote XML</td>
+    <td>EndNote XML 导入（内联样式、CDATA、实体、单双引号属性、Book Section 类型）；仍缺 RDF / MARC</td>
+    <td class="c"><span class="tag t-done">已补齐</span>缺 RDF / MARC</td>
   </tr>
   <tr>
     <td><b>可靠性</b></td>
-    <td>—</td>
-    <td>保存失败可见并回滚（不再假保存）；迁移 / 备份 / 恢复携带图片 / 快照 / CSL / 托管附件并回滚；附件重定位保留标注；三轮评审核查 R01–R06、N01–N05、M01 全部闭环</td>
+    <td>三轮评审核查 12 个缺陷闭环</td>
+    <td>三轮外部审核 17 个缺陷闭环（B01–B12、R01–R05）：书签保存的跨文档串写与并发覆盖、合并数据目录漏订阅、EndNote 样式污染、条件构建器往返改义、对开位图泄漏与快速跳页残留、富文档继承对开、跨页参考文献首次反查、Atom 单引号链接、统计年份口径</td>
     <td class="c"><span class="tag t-done">已补齐</span></td>
   </tr>
 </table>
@@ -126,65 +135,65 @@ const HTML = `<!DOCTYPE html>
 <h2>二、对齐度重新评估</h2>
 
 <div class="kpi">
-  <div><b>75% → 87%</b><span>加权总对齐度（按使用频次加权）</span></div>
-  <div><b>10-22 版缺口 → 0</b><span>上一版列出的硬缺口剩余未做</span></div>
-  <div><b>79 个</b><span>测试脚本（75 Node 驱动 + 3 直跑 + 1 打包冒烟）</span></div>
+  <div><b>87% → 92%</b><span>加权总对齐度（按使用频次加权）</span></div>
+  <div><b>16 项</b><span>上一版列出的缺口本轮补齐</span></div>
+  <div><b>96 个</b><span>测试脚本（92 Node 驱动 + 3 直跑 + 1 打包冒烟）</span></div>
 </div>
 
 <table class="avoid-break">
   <tr><th style="width:22%">模块</th><th style="width:12%">上一版</th><th style="width:12%">当前</th><th>主要依据</th></tr>
-  <tr><td>检索</td><td class="c">85%</td><td class="c ok">92%</td><td>OR / 括号、分页与类型切换；差可视化条件构建器</td></tr>
-  <tr><td>标注</td><td class="c">90%</td><td class="c ok">93%</td><td>原生批注导入、类型 / 颜色筛选；差回复树与扁平化批注</td></tr>
-  <tr><td>笔记</td><td class="c">72%</td><td class="c ok">85%</td><td>模板 + 自包含导出；差公式渲染与表格可视化编辑</td></tr>
-  <tr><td>组织</td><td class="c">92%</td><td class="c ok">94%</td><td>大库视口挂载；差多集合并集与群组（缓做）</td></tr>
-  <tr><td>引用</td><td class="c">55%</td><td class="c ok">80%</td><td>CSL 子集 + Word / HTML / RTF 导出；差文内引注定位符</td></tr>
-  <tr><td>阅读器</td><td class="c">78%</td><td class="c ok">85%</td><td>会话恢复、导航历史、放大模式；差旋转 / 分屏 / reflow</td></tr>
-  <tr><td>抓取</td><td class="c">45%</td><td class="c ok">80%</td><td>批量 + 快照 + 自动索引；差机构代理与非开放获取</td></tr>
-  <tr><td>导入导出</td><td class="c">75%</td><td class="c ok">85%</td><td>备份资源闭环 + 笔记导出；差 RDF / MARC / EndNote XML</td></tr>
+  <tr><td>检索</td><td class="c">92%</td><td class="c ok">95%</td><td>可视化条件构建器 + 无损往返；差查询移出主进程</td></tr>
+  <tr><td>标注</td><td class="c">93%</td><td class="c ok">95%</td><td>原生批注回复关系；差嵌套回复树与扁平化批注</td></tr>
+  <tr><td>笔记</td><td class="c">85%</td><td class="c ok">93%</td><td>公式渲染 + 双向链接；差表格可视化编辑</td></tr>
+  <tr><td>组织</td><td class="c">94%</td><td class="c ok">96%</td><td>多集合并集 + 统计面板；差群组（保持不做）</td></tr>
+  <tr><td>引用</td><td class="c">80%</td><td class="c ok">88%</td><td>文内引注定位符 + 智能跳转；差同上 / 前引、作者消歧、Word 活引用</td></tr>
+  <tr><td>阅读器</td><td class="c">85%</td><td class="c ok">93%</td><td>对开 / 旋转 / 分屏 / 朗读 / 书签 / 进度；差 reflow 重排</td></tr>
+  <tr><td>抓取与发现</td><td class="c">80%</td><td class="c ok">82%</td><td>RSS 订阅补上「发现」环节；差机构代理与非开放获取</td></tr>
+  <tr><td>导入导出</td><td class="c">85%</td><td class="c ok">90%</td><td>EndNote XML；差 RDF / MARC</td></tr>
 </table>
 
 <h2>三、仍然缺失什么（按影响排序）</h2>
 
-<h3>1. 引用（投稿级一致性）</h3>
+<h3>1. 数据层与性能（重度使用场景，最值得投入）</h3>
 <ul>
-  <li><b>CSL 完全兼容</b>：自研子集覆盖参考文献表常用元素；文内引注定位符、同上 / 前引、作者消歧不做。投稿要求逐字一致时，从 zotero.org/styles 导入官方 .csl。</li>
+  <li><b>查询移出主进程</b>：搜索 / 统计仍同步扫 JSON，大库查询时输入可能被拖慢；增量 IPC 未做。这是目前唯一影响「大库手感」的结构性问题。</li>
+  <li>全文索引仍是全量重建（单文件按 mtime / size 跳过）；扫描件 OCR；PDF 副本中文文字标注受 Helvetica 编码限制（需嵌 CJK 字体）。</li>
+</ul>
+
+<h3>2. 引用（投稿级一致性）</h3>
+<ul>
+  <li>CSL 仍是自研子集：同上 / 前引、作者消歧、et-al 细节不做；投稿要求逐字一致时，从 zotero.org/styles 导入官方 .csl。</li>
   <li>HTML 内嵌 COinS、Word 活引用插件——按项目定位暂缓。</li>
 </ul>
 
-<h3>2. 阅读器（重交互，建议单独一轮）</h3>
+<h3>3. 阅读器（剩下的都是重工程）</h3>
 <ul>
-  <li><b>页面旋转（90 / 180 / 270）</b>：需统一 overlay 坐标体系（标注、选区、高亮都按未旋转坐标存），改动面大。</li>
-  <li><b>只读分屏 / 双页对照</b>；PDF reflow 重排；跨页连续朗读续读。</li>
-</ul>
-
-<h3>3. 数据与性能（重度使用场景）</h3>
-<ul>
-  <li><b>查询移出主进程</b>：搜索 / 统计仍同步扫 JSON，大库查询时输入可能被拖慢；增量 IPC 未做。</li>
-  <li>全文索引全量重建仍是全量（单文件已按 mtime / size 跳过）；扫描件 OCR；PDF 副本中文文字标注字体限制（Helvetica，需嵌 CJK 字体）。</li>
+  <li>PDF reflow 重排（按屏宽重排正文）；跨文档双页对照（当前对开只针对同一份文档）。</li>
+  <li>标注的嵌套回复树：导入时只保留 replyTo 关系，不重建树形结构。</li>
 </ul>
 
 <h3>4. 笔记与表格</h3>
 <ul>
-  <li>公式渲染（LaTeX / KaTeX，当前 $…$ 按等宽原样显示）；表格增删行列的可视化编辑；笔记双向链接。</li>
+  <li>表格增删行列的可视化编辑（当前按 Markdown 语法手写）。</li>
 </ul>
 
 <h3>5. 明确不做（保持产品定位）</h3>
 <p>云同步、群组库、协作、Web Library、移动端、插件系统、跨平台 —— 与「无账号 / 无网络 / 单窗口 / Windows / JSON / 零原生依赖」的前提冲突，不在规划内。</p>
 
 <h2>四、本轮验证</h2>
-<p>当前共 <b>79 个测试脚本</b>：75 个 Node 驱动 + 3 个直跑 Electron（画笔 / 真实输入 / 懒渲染）+ 1 个打包产物冒烟
-（17 项），全量退出码为 0。三轮独立评审核查的 12 个缺陷（R01–R06 跨文档串写 / 模板选区 / 导出完整性 /
-会话截断；N01–N05 保存确认 / 富文本保真 / 缺图占位 / 链接转义 / 恢复页码；M01 旧 Markdown 链接）各有回归，
-外部诊断全部转为「验证修复」通过。安装包 exe 已内嵌 Trove 名称与图标（文件关联显示正常）。</p>
+<p>当前共 <b>96 个测试脚本</b>：92 个 Node 驱动 + 3 个直跑 Electron（画笔 / 真实输入 / 懒渲染）+ 1 个打包产物冒烟，
+源码回归 95 个全部退出 0（打包冒烟在发版后单独跑）。三轮外部审核的 17 个缺陷各有固定回归：其中书签保存的
+时序问题用「源码原函数 + 受控 IPC 时序」覆盖 10 组场景（并发添加、同页连按、成功/失败组合、切文档、
+A→B→A、关闭文档），并在真实 Electron 里用真实 preload 与隔离 sidecar 复核内存与磁盘一致。</p>
 
 <h2>五、结论</h2>
-<p>10-22 版指出的两大硬缺口已补齐：<b>抓取</b>（三路全文 + 批量 + 快照 + 自动索引）与<b>引用</b>
-（自研 CSL 子集 + HTML / Word / RTF 导出）。加上检索分页与类型切换、标注导入与筛选、笔记模板与自包含导出、
-会话恢复与导航历史、大库视口挂载，Trove 在<b>阅读 + 标注 + 笔记 + 检索 + 整理</b>主线上的对齐度由 75% 升至
-<b>87%</b>。剩余差距集中在两类：重交互的阅读能力（旋转 / 分屏 / reflow，建议下一轮单独做）与重工程的数据层
-优化（查询调度 / OCR）；均不阻塞日常使用。</p>
+<p>上一版判断「阅读器的重交互能力建议单独一轮做」，这一轮做完后<b>阅读器</b>从 85% 升到 93%：对开、旋转、
+分屏、朗读、书签、智能跳转、阅读进度都可用，且旋转不改变标注坐标、对开只保留当前页组位图、快速跳页不再
+积累离屏画布。加上检索条件构建器、笔记公式与互链、多集合并集、订阅与统计、EndNote XML，Trove 在
+<b>阅读 + 标注 + 笔记 + 检索 + 整理</b>主线上的对齐度由 87% 升至 <b>92%</b>。剩余差距集中在两类：数据层
+性能（查询调度 / OCR）与投稿级引用细节；都不阻塞日常使用。</p>
 
-<footer>Trove · 本地文献库与 PDF 阅读器 · 报告生成于 2026-10-24 · 评估对象 v1.3.0（提交 7d78a8b）· 数据来源：本仓库 CHANGELOG 与测试套件</footer>
+<footer>Trove · 本地文献库与 PDF 阅读器 · 报告生成于 2026-10-27 · 评估对象 v1.4.0 · 数据来源：本仓库 CHANGELOG 与测试套件</footer>
 
 </body></html>`;
 
@@ -198,8 +207,8 @@ app.whenReady().then(async () => {
     webPreferences: { offscreen: false },
   });
   try {
-    // data URL：绕开 file:// 路径在部分环境的加载失败
-    await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(HTML));
+    // 先走临时文件（file://）：内容变长后 data URL 会超过加载上限，报 ERR_FAILED
+    await win.loadFile(tmpHtml);
     // 等一帧，确保字体与布局稳定
     await new Promise((r) => setTimeout(r, 600));
     const pdf = await win.webContents.printToPDF({

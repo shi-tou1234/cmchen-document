@@ -2,5 +2,6 @@ node_modules/
 build/
 dist/
 src/renderer/pdfjs/
+src/renderer/katex/
 *.log
 assets/sample-annotated.pdf

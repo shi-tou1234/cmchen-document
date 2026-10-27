@@ -17,6 +17,7 @@ const DEFAULTS = {
   hintSeen: false,        // v19：首次上手提示是否已经看过
   invertPages: false,     // v20：深色模式下把页面反色（护眼）
   viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
+  splitView: false,      // v34：打开 PDF 时默认显示只读分屏参考视图
   fetchEmail: '',        // v9：抓 PDF 全文时给 Unpaywall 的联系邮箱（留空则跳过 Unpaywall）
 };
 
@@ -52,7 +53,8 @@ function sanitize(raw) {
   if (typeof src.restoreTabs === 'boolean') out.restoreTabs = src.restoreTabs;
   if (typeof src.hintSeen === 'boolean') out.hintSeen = src.hintSeen;
   if (typeof src.invertPages === 'boolean') out.invertPages = src.invertPages;
-  if (src.viewMode === 'page' || src.viewMode === 'scroll') out.viewMode = src.viewMode;
+  if (src.viewMode === 'page' || src.viewMode === 'scroll' || src.viewMode === 'spread') out.viewMode = src.viewMode;
+  if (typeof src.splitView === 'boolean') out.splitView = src.splitView;
   if (typeof src.fetchEmail === 'string') {
     const e = src.fetchEmail.trim();
     // 只要像邮箱就行，别把奇怪的东西存进去

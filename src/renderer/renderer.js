@@ -30,11 +30,17 @@ const App = window.App = {
     fileName: '',
     filePath: '',
     viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
+    rotation: 0,           // v34：整篇文档的视图旋转 0/90/180/270（只改显示，不改原文件）
+    split: false,          // v34：分屏参考视图（用户偏好，富文档时自动隐藏）
+    refPage: 1,            // v34：参考视图页码
     annos: new Map(),    // pageNum -> shape[]
     rendered: new Map(), // pageNum -> bool
     visible: new Set(),  // 当前视口内的页
     textCache: new Map(), // pageNum -> TextItem[]
     search: { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 }, // rects: pageNum -> [{x,y,w,h}]
+    sj: { byPage: new Map(), builtTo: 0 },  // 智能跳转：按页存的跨页行缓存 page → [{page,text,x,y,w,h,idx}]
+    bookmarks: [],   // 用户书签 [{page, at, label}]，存标注 sidecar
+    bookmarksReady: null,   // 这一份文档的书签读盘 promise（首次操作前要等它）
   },
   tabs: [],          // v12：多标签页会话（内存里保留原始字节，切换不重新读盘）
   activeTabId: null,
@@ -53,6 +59,49 @@ function availH() { return Math.max(200, App.els.viewer.clientHeight - 32); }
 // 没有打开文档时，页宽 / 页高还是占位值 1，算缩放会得到 941 倍这种废数
 function hasDoc(s) { return !!(s.pdfDoc || (s.richPages && s.richPages.length)); }
 
+// ---------- 视图旋转（v34） ----------
+// 约定：标注、选区、搜索高亮、图片位置全部仍按「未旋转页面坐标」存。
+// 旋转只发生在 .page-rot 这一层：画布 / 文本层 / 两个标注层一起转。
+// 因此：改旋转 = 换布局槽尺寸 + 换 CSS transform，数据层一行都不用动。
+function normRot(r) {
+  const n = Math.round((Number(r) || 0) / 90) * 90;
+  return ((n % 360) + 360) % 360;
+}
+// 旋转 90/270 时页面外框宽高互换；缩放必须按互换后的尺寸算，否则「适应宽度」会算出界
+function effDims(w, h, rot) {
+  return normRot(rot) % 180 ? { w: h, h: w } : { w, h };
+}
+// 未旋转页面坐标 → 旋转后布局槽内的偏移（不依赖 DOM，用于平滑滚动期间的定位）
+function unitToSlotOffset(pageEl, ux, uy) {
+  const u = pageEl._unit || { w: 0, h: 0 };
+  const s = App.state.scale || 1;
+  const rot = normRot(App.state.rotation);
+  if (rot === 90) return { x: (u.h - uy) * s, y: ux * s };
+  if (rot === 180) return { x: (u.w - ux) * s, y: (u.h - uy) * s };
+  if (rot === 270) return { x: uy * s, y: (u.w - ux) * s };
+  return { x: ux * s, y: uy * s };
+}
+
+// 客户端坐标 → 页面单位坐标。PDF 页走标注 SVG 的逆 CTM：缩放、CSS 旋转都自动算进去。
+// 富文档没有旋转，仍按页面矩形 + CSS zoom 换算（getScreenCTM 对 zoom 的处理各版本不一致，别赌）。
+function clientToUnit(pageEl, clientX, clientY) {
+  if (!pageEl) return { x: 0, y: 0 };
+  const s = App.state;
+  if (s.mode !== 'rich') {
+    const svg = pageEl.querySelector('.anno') || pageEl.querySelector('.anno-base');
+    const ctm = svg && svg.getScreenCTM ? svg.getScreenCTM() : null;
+    if (ctm) {
+      const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+      return { x: p.x, y: p.y };
+    }
+  }
+  const r = pageEl.getBoundingClientRect();
+  const z = s.scale || 1;
+  return { x: (clientX - r.left) / z, y: (clientY - r.top) / z };
+}
+App.clientToUnit = clientToUnit;
+App.unitToSlotOffset = (pageEl, ux, uy) => unitToSlotOffset(pageEl, ux, uy);
+
 function computeScale() {
   const s = App.state;
   if (!hasDoc(s)) return 1;
@@ -63,8 +112,11 @@ function computeScale() {
     return parseFloat(s.scaleMode) || 1;
   }
   if (s.scaleMode === 'page-actual') return 1;
-  if (s.scaleMode === 'page-width') return availW() / s.unitMaxW;
-  if (s.scaleMode === 'page-fit') return Math.min(availW() / s.unitMaxW, availH() / s.unitMaxH);
+  const d = effDims(s.unitMaxW, s.unitMaxH, s.rotation);
+  // 双页对开：两页并排，一页只占约半幅宽（再扣掉页间距）
+  const half = (s.viewMode === 'spread') ? Math.max(160, (availW() - 24) / 2) : availW();
+  if (s.scaleMode === 'page-width') return half / d.w;
+  if (s.scaleMode === 'page-fit') return Math.min(half / d.w, availH() / d.h);
   return parseFloat(s.scaleMode) || 1;
 }
 
@@ -84,13 +136,21 @@ function applyLayout() {
     const el = App.pageEl(n);
     if (!el) continue;
     const u = el._unit;
-    const w = Math.round(u.w * s.scale), h = Math.round(u.h * s.scale);
+    const d = effDims(u.w, u.h, s.rotation);
+    const w = Math.round(d.w * s.scale), h = Math.round(d.h * s.scale);
+    // 外层 .page = 旋转后的布局槽；内层 .page-rot = 未旋转的页面本体
     el.style.width = w + 'px';
     el.style.height = h + 'px';
+    const rotEl = el.querySelector('.page-rot');
+    if (rotEl) {
+      rotEl.style.width = Math.round(u.w * s.scale) + 'px';
+      rotEl.style.height = Math.round(u.h * s.scale) + 'px';
+      rotEl.style.transform = 'translate(-50%, -50%) rotate(' + normRot(s.rotation) + 'deg)';
+    }
     const base = el.querySelector('.anno-base'), anno = el.querySelector('.anno');
-    for (const svg of [base, anno]) { if (svg) { svg.style.width = w + 'px'; svg.style.height = h + 'px'; } }
-    // 文本层 / 搜索高亮层与 SVG 同策略：内部用单位坐标，外层用 scale 拉伸
-    for (const cls of ['.textlayer', '.hl-layer']) {
+    for (const svg of [base, anno]) { if (svg) { svg.style.width = Math.round(u.w * s.scale) + 'px'; svg.style.height = Math.round(u.h * s.scale) + 'px'; } }
+    // 文本层 / 搜索高亮层 / 朗读高亮层与 SVG 同策略：内部用单位坐标，外层用 scale 拉伸
+    for (const cls of ['.textlayer', '.hl-layer', '.speech-layer', '.sj-layer']) {
       const ly = el.querySelector(cls);
       if (ly) { ly.style.width = u.w + 'px'; ly.style.height = u.h + 'px'; ly.style.transform = 'scale(' + s.scale + ')'; }
     }
@@ -100,6 +160,10 @@ function applyLayout() {
 }
 
 // ---------- 懒渲染 ----------
+// 正在渲染的页（任务未结束）。回收不能只看 rendered=true：
+// 快速跳页时上一组的任务还在跑，rendered 仍是 false，但它们已经分配了画布（R02）。
+const activeRenders = new Set();
+
 function renderPageNum(n) {
   const s = App.state;
   if (s.mode !== 'pdf') return;
@@ -114,15 +178,23 @@ function renderPageNum(n) {
   canvas.style.height = Math.floor(viewport.height) + 'px';
   const ctx = canvas.getContext('2d');
   if (el._task) { try { el._task.cancel(); } catch (_) {} }
-  el._task = el._pdfPage.render({
+  const gen = loadSeq;   // 切文档后旧任务的回写必须作废，否则会把新文档的页标成已渲染（空白页）
+  const task = el._pdfPage.render({
     canvasContext: ctx, viewport,
     transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
   });
-  el._task.promise.then(() => {
+  el._task = task;
+  activeRenders.add(n);
+  task.promise.then(() => {
+    // 过期任务（页面已被释放 / 已被新一轮渲染替换 / 已换文档）：不许把离屏页重新标成已渲染
+    if (el._task !== task || gen !== loadSeq) return;
+    el._task = null;
+    activeRenders.delete(n);
     s.rendered.set(n, true);
     buildTextLayer(n);   // 首次渲染后铺设可选中文本层（幂等）
     paintSearchHl(n);    // 若该页有搜索命中，画高亮
   }).catch((err) => {
+    if (el._task === task && gen === loadSeq) { el._task = null; activeRenders.delete(n); }
     // 只把「主动取消」当正常；其余错误必须冒出来，否则会出现「页面永远空白」这类静默故障
     const msg = err && err.message ? err.message : String(err);
     if (!/cancel/i.test(msg)) console.error('[render] page ' + n + ' failed:', msg);
@@ -134,6 +206,7 @@ function freePage(n) {
   const el = App.pageEl(n);
   if (!el) return;
   if (el._task) { try { el._task.cancel(); } catch (_) {} el._task = null; }
+  activeRenders.delete(n);
   const canvas = el.querySelector('canvas');
   if (canvas) { canvas.width = 0; canvas.height = 0; }
   App.state.rendered.set(n, false);
@@ -146,9 +219,9 @@ function freePage(n) {
 // 也把页码带跑了：状态栏页码提前跳、记住的阅读位置也跟着错。
 function setupObserver() {
   App.io = new IntersectionObserver((entries) => {
-    // 单页模式下不用观察器管渲染（隐藏/显示的快照乱序会把刚渲染的页又释放掉），
+    // 单页 / 双页对开模式下不用观察器管渲染（隐藏/显示的快照乱序会把刚渲染的页又释放掉），
     // 那边由 scrollToPage 自己负责。
-    if (App.state.viewMode === 'page') return;
+    if (App.state.viewMode !== 'scroll') return;
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) {
@@ -161,7 +234,7 @@ function setupObserver() {
   }, { root: App.els.viewer, rootMargin: '600px 0px' });
 
   App.vo = new IntersectionObserver((entries) => {
-    if (App.state.viewMode === 'page') return;
+    if (App.state.viewMode !== 'scroll') return;
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) App.state.visible.add(n);
@@ -199,6 +272,7 @@ function updateCurrentPage(n) {
     syncActiveTab();
     schedulePageReport();
     markCurrentThumb();
+    scheduleRefFollow();   // v34：分屏跟随模式下参考页 = 正文下一页
   }
 }
 
@@ -208,11 +282,87 @@ function schedulePageReport() {
   clearTimeout(pageReportTimer);
   pageReportTimer = setTimeout(() => {
     if (App.state.filePath && window.pdfBridge.reportPage) {
-      window.pdfBridge.reportPage(App.state.filePath, App.state.currentPage);
+      window.pdfBridge.reportPage(App.state.filePath, App.state.currentPage, App.state.numPages || 0);
     }
     saveSessionNow();   // 页码变了，会话里激活标签的进度也跟着新
   }, 500);
 }
+
+// ---------- 阅读时长统计（Calibre reading stats 式；纯逻辑在 src/readingstats.js） ----------
+// 心跳制：每 15 秒记一次「当前文档在读」，增量攒在内存，每 10 次心跳 / 手动触发时
+// 与磁盘合并落盘（userData/reading-stats.json，不进 library.json）。
+const readingTracker = { pending: null, ticks: 0, lastTick: 0, timer: null, flushing: false };
+
+function readingActive() {
+  const s = App.state;
+  if (!hasDoc(s) || !s.filePath) return false;
+  if (document.hidden || document.visibilityState !== 'visible') return false;
+  if (window.LibraryUI && LibraryUI.isOpen()) return false;   // 库覆盖层盖着时不算在读
+  return true;
+}
+
+function readingTick() {
+  const now = Date.now();
+  const wasActive = readingActive();
+  if (!wasActive) { readingTracker.lastTick = now; return; }
+  if (!window.ReadingStats) return;
+  const delta = Math.max(0, Math.min(30, Math.round((now - readingTracker.lastTick) / 1000)));
+  readingTracker.lastTick = now;
+  if (!delta) return;
+  if (!readingTracker.pending) readingTracker.pending = ReadingStats.empty();
+  ReadingStats.addSpan(readingTracker.pending, now, App.state.filePath, delta);
+  if (++readingTracker.ticks % 10 === 0) readingFlush();
+}
+
+async function readingFlush() {
+  if (readingTracker.flushing || !readingTracker.pending || !window.pdfBridge || !pdfBridge.readingStatsMerge) return;
+  readingTracker.flushing = true;
+  const pending = readingTracker.pending;
+  readingTracker.pending = null;
+  let r = null;
+  try { r = await pdfBridge.readingStatsMerge(pending); } catch (err) { r = { ok: false, error: String(err && err.message || err) }; }
+  if (r && r.ok === false) {
+    // 落盘失败：把这段增量合回待写队列，下次心跳继续带上，别直接丢掉
+    if (window.ReadingStats && ReadingStats.merge) {
+      readingTracker.pending = ReadingStats.merge(readingTracker.pending || ReadingStats.empty(), pending);
+    }
+    if (!readingTracker.warned) {
+      readingTracker.warned = true;
+      toast('阅读时长暂时没能保存，稍后会自动重试', 4000);
+    }
+  } else {
+    readingTracker.warned = false;
+  }
+  readingTracker.flushing = false;
+}
+// 统计面板打开前先把内存里的增量落盘，别让界面比实际少一段（默认 10 次心跳才落一次）
+App.readingFlushNow = () => readingFlush();
+
+function startReadingTracker() {
+  if (readingTracker.timer) return;
+  readingTracker.lastTick = Date.now();
+  readingTracker.timer = setInterval(readingTick, 15000);
+  document.addEventListener('visibilitychange', () => {
+    // 切走/切回都重置心跳锚点：被遮挡的半段不计入，宁可少记不算错
+    readingTracker.lastTick = Date.now();
+    if (document.visibilityState !== 'visible') readingFlush();
+  });
+  window.addEventListener('beforeunload', () => { readingFlush(); });
+}
+
+// 测试钩子：直接给当前文档记 N 秒 + 立即落盘，返回合并后的统计
+App._readingAddForTest = async function (seconds) {
+  const s = App.state;
+  if (!s.filePath || !window.ReadingStats) return { ok: false };
+  if (!readingTracker.pending) readingTracker.pending = ReadingStats.empty();
+  ReadingStats.addSpan(readingTracker.pending, Date.now(), s.filePath, seconds);
+  await readingFlush();
+  const r = await pdfBridge.readingStatsLoad();
+  return { ok: true, stats: r && r.stats };
+};
+App._readingStatsAgg = function (stats, today) {
+  return window.ReadingStats ? ReadingStats.aggregate(stats || ReadingStats.empty(), { nDays: 84, today: today || undefined }) : null;
+};
 
 // ---------- 阅读会话（v33：restoreTabs） ----------
 // 标签变动 / 翻页 / 关窗时把轻量清单（路径 + 页码，不含文档字节）交给主进程存 session.json。
@@ -225,6 +375,8 @@ function sessionTabs() {
       path: t.filePath, name: t.fileName || '',
       kind: t.kind === 'rich' ? 'rich' : 'pdf',
       itemKey: t.itemKey || '', page: Math.max(1, Math.floor(+t.page || 1)),
+      rotation: normRot(t.rotation || 0),
+      refPage: Math.max(1, Math.floor(+t.refPage || 1)),
     });
   }
   const cur = currentTab();
@@ -277,6 +429,8 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.sourceBytes = bytes;
     s.numPages = pdfDoc.numPages;
     s.currentPage = 1;
+    s.rotation = normRot(m.rotation || 0);   // v34：标签 / 会话里记的视图旋转
+    s.refPage = Math.max(1, Math.floor(+m.refPage || +m.startPage || 1));
     s.fileName = fileName || '';
     s.filePath = m.filePath || '';
     s.itemKey = m.itemKey || '';
@@ -284,9 +438,13 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.citation = m.citation || '';
     s.annos = new Map();
     s.rendered = new Map();
+    activeRenders.clear();   // 上一份文档的渲染任务随 pdfDoc 作废，别留在回收名单里
     s.visible = new Set();
     s.textCache = new Map();
     s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
+    s.sj = { byPage: new Map(), builtTo: 0 };   // 智能跳转行缓存随文档作废
+    s.bookmarks = [];
+    s.bookmarksReady = null;
     searchSeq++;              // 作废上一份文档还在跑的搜索
     pageImageCache = new Map();  // 换文档了，图片位置缓存作废
     if (window.Anno && Anno.reset) Anno.reset();  // 撤销栈不能跨文档
@@ -308,9 +466,10 @@ async function loadPdf(data, fileName, smoke, meta) {
     // 滚轮滚动时后续页面永不渲染（◀▶/页码框因 scrollToPage 内部会强制渲染而看不出来）。
     setupObserver();
     await buildPageBlocks(pdfDoc);
+    syncSplitPane({ relayout: false });   // 先定分屏宽度，再算「适应宽度」，避免首屏缩放跳一下
     applyLayout();
-    // 阅读方式（连续滚动 / 单页）跟着设置走
-    document.body.classList.toggle('view-page', s.viewMode === 'page');
+    // 阅读方式（连续滚动 / 单页 / 对开）跟着设置走
+    applyViewModeClass();
     applyPageVisibility(s.currentPage);
     const start = Math.min(pdfDoc.numPages, Math.max(1, m.startPage || 1));
     s.startPage = start;
@@ -355,7 +514,7 @@ function richPageHtml(p, i, total) {
 function setupRichObserver() {
   if (App.richVO) { try { App.richVO.disconnect(); } catch (_) {} }
   App.richVO = new IntersectionObserver((entries) => {
-    if (App.state.viewMode === 'page') return;
+    if (effectiveViewMode() !== 'scroll') return;
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) App.state.visible.add(n);
@@ -381,6 +540,7 @@ function loadRichDoc(payload) {
     s.mode = 'rich';
     s.pdfDoc = null;
     s.sourceBytes = null;
+    s.rotation = 0;   // 旋转只对 PDF 生效；富文档保持正向
     s.richPages = pages;
     s.numPages = Math.max(1, pages.length);
     s.currentPage = 1;
@@ -391,6 +551,7 @@ function loadRichDoc(payload) {
     s.citation = payload.citation || '';
     s.annos = new Map();
     s.rendered = new Map();
+    activeRenders.clear();   // 上一份文档的渲染任务随 pdfDoc 作废，别留在回收名单里
     s.visible = new Set();
     s.textCache = new Map();
     s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
@@ -428,8 +589,9 @@ function loadRichDoc(payload) {
     if (window.pdfBridge.setTitle) window.pdfBridge.setTitle(s.fileName);
 
     setupRichObserver();
+    syncSplitPane({ relayout: false });   // 富文档不显示参考视图，把宽度还给正文
     applyLayout();
-    document.body.classList.toggle('view-page', s.viewMode === 'page');
+    applyViewModeClass();
     applyPageVisibility(s.currentPage);
     const start = Math.min(s.numPages, Math.max(1, +payload.startPage || 1));    s.startPage = start;
     // 等页面插入后再定位，scrollIntoView 才有布局可算（隐藏窗口里 rAF 不触发，用 setTimeout 兜底）
@@ -467,6 +629,8 @@ function syncActiveTab(extra) {
   t.page = Math.max(1, App.state.currentPage || t.page || 1);
   if (App.state.fileName) t.fileName = App.state.fileName;
   if (App.state.filePath) t.filePath = App.state.filePath;
+  t.rotation = normRot(App.state.rotation || 0);
+  if (App.state.split) t.refPage = Math.max(1, App.state.refPage || 1);
   if (extra) Object.assign(t, extra);
 }
 
@@ -483,6 +647,8 @@ function makeTab(payload) {
       pages: payload.pages || [],
       format: payload.format || '',
       page: Math.max(1, Math.floor(+payload.startPage || 1)),
+      rotation: 0,
+      refPage: Math.max(1, Math.floor(+payload.startPage || 1)),
     };
   }
   const raw = payload.data;
@@ -497,6 +663,8 @@ function makeTab(payload) {
     citation: payload.citation || '',
     data,
     page: Math.max(1, Math.floor(+payload.startPage || 1)),
+    rotation: normRot(payload.rotation || 0),
+    refPage: Math.max(1, Math.floor(+payload.refPage || payload.startPage || 1)),
   };
 }
 
@@ -525,7 +693,7 @@ function loadTab(tab) {
   }
   loadPdf(tab.data.slice(), tab.fileName, false, {
     filePath: tab.filePath, itemKey: tab.itemKey, item: tab.item, citation: tab.citation,
-    startPage: tab.page,
+    startPage: tab.page, rotation: tab.rotation, refPage: tab.refPage,
   });
 }
 
@@ -556,7 +724,8 @@ function closeDocument() {
   s.pdfDoc = null; s.sourceBytes = null; s.numPages = 0; s.currentPage = 1;
   s.mode = 'pdf'; s.richPages = null; s.itemKey = ''; s.item = null; s.citation = '';
   s.fileName = ''; s.filePath = ''; s.startPage = 1;
-  s.annos = new Map(); s.rendered = new Map(); s.visible = new Set(); s.textCache = new Map();
+  s.rotation = 0; s.refPage = 1;
+  s.annos = new Map(); s.rendered = new Map(); activeRenders.clear(); s.visible = new Set(); s.textCache = new Map();
   s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
   if (App.els.pages) { App.els.pages.innerHTML = ''; App.els.pages.hidden = false; }
   const rv = $('doc-view');
@@ -578,6 +747,7 @@ function closeDocument() {
   if (App.els.pageInput) { App.els.pageInput.value = '1'; App.els.pageInput.max = '1'; }
   if (App.els.fileName) App.els.fileName.textContent = '';
   if (App.els.zoom) App.els.zoom.textContent = '—';
+  syncSplitPane({ relayout: false });   // 没有文档了，参考视图收起（偏好保留）
   setStatus('就绪');
   renderTabs();
   if (window.LibraryUI && window.pdfBridge.isApp) window.LibraryUI.show();
@@ -644,6 +814,8 @@ async function openDocument(payload, opts) {
     tab.item = payload.item || null;
     tab.citation = payload.citation || '';
     tab.page = Math.max(1, Math.floor(+payload.startPage || 1));
+    tab.rotation = normRot(payload.rotation || 0);
+    tab.refPage = Math.max(1, Math.floor(+payload.refPage || payload.startPage || 1));
   } else {
     tab = makeTab(payload);
     App.tabs.push(tab);
@@ -659,6 +831,7 @@ async function openDocument(payload, opts) {
   loadPdf(tab.data.slice(), tab.fileName, false, Object.assign({}, payload, {
     startPage: tab.page, filePath: tab.filePath, itemKey: tab.itemKey,
     item: tab.item, citation: tab.citation,
+    rotation: tab.rotation, refPage: tab.refPage,
   }));
 }
 App.openDocument = openDocument;
@@ -696,7 +869,21 @@ async function buildPageBlocks(pdfDoc) {
     const hlLayer = document.createElement('div');
     hlLayer.className = 'hl-layer';
     hlLayer.style.width = w + 'px'; hlLayer.style.height = h + 'px';
-    el.appendChild(canvas); el.appendChild(base); el.appendChild(textlayer); el.appendChild(hlLayer); el.appendChild(anno);
+    // v34：朗读的句级高亮单独一层，不和搜索高亮抢 DOM
+    const speechLayer = document.createElement('div');
+    speechLayer.className = 'speech-layer';
+    speechLayer.style.width = w + 'px'; speechLayer.style.height = h + 'px';
+    // 智能跳转的目标高亮层（点引用标记 → 参考文献条目的落点标记）
+    const sjLayer = document.createElement('div');
+    sjLayer.className = 'sj-layer';
+    sjLayer.style.width = w + 'px'; sjLayer.style.height = h + 'px';
+    // v34：所有页面内容放进旋转层，.page 只负责占位（旋转 90° 时宽高互换）
+    const rot = document.createElement('div');
+    rot.className = 'page-rot';
+    rot.style.width = w + 'px'; rot.style.height = h + 'px';
+    rot.appendChild(canvas); rot.appendChild(base); rot.appendChild(textlayer); rot.appendChild(hlLayer);
+    rot.appendChild(speechLayer); rot.appendChild(sjLayer); rot.appendChild(anno);
+    el.appendChild(rot);
     el._pdfPage = page; el._unit = { w, h }; el._task = null;
     host.appendChild(el);
     Anno.attachPage(el, n, anno);
@@ -727,31 +914,40 @@ async function getTextContent(n) {
 
 // 铺设可选中文本：span 用单位坐标定位在 .textlayer 里（层本身被 scale 拉伸），
 // color 透明 → 平时不挡视觉，浏览器原生选中/Ctrl+C 直接可用。
-async function buildTextLayer(n) {
+// 返回 Promise：朗读需要等文本层就绪后按 span 建 Range 做句级高亮。
+function buildTextLayer(n) {
   const el = App.pageEl(n);
-  if (!el || !el._pdfPage || el._textDone) return;
+  if (!el || !el._pdfPage) return Promise.resolve();
+  if (el._textPromise) return el._textPromise;
   el._textDone = true;
-  const host = el.querySelector('.textlayer');
-  if (!host) return;
-  const vp = el._pdfPage.getViewport({ scale: 1 });
-  let items;
-  try { items = await getTextContent(n); } catch (_) { items = []; }
-  const frag = document.createDocumentFragment();
-  for (const item of items) {
-    if (!item || !item.str) continue;
-    const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
-    const fh = Math.hypot(tx[2], tx[3]);
-    if (!fh || !isFinite(fh)) continue;
-    const span = document.createElement('span');
-    span.textContent = item.str;
-    span.style.left = tx[4] + 'px';
-    span.style.top = (tx[5] - fh) + 'px';
-    span.style.fontSize = fh + 'px';
-    const ang = Math.atan2(tx[1], tx[0]);
-    if (Math.abs(ang) > 0.001) span.style.transform = 'rotate(' + ang + 'rad)';
-    frag.appendChild(span);
-  }
-  host.appendChild(frag);
+  el._textPromise = (async () => {
+    try {
+      const host = el.querySelector('.textlayer');
+      if (!host) return;
+      const vp = el._pdfPage.getViewport({ scale: 1 });
+      let items;
+      try { items = await getTextContent(n); } catch (_) { items = []; }
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || !item.str) continue;
+        const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
+        const fh = Math.hypot(tx[2], tx[3]);
+        if (!fh || !isFinite(fh)) continue;
+        const span = document.createElement('span');
+        span.textContent = item.str;
+        span.dataset.item = String(i);   // 朗读按 item 序号回查 span
+        span.style.left = tx[4] + 'px';
+        span.style.top = (tx[5] - fh) + 'px';
+        span.style.fontSize = fh + 'px';
+        const ang = Math.atan2(tx[1], tx[0]);
+        if (Math.abs(ang) > 0.001) span.style.transform = 'rotate(' + ang + 'rad)';
+        frag.appendChild(span);
+      }
+      host.appendChild(frag);
+    } catch (_) { /* 文本层失败不应阻断渲染；朗读会把它当无文字处理 */ }
+  })();
+  return el._textPromise;
 }
 
 // 画当前页的搜索命中高亮（rect 存单位坐标）
@@ -979,11 +1175,281 @@ function gotoSearchHit(step) {
   if (pageEl) {
     const vr = App.els.viewer.getBoundingClientRect();
     const pr = pageEl.getBoundingClientRect();
-    const y = pr.top + h.rect.y * (s.scale || 1) - vr.top - vr.height * 0.3;
-    App.els.viewer.scrollTop += y;
+    // v34：按旋转后的槽内偏移定位；90/270 时命中的「纵向」其实是屏幕横向
+    const off = unitToSlotOffset(pageEl, h.rect.x + h.rect.w / 2, h.rect.y + h.rect.h / 2);
+    App.els.viewer.scrollTop += (pr.top + off.y) - vr.top - vr.height * 0.3;
+    if (normRot(App.state.rotation) !== 0) {
+      // 旋转后命中的横向位置也变了（90/270 是纵向变横向，180 是左右镜像）
+      App.els.viewer.scrollLeft += (pr.left + off.x) - vr.left - vr.width / 2;
+    }
   }
   markCurrentHit();
   setStatus('第 ' + (i + 1) + ' / ' + hits.length + ' 处命中 · ' + s.search.query);
+}
+
+// ---------- 智能跳转（Smart Jump，逻辑在 src/smartjump.js） ----------
+// 点正文里的引用标记（[12] / [Smith, 2020]）跳到参考文献条目；点参考文献条目反查正文标记。
+// 引用几乎都没有超链接，只能按文字识别；参考 Sioyek 的 Smart Jump。
+function SJ() { return window.SmartJump; }
+
+function sjClearHl() {
+  for (const host of document.querySelectorAll('#pages .page .sj-layer')) host.innerHTML = '';
+}
+
+// 在页面单位坐标系里画智能跳转落点标记（与搜索高亮同层策略，互不干扰）
+function sjPaint(pageN, rects) {
+  const el = App.pageEl(pageN);
+  const host = el && el.querySelector('.sj-layer');
+  if (!host) return;
+  for (const r of rects) {
+    const d = document.createElement('div');
+    d.className = 'sj-hl';
+    d.style.left = r.x + 'px'; d.style.top = r.y + 'px';
+    d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
+    host.appendChild(d);
+  }
+}
+
+// 行矩形（单位坐标）：行内条目取并集，纵向按基线-字高到基线+0.25 字高
+function sjLineRect(items, line) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const ix of line.idx) {
+    const it = items[ix];
+    if (!it) continue;
+    x0 = Math.min(x0, it.x); y0 = Math.min(y0, it.y - it.fh);
+    x1 = Math.max(x1, it.x + it.w); y1 = Math.max(y1, it.y + it.fh * 0.25);
+  }
+  if (!isFinite(x0)) return null;
+  return { x: x0, y: y0, w: Math.max(6, x1 - x0), h: Math.max(6, y1 - y0) };
+}
+
+// 归一化一页的文本项（scale=1 视口坐标，与搜索高亮同坐标系）
+async function sjPageItems(n) {
+  const el = App.pageEl(n);
+  if (!el || !el._pdfPage) return [];
+  const vp = el._pdfPage.getViewport({ scale: 1 });
+  let items;
+  try { items = await getTextContent(n); } catch (_) { return []; }
+  const norm = [];
+  for (const item of items) {
+    if (!item || !item.str) continue;
+    const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
+    const fh = Math.hypot(tx[2], tx[3]);
+    if (!fh || !isFinite(fh)) continue;
+    norm.push({ str: item.str, x: tx[4], y: tx[5], w: Math.max(4, item.width || item.str.length * fh * 0.5), fh });
+  }
+  return norm;
+}
+
+// 增量构建跨页行缓存（参考文献通常在当前页之后，先往后扫）。
+// 缓存按页存（byPage: page → 行数组）：用户可能先跳着点某一页，若把点击页追加到
+// 数组开头，行序就不再是文档序，参考文献标题/条目的前后判断会全错（B09）。
+// 需要「整篇行序」时用 sjOrderedLines() 按页号重新拼，定位用页号 + 行对象，不用裸下标。
+async function sjEnsureLines(toPage) {
+  const s = App.state;
+  const sj = s.sj;
+  const limit = Math.min(s.numPages, Math.max(0, toPage | 0));
+  for (let n = sj.builtTo + 1; n <= limit; n++) {
+    // 该页可能已经被「跳着点」单独补进缓存：不能再建一份，
+    // 否则点击时拿到的行对象会脱离缓存，行序定位就失效了。
+    if (!sj.byPage.has(n)) {
+      const norm = await sjPageItems(n);
+      if (norm.length) sj.byPage.set(n, SJ().buildLines(norm).map((ln) => Object.assign({ page: n }, ln)));
+    }
+    sj.builtTo = Math.max(sj.builtTo, n);
+  }
+  return sj;
+}
+
+// 按页序拼出整篇行数组（第 1 页在前）
+function sjOrderedLines(sj) {
+  const out = [];
+  for (let n = 1; n <= (App.state.numPages || 0); n++) {
+    const rows = sj.byPage.get(n);
+    if (rows) for (const ln of rows) out.push(ln);
+  }
+  return out;
+}
+
+// 行对象在整篇行序里的下标：页号之前的页行数之和 + 页内位置。
+// 页内找不到同一个对象时按「文本 + 基线」回退匹配，绝不返回一个错位的下标。
+function sjLineIndex(sj, page, line) {
+  let idx = 0;
+  for (let n = 1; n < page; n++) {
+    const rows = sj.byPage.get(n);
+    if (rows) idx += rows.length;
+  }
+  const rows = sj.byPage.get(page) || [];
+  let at = rows.indexOf(line);
+  if (at < 0 && line) {
+    at = rows.findIndex((r) => r.text === line.text && Math.abs(r.y - line.y) < 1);
+  }
+  return at < 0 ? idx : idx + at;
+}
+
+// 点击点 → 所在行 + 行内偏移。返回 { page, line, caret, lineText } 或 null
+function sjLocateClick(pageN, unitX, unitY) {
+  const s = App.state;
+  const sj = s.sj;
+  const rows = sj.byPage.get(pageN) || [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const ln = rows[i];
+    const top = ln.y - ln.h, bottom = ln.y + ln.h * 0.4;
+    if (unitY < top || unitY > bottom) continue;
+    if (unitX < ln.x - 2 || unitX > ln.x + ln.w + 2) continue;
+    // 行内偏移：按各条目的 x 区间估字符位（宽度近似，够定位标记用）
+    const pageItems = sj._itemsCache && sj._itemsCache[pageN] ? sj._itemsCache[pageN] : null;
+    let caret = 0, acc = 0;
+    for (const ix of ln.idx) {
+      const it = pageItems ? pageItems[ix] : null;
+      const w = it ? it.w : 8, str = it ? it.str : '';
+      if (!it || unitX <= it.x + w) {
+        caret = acc + (it ? Math.max(0, Math.min(str.length, Math.round((unitX - it.x) / Math.max(2, w / Math.max(1, str.length))))) : 0);
+        break;
+      }
+      acc += str.length;
+      caret = acc;
+    }
+    return { page: pageN, line: ln, caret, lineText: ln.text };
+  }
+  return null;
+}
+
+// 点击位置直接驱动的入口（真实 click 事件与测试探针共用）。
+// pageElHint：测试时直接指定目标页（隐藏窗口里平滑滚动会让屏幕坐标对不上元素）。
+App._smartJumpAt = async function (clientX, clientY, pageElHint) {
+  const s = App.state;
+  if (s.mode !== 'pdf' || !s.pdfDoc || !SJ()) return null;
+  const el = document.elementFromPoint(clientX, clientY);
+  const pageEl = pageElHint || (el && el.closest ? el.closest('#pages .page') : null);
+  if (!pageEl) return null;
+  const pageN = parseInt(pageEl.dataset.page, 10) || 1;
+  const p = clientToUnit(pageEl, clientX, clientY);
+  const items = await sjPageItems(pageN);
+  s.sj._itemsCache = s.sj._itemsCache || {};
+  s.sj._itemsCache[pageN] = items;
+  if (!s.sj.byPage.has(pageN)) {
+    // 该页行还没进缓存（用户跳着点）：把这一页按页号补进去，不动其他页
+    s.sj.byPage.set(pageN, SJ().buildLines(items).map((ln) => Object.assign({ page: pageN }, ln)));
+  }
+  const loc = sjLocateClick(pageN, p.x, p.y);
+  if (!loc) return null;
+  return await sjExecute(loc);
+};
+
+App._smartJumpLast = function () { return App.state._sjLast || null; };
+
+async function sjExecute(loc) {
+  const s = App.state;
+  const sjMod = SJ();
+  // 扫描要读很多页文本，期间用户可能已经切了文档：每个 await 之后都要重新确认归属，
+  // 否则会把旧文档的高亮和跳页画到新文档上。
+  const gen = loadSeq;
+  const stale = () => gen !== loadSeq;
+  const cite = sjMod.extractCitation(loc.lineText, loc.caret);
+  // 既不是引用标记、也不像参考文献条目（无编号、无姓氏+年份）时直接返回：
+  // 不必为了确认「这里不是引用」把整篇 PDF 的文本都扫一遍。
+  const entryGuess = cite ? null : sjParseEntry(loc.lineText);
+  if (!cite && !entryGuess) {
+    sjClearHl();
+    s._sjLast = { kind: 'none', fromPage: loc.page, found: false };
+    return s._sjLast;
+  }
+  await sjEnsureLines(s.numPages);
+  if (stale()) return { kind: 'none', fromPage: loc.page, found: false, stale: true };
+  const lines = sjOrderedLines(s.sj);
+  const myLineIdx = sjLineIndex(s.sj, loc.page, loc.line);
+  // 参考文献起点：从当前行往后找（参考文献表在正文之后；找不到再从头扫一遍）
+  let bibStart = sjMod.findBibStartIndex(lines, myLineIdx);
+  if (bibStart < 0) bibStart = sjMod.findBibStartIndex(lines, 0);
+  const inBib = bibStart >= 0 && myLineIdx > bibStart;
+
+  sjClearHl();
+  const result = { kind: cite ? cite.kind : (inBib ? 'entry' : 'none'), fromPage: loc.page };
+  if (cite) {
+    const entryIdx = bibStart >= 0 ? sjMod.findEntryLine(lines, bibStart, cite) : -1;
+    result.target = cite; result.found = entryIdx >= 0;
+    if (entryIdx >= 0) {
+      const ln = lines[entryIdx];
+      const entryItems = await sjPageItems(ln.page);
+      if (stale()) return { kind: cite.kind, fromPage: loc.page, found: true, stale: true };
+      s.sj._itemsCache[ln.page] = entryItems;
+      const built = sjMod.buildLines(entryItems);
+      const row = built.find((r) => r.text === ln.text) || built[0];
+      const rect = sjLineRect(entryItems, row || ln);
+      scrollToPage(ln.page, false, true);   // 记入导航历史，Alt+← 能回来
+      setTimeout(() => sjScrollToRect(ln.page, rect), 60);
+      sjPaint(ln.page, rect ? [rect] : []);
+      result.toPage = ln.page; result.entryText = ln.text.slice(0, 80);
+      setStatus('引用 ' + (cite.numbers ? '[' + cite.numbers.join(',') + ']' : cite.surname + ' ' + cite.year) + ' → 参考文献');
+    } else {
+      setStatus('没找到对应的参考文献条目');
+    }
+  } else if (inBib) {
+    // 反向：参考文献行 → 正文里的引用标记
+    const target = sjParseEntry(loc.lineText);
+    result.target = target; result.found = !!target;
+    if (target) {
+      const marks = [];
+      for (let n = 1; n <= s.numPages && marks.length < 40; n++) {
+        const items = await sjPageItems(n);
+        if (stale()) return { kind: 'entry', fromPage: loc.page, found: !!target, stale: true };
+        if (!items.length) continue;
+        const pageText = items.map((it) => it.str).join('');
+        const poses = sjMod.findMarkerPositions(pageText, target, 40);
+        for (const pos of poses) {
+          // 字符位置 → 文本项：按条目累计长度回查，高亮整个文本项
+          let acc = 0, hit = null;
+          for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            if (pos.start < acc + it.str.length) { hit = it; break; }
+            acc += it.str.length;
+          }
+          if (hit) marks.push({ page: n, rect: { x: hit.x, y: hit.y - hit.fh, w: hit.w, h: hit.fh * 1.3 } });
+        }
+      }
+      result.markers = marks.length;
+      if (marks.length) {
+        scrollToPage(marks[0].page, false, true);
+        setTimeout(() => sjScrollToRect(marks[0].page, marks[0].rect), 60);
+        for (const mk of marks) sjPaint(mk.page, [mk.rect]);
+        result.toPage = marks[0].page;
+        setStatus('正文里找到 ' + marks.length + ' 处引用标记');
+      } else {
+        setStatus('正文里没有找到这条的引用标记');
+      }
+    }
+  } else {
+    result.found = false;
+  }
+  s._sjLast = result;
+  return result;
+}
+
+// 从参考文献条目行解析出可反查的目标（行号或姓氏+年份）
+function sjParseEntry(text) {
+  const t = String(text || '').trim();
+  const num = /^\s*[\[（(]?(\d{1,3})[\].）、)]?\s+/.exec(t) || /^\s*(\d{1,3})[.、)）]\s*/.exec(t);
+  if (num) return { numbers: [parseInt(num[1], 10)] };
+  // 作者-年份条目：第一个大写开头的词当姓氏 + 行里的 4 位年份
+  const year = /(19|20)\d{2}/.exec(t);
+  const name = /[A-Z][A-Za-z'’\-]+/.exec(t);
+  if (year && name) return { surname: name[0], year: year[0] };
+  return null;
+}
+
+// 把目标行滚到视口上部 30% 处（复用搜索命中的定位算法）
+function sjScrollToRect(pageN, rect) {
+  if (!rect) return;
+  const pageEl = App.pageEl(pageN);
+  if (!pageEl) return;
+  const vr = App.els.viewer.getBoundingClientRect();
+  const pr = pageEl.getBoundingClientRect();
+  const off = unitToSlotOffset(pageEl, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  App.els.viewer.scrollTop += (pr.top + off.y) - vr.top - vr.height * 0.3;
+  if (normRot(App.state.rotation) !== 0) {
+    App.els.viewer.scrollLeft += (pr.left + off.x) - vr.left - vr.width / 2;
+  }
 }
 
 // ---------- 侧栏：目录 / 缩略图 / 批注 ----------
@@ -1032,6 +1498,135 @@ function activeTab() {
   return t ? t.dataset.tab : 'outline';
 }
 
+// ---------- 用户书签（B 键 / 侧栏目录页顶部的「我的书签」块） ----------
+// 并发约定（R01/R05，在 B01/B03 之上）：
+//   1) 同一文档（按路径）一条串行队列：后一次基于前一次「已成功落盘」的结果构造候选，
+//      不会出现两次操作各写各的、最后只剩一条。同页连续 toggle 两次 = 加 → 删。
+//   2) 队列按**文件路径**跨加载代际共享：重新打开同一份文档时沿用同一条链，
+//      只把工作副本换成新代际读到的磁盘内容，避免新旧两条队列并行覆盖磁盘（R05）。
+//   3) 任务真正开始时（发 IPC 之前）再校验一次路径 + 加载代际：切走 / 关闭 / 重新打开后，
+//      尚未发送的旧任务直接取消，不再写盘。
+//   4) 落盘成功就是磁盘真相：即使代际已过期也推进队列工作副本（但不动界面），
+//      否则新代际会基于过期副本覆盖刚写成功的内容。
+//   5) 界面更新只按代际过滤；首次操作前等这一份文档的书签读盘完成。
+// 这段代码被 scripts/test-audit-fixes.js 直接切出来做受控时序验证：
+// 保持「状态声明在前、App.bookmarkToggle 赋值在末尾」的结构。
+const bookmarkQueues = new Map();   // path → { chain, list, gen, pending }
+
+function bookmarkQueueFor(path, gen, seed) {
+  const initial = (Array.isArray(seed) ? seed : []).slice();
+  let q = bookmarkQueues.get(path);
+  if (!q) {
+    q = { chain: Promise.resolve(), list: initial, gen, pending: 0 };
+    bookmarkQueues.set(path, q);
+  } else if (q.gen !== gen) {
+    // 新代际：以这次读盘的结果为基线，但继续排在同一条链上
+    q.gen = gen;
+    q.list = initial;
+  }
+  return q;
+}
+
+// 队列空了且已经不属于当前文档：把条目丢掉，别让 Map 随会话一直长
+function bookmarkQueueSweep(path, q) {
+  if (q.pending > 0) return;
+  if (q.gen === loadSeq && App.state.filePath === path) return;
+  if (bookmarkQueues.get(path) === q) bookmarkQueues.delete(path);
+}
+
+// 一次书签提交：候选 → 落盘 → 成功后提交工作副本；失败只回滚界面，不动工作副本
+async function bookmarkCommit(q, path, gen, page) {
+  // 真正开始执行时再确认一次归属：切走 / 关闭 / 重新打开后，未发送的任务不再写盘（R05）
+  if (gen !== loadSeq || App.state.filePath !== path) {
+    return { ok: false, canceled: true, error: '文档已切换，未保存' };
+  }
+  const current = () => gen === loadSeq && App.state.filePath === path;
+  const i = q.list.findIndex((b) => b.page === page);
+  const next = q.list.filter((b, k) => k !== i);
+  if (i < 0) next.push({ page, at: Date.now(), label: '' });
+  next.sort((a, b) => a.page - b.page);
+  let r;
+  try {
+    r = await pdfBridge.bookmarksSave(path, next);
+  } catch (err) {
+    r = { ok: false, error: String((err && err.message) || err) };
+  }
+  if (r && r.ok) {
+    q.list = (Array.isArray(r.bookmarks) ? r.bookmarks : next).slice();
+    if (current()) {
+      App.state.bookmarks = q.list.slice();
+      renderBookmarks();
+      toast(i >= 0 ? '已删除第 ' + page + ' 页书签' : '已给第 ' + page + ' 页加书签');
+    }
+  } else if (current()) {
+    App.state.bookmarks = q.list.slice();
+    renderBookmarks();
+    toast('书签保存失败：' + ((r && r.error) || '未知错误') + '（第 ' + page + ' 页未改动，可重试）', 5000);
+  }
+  return r;
+}
+
+async function bookmarkToggle(page) {
+  const s = App.state;
+  if (!hasDoc(s) || !s.filePath || !window.pdfBridge.bookmarksSave) {
+    return { ok: false, error: '当前文档没有可保存的书签位置' };
+  }
+  const path = s.filePath;
+  const gen = loadSeq;
+  const n = Math.min(s.numPages, Math.max(1, page || s.currentPage));
+  // 书签还在读盘：先等它，别拿空数组覆盖磁盘上已有的书签
+  if (s.bookmarksReady) { try { await s.bookmarksReady; } catch (_) {} }
+  if (gen !== loadSeq || App.state.filePath !== path) return { ok: false, error: '文档已切换' };
+  const q = bookmarkQueueFor(path, gen, App.state.bookmarks);
+  q.pending++;
+  const op = q.chain.then(() => bookmarkCommit(q, path, gen, n));
+  // 无论成功、失败还是取消，都要减计数并可能回收队列；失败也继续排队，不能断链
+  const settled = op.then((r) => { q.pending--; bookmarkQueueSweep(path, q); return r; },
+    (err) => { q.pending--; bookmarkQueueSweep(path, q); throw err; });
+  q.chain = settled.then(() => {}, () => {});
+  return settled;
+}
+App.bookmarkToggle = bookmarkToggle;
+
+function renderBookmarks() {
+  const host = $('sb-outline');
+  if (!host) return;
+  const old = document.getElementById('bm-block');
+  if (old) old.remove();
+  if (App.state.mode === 'rich') return;
+  const s = App.state;
+  const block = document.createElement('div');
+  block.id = 'bm-block';
+  const cur = (s.bookmarks || []).some((b) => b.page === s.currentPage);
+  const head = document.createElement('div');
+  head.className = 'bm-head';
+  head.innerHTML = '<span class="lib-side-title" style="margin:0">我的书签' + ((s.bookmarks || []).length ? ' · ' + s.bookmarks.length : '') + '</span>'
+    + '<button class="tbtn bm-toggle" title="给当前页加 / 删书签（B）">' + (cur ? '★' : '☆') + '</button>';
+  head.querySelector('.bm-toggle').addEventListener('click', () => bookmarkToggle(s.currentPage));
+  block.appendChild(head);
+  for (const b of (s.bookmarks || [])) {
+    const row = document.createElement('div');
+    row.className = 'bm-row';
+    row.innerHTML = '<span class="bm-page">P' + b.page + '</span><span class="bm-when">'
+      + (b.at ? new Date(b.at).toLocaleDateString('zh-CN') : '') + '</span>';
+    row.addEventListener('click', () => scrollToPage(b.page, false, true));
+    const del = document.createElement('button');
+    del.className = 'bm-del';
+    del.textContent = '✕';
+    del.title = '删除这个书签';
+    del.addEventListener('click', (e) => { e.stopPropagation(); bookmarkToggle(b.page); });
+    row.appendChild(del);
+    block.appendChild(row);
+  }
+  if (!(s.bookmarks || []).length) {
+    const hint = document.createElement('div');
+    hint.className = 'sb-empty';
+    hint.textContent = '按 B 给当前页加书签';
+    block.appendChild(hint);
+  }
+  host.insertBefore(block, host.firstChild);
+}
+
 function refreshSidebar() {
   const sb = $('sidebar');
   if (!sb || sb.hidden) return;
@@ -1045,7 +1640,7 @@ function refreshSidebar() {
 // 目录：pdfDoc.getOutline() → 解析目标页 → 可点击树
 async function buildOutlinePane() {
   const host = $('sb-outline');
-  if (host._done) return;
+  if (host._done) { renderBookmarks(); return; }
   host._done = true;
   const s = App.state;
   if (s.mode === 'rich') {
@@ -1090,7 +1685,11 @@ async function buildOutlinePane() {
   host.innerHTML = '<div class="sb-empty">载入目录…</div>';
   let outline = null;
   try { outline = await s.pdfDoc.getOutline(); } catch (_) {}
-  if (!outline || !outline.length) { host.innerHTML = '<div class="sb-empty">此文档没有目录书签</div>'; return; }
+  if (!outline || !outline.length) {
+    host.innerHTML = '<div class="sb-empty">此文档没有目录</div>';
+    renderBookmarks();   // 没有目录也要有书签块
+    return;
+  }
   const destPage = async (dest) => {
     try {
       let d = dest;
@@ -1127,6 +1726,7 @@ async function buildOutlinePane() {
   };
   host.innerHTML = '';
   host.appendChild(await build(outline, 0));
+  renderBookmarks();   // 目录重建会把书签块冲掉，这里补回来（书签块插在目录上方）
 }
 
 // 缩略图：占位 + IntersectionObserver 懒渲染（1200 页文档也只画看得见的那几张）
@@ -1152,8 +1752,8 @@ function buildThumbsPane() {
     markCurrentThumb();
     return;
   }
-  if (host._docId === App.state.fileName + App.state.numPages) { markCurrentThumb(); return; }
-  host._docId = App.state.fileName + App.state.numPages;
+  if (host._docId === App.state.fileName + App.state.numPages + ':' + normRot(App.state.rotation)) { markCurrentThumb(); return; }
+  host._docId = App.state.fileName + App.state.numPages + ':' + normRot(App.state.rotation);
   host.innerHTML = '';
   if (thumbIO) thumbIO.disconnect();
   thumbIO = new IntersectionObserver((entries) => {
@@ -1178,7 +1778,10 @@ async function renderThumb(n) {
   if (!el || !el._pdfPage || !holder || holder._done) return;
   holder._done = true;
   try {
-    const vp = el._pdfPage.getViewport({ scale: 130 / el._unit.w });
+    // v34：缩略图跟着视图旋转走，旋转 90° 时按页面高度算宽度，保证缩略图宽度仍是 130
+    const rot = normRot(App.state.rotation);
+    const baseW = rot % 180 ? el._unit.h : el._unit.w;
+    const vp = el._pdfPage.getViewport({ scale: 130 / baseW, rotation: (el._pdfPage.rotate + rot) % 360 });
     const cv = document.createElement('canvas');
     cv.width = Math.floor(vp.width); cv.height = Math.floor(vp.height);
     await el._pdfPage.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
@@ -1272,7 +1875,7 @@ function refreshAnnoPane() {
         label = kindLabel + (sh.text || '选区高亮').slice(0, 90);
         if (sh.comment) label += ' · 评论：' + sh.comment;
       } else if (sh.tool === 'text' || sh.tool === 'note') {
-        label = sh.text || '(空)';
+        label = (sh.replyTo ? '↳ 回复：' : '') + (sh.text || '(空)');
       } else {
         label = toolName[sh.tool] || sh.tool;
       }
@@ -1609,10 +2212,8 @@ async function openImageLightbox(pageEl, clientX, clientY) {
   const pageNum = +pageEl.dataset.page;
   const pdfPage = pageEl._pdfPage;
   if (!pdfPage) return;
-  const s = App.state;
-  const r = pageEl.getBoundingClientRect();
-  const ux = (clientX - r.left) / (s.scale || 1);
-  const uy = (clientY - r.top) / (s.scale || 1);
+  const u = clientToUnit(pageEl, clientX, clientY);
+  const ux = u.x, uy = u.y;
   const images = await getPageImages(pageNum, pdfPage);
   // 抽图是异步的（要等 PDF.js 解码）：等待期间用户可能已经按 Esc 切回阅读模式，
   // 或双击的第二连点又发起了新请求。旧请求一律作废 ——「阅读模式绝不会莫名其妙弹灯箱」靠这条保证。
@@ -1688,10 +2289,8 @@ async function openRegionLightbox(pageEl, clientX, clientY) {
   const pageNum = +pageEl.dataset.page;
   const pdfPage = pageEl._pdfPage;
   if (!pdfPage) return;
-  const s = App.state;
-  const r = pageEl.getBoundingClientRect();
-  const ux = (clientX - r.left) / (s.scale || 1);
-  const uy = (clientY - r.top) / (s.scale || 1);
+  const u = clientToUnit(pageEl, clientX, clientY);
+  const ux = u.x, uy = u.y;
   const region = regionAround(ux, uy, pageEl._unit);
   const c = await renderImageRegion(pdfPage, region);
   if (!c || seq !== lbOpenSeq) { if (!c) toast('这一块取不出来'); return; }
@@ -1762,13 +2361,31 @@ function openCtxMenu(x, y, items) {
 }
 
 // 当前页导出为 PNG
-async function exportCurrentPagePng() {
-  if (App.state.mode === 'rich') { toast('富文档暂不支持导出页面图片'); return; }
+// 当前页 PNG 数据（视图导出）：按当前旋转角输出；PDF 副本与打印仍按原方向
+App.pagePngDataUrl = function () {
   const el = App.pageEl(App.state.currentPage);
   const canvas = el && el.querySelector('canvas');
-  if (!canvas || !canvas.width) { toast('当前页还没渲染出来'); return; }
+  if (!canvas || !canvas.width) return '';
+  const rot = normRot(App.state.rotation);
+  let src = canvas;
+  if (rot) {
+    const c2 = document.createElement('canvas');
+    const w = canvas.width, h = canvas.height;
+    if (rot % 180) { c2.width = h; c2.height = w; } else { c2.width = w; c2.height = h; }
+    const ctx = c2.getContext('2d');
+    ctx.translate(c2.width / 2, c2.height / 2);
+    ctx.rotate(rot * Math.PI / 180);
+    ctx.drawImage(canvas, -w / 2, -h / 2);
+    src = c2;
+  }
+  return src.toDataURL('image/png');
+};
+
+async function exportCurrentPagePng() {
+  if (App.state.mode === 'rich') { toast('富文档暂不支持导出页面图片'); return; }
   let dataUrl = '';
-  try { dataUrl = canvas.toDataURL('image/png'); } catch (e) { toast('导出失败：' + (e && e.message || e)); return; }
+  try { dataUrl = App.pagePngDataUrl(); } catch (e) { toast('导出失败：' + (e && e.message || e)); return; }
+  if (!dataUrl) { toast('当前页还没渲染出来'); return; }
   const name = (App.state.fileName || 'page').replace(/\.pdf$/i, '') + '-p' + App.state.currentPage + '.png';
   const res = await window.pdfBridge.exportPagePng({ dataUrl, fileName: name });
   if (res && res.ok) { toast('已导出：' + res.path); setStatus('已导出当前页图片：' + res.path); }
@@ -1877,13 +2494,25 @@ App.notifyAnnoChanged = function () {
 };
 
 async function restoreAnnos(filePath) {
+  // 读盘期间可能已经切到别的文档（甚至切走又切回来）：路径 + 加载代际都要对得上才写入
+  const gen = loadSeq;
+  const stillCurrent = () => gen === loadSeq && filePath === App.state.filePath;
+  // 书签与标注同一个 sidecar：无论有没有标注都要读一份。
+  // bookmarksReady 让「刚打开就按 B」的操作等这次读盘完成，避免用空数组覆盖磁盘上的书签。
+  if (filePath && window.pdfBridge.bookmarksLoad) {
+    App.state.bookmarksReady = (async () => {
+      try {
+        const bm = await window.pdfBridge.bookmarksLoad(filePath);
+        if (stillCurrent()) { App.state.bookmarks = (bm && bm.bookmarks) || []; renderBookmarks(); }
+      } catch (_) {}
+    })();
+    await App.state.bookmarksReady;
+  }
   if (!filePath || !window.pdfBridge.loadAnnos) return;
   let saved = null;
   try { saved = await window.pdfBridge.loadAnnos(filePath); } catch (_) {}
   if (!saved || !saved.length) return;
-  // 读盘期间可能已经切到别的文档：这时把上一份文档的标注恢复到新文档里，
-  // 后续任何保存都会把它们写进新文档的标注文件。路径对不上就直接放弃。
-  if (filePath !== App.state.filePath) return;
+  if (!stillCurrent()) return;
   const s = App.state;
   for (const entry of saved) {
     const n = Math.min(s.numPages, Math.max(1, entry.page || 1));
@@ -1896,25 +2525,63 @@ async function restoreAnnos(filePath) {
 }
 
 // ---------- 翻页导航（滚动定位） ----------
-// 单页模式：只显示当前页，其余页 display:none（靠 .is-current 标记）
+// 「有效阅读模式」：spread 是 PDF 的阅读偏好；富文档（Word/PPT/EPUB 转 HTML）没有对开，
+// 一律按单页执行。显示、可见性、观察器、导航都读这里，避免工具栏/保存页码/朗读
+// 与实际展示位置不一致。用户偏好本身仍留在 App.state.viewMode，切回 PDF 自动恢复。
+function effectiveViewMode() {
+  const m = App.state.viewMode;
+  if (App.state.mode === 'rich') return m === 'scroll' ? 'scroll' : 'page';
+  return m;
+}
+App.effectiveViewMode = effectiveViewMode;
+
+// 单页 / 双页对开模式：只显示当前页（对开时加它的搭档页），其余 display:none（.is-current 标记）
 function applyPageVisibility(cur) {
-  const mode = App.state.viewMode;
+  const mode = effectiveViewMode();
+  const show = new Set();
+  if (mode === 'page') show.add(cur);
+  if (mode === 'spread') for (const n of spreadPair(cur)) if (n) show.add(n);
   for (let n = 1; n <= App.state.numPages; n++) {
     const el = App.pageEl(n);
     if (!el) continue;
-    el.classList.toggle('is-current', mode === 'page' && n === cur);
+    el.classList.toggle('is-current', show.has(n));
   }
 }
 
-// 切换阅读方式：连续滚动 / 单页翻页
-App.setViewMode = function (mode) {
-  const m = mode === 'page' ? 'page' : 'scroll';
-  App.state.viewMode = m;
+// 双页对开的搭档规则（书刊习惯：偶数页在左、奇数页在右，第 1 页封面单独占右位）
+// 返回 [leftPage, rightPage]，rightPage 可能为 null（落单）。
+function spreadPair(cur) {
+  const total = App.state.numPages || 1;
+  cur = Math.min(total, Math.max(1, cur));
+  if (cur === 1) return [null, 1];
+  if (cur % 2 === 0) return [cur, cur + 1 <= total ? cur + 1 : null];
+  return [cur - 1, cur];
+}
+App.spreadPair = spreadPair;
+
+// 阅读方式的三种 body class（连续 / 单页 / 对开），加载与切换共用。
+// 富文档没有对开布局，按有效模式落到 view-page。
+function applyViewModeClass() {
+  const m = effectiveViewMode();
   document.body.classList.toggle('view-page', m === 'page');
+  document.body.classList.toggle('view-spread', m === 'spread');
+}
+
+// 切换阅读方式：连续滚动 / 单页翻页 / 双页对开
+App.setViewMode = function (mode) {
+  const m = mode === 'page' ? 'page' : (mode === 'spread' ? 'spread' : 'scroll');
+  App.state.viewMode = m;
+  applyViewModeClass();
   applyPageVisibility(App.state.currentPage);
-  if (m === 'page') {
-    // 单页：把当前页渲染出来，其余页先不渲染（省内存）
-    if (App.state.mode === 'pdf' && !App.state.rendered.get(App.state.currentPage)) renderPageNum(App.state.currentPage);
+  const eff = effectiveViewMode();
+  if (eff !== 'scroll') {
+    // 单页 / 对开：把要显示的页渲染出来，其余页先不渲染（省内存）
+    if (App.state.mode === 'pdf') {
+      const targets = eff === 'spread' ? spreadPair(App.state.currentPage).filter(Boolean) : [App.state.currentPage];
+      for (const n of targets) if (!App.state.rendered.get(n)) renderPageNum(n);
+      // 从连续模式切进来时，之前散落的已渲染页要一并回收
+      freePagesExcept(targets);
+    }
   } else if (App.state.mode === 'pdf') {
     renderVisiblePages();
   }
@@ -1922,6 +2589,25 @@ App.setViewMode = function (mode) {
   try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ viewMode: m }); } catch (_) {}
   return m;
 };
+
+// 单页 / 对开模式的内存回收：只保留「当前页组」的位图，其余页一律释放。
+// 早先只释放上一张「当前页」，对开时搭档页（例如 2→4 时的 3）会一直留着位图；
+// 现在把「已渲染」和「正在渲染」都算进回收范围：快速跳页时上一组的任务还没结束，
+// 只清 rendered 会漏掉它们，任务完成后再把离屏页标成已渲染（R02）。
+function freePagesExcept(keep) {
+  if (App.state.mode !== 'pdf') return 0;
+  const keepSet = keep instanceof Set ? keep : new Set(keep || []);
+  const targets = new Set();
+  for (const [n, done] of App.state.rendered) if (done) targets.add(n);
+  for (const n of activeRenders) targets.add(n);
+  let freed = 0;
+  for (const n of targets) {
+    if (keepSet.has(n)) continue;
+    freePage(n);
+    freed++;
+  }
+  return freed;
+}
 
 function scrollToPage(n, instant, record) {
   n = Math.min(App.state.numPages, Math.max(1, n));
@@ -1931,7 +2617,8 @@ function scrollToPage(n, instant, record) {
   // Alt+←/→ 或鼠标侧键可返回。初始落页与逐页翻阅不记——后者记了会让「后退」变成一页一页倒。
   if (record && n !== App.state.currentPage) navRecord(n);
   if (App.state.mode === 'rich') {
-    if (App.state.viewMode === 'page') {
+    // 富文档没有对开：spread 偏好按单页执行（与 applyViewModeClass 的有效模式一致）
+    if (effectiveViewMode() !== 'scroll') {
       applyPageVisibility(n);
       updateCurrentPage(n);
       App.els.viewer.scrollTop = 0;
@@ -1941,12 +2628,12 @@ function scrollToPage(n, instant, record) {
     updateCurrentPage(n);
     return;
   }
-  if (App.state.viewMode === 'page') {
-    // 单页模式：换页就是把「当前页」标记挪过去；上一页的位图顺手释放（只留当前页，内存可控）
-    const prev = App.state.currentPage;
+  if (App.state.viewMode === 'page' || App.state.viewMode === 'spread') {
+    // 单页 / 对开模式：换页就是把「当前页」标记挪过去；不属于新页组的位图一律释放
     applyPageVisibility(n);
-    if (!App.state.rendered.get(n)) renderPageNum(n);
-    if (prev && prev !== n && App.state.rendered.get(prev)) freePage(prev);
+    const targets = App.state.viewMode === 'spread' ? spreadPair(n).filter(Boolean) : [n];
+    for (const t of targets) if (!App.state.rendered.get(t)) renderPageNum(t);
+    freePagesExcept(targets);
     updateCurrentPage(n);
     App.els.viewer.scrollTop = 0;
     return;
@@ -2000,6 +2687,147 @@ App.navState = () => {
   return t && t.nav ? { stack: t.nav.stack.slice(), idx: t.nav.idx } : null;
 };
 
+// ---------- 视图旋转（v34） ----------
+// 只改显示：原文件、导出副本、打印都不动。标注按未旋转坐标存，所以旋转不需要迁移数据。
+App.rotateView = function (delta) {
+  const s = App.state;
+  if (!hasDoc(s)) { toast('先打开一个文档'); return 0; }
+  if (s.mode !== 'pdf') { toast('旋转只支持 PDF 文档'); return 0; }
+  const next = normRot((s.rotation || 0) + (delta || 0));
+  if (next === normRot(s.rotation)) return s.rotation;
+  s.rotation = next;
+  const t = currentTab();
+  if (t) t.rotation = next;
+  // 页面外框宽高变了：重新算缩放并保持当前页顶边不跳
+  relayoutKeepingPosition();
+  // 缩略图是位图，宽高比跟着变，必须重画
+  const th = $('sb-thumbs');
+  if (th && th.offsetParent !== null) { th._docId = null; buildThumbsPane(); }
+  if (s.split) refRender();
+  scheduleSessionSave();
+  setStatus('页面已旋转 ' + next + '°（只改显示，不改原文件）');
+  return next;
+};
+App.viewRotation = () => normRot(App.state.rotation || 0);
+
+// ---------- 只读分屏参考视图（v34） ----------
+// 定位照 Zotero 的第二视图：纯位图、不带标注，用来看参考文献 / 尾注 / 对照页。
+// 不复用主视图的页块，避免两套标注层、两套文本层互相抢事件与内存。
+const ref = { seq: 0, page: 1, follow: false, task: null };
+let refFollowTimer = null;
+
+function refSetPage(n, opts) {
+  const s = App.state;
+  if (!hasDoc(s) || s.mode !== 'pdf') return;
+  ref.page = Math.min(s.numPages, Math.max(1, Math.floor(+n || 1)));
+  s.refPage = ref.page;
+  const t = currentTab();
+  if (t) t.refPage = ref.page;
+  const inp = $('ref-page');
+  if (inp) { inp.value = String(ref.page); inp.max = String(s.numPages || 1); }
+  if (!opts || opts.render !== false) refRender();
+  scheduleSessionSave();
+}
+App.refSetPage = refSetPage;
+
+async function refRender() {
+  const s = App.state;
+  const pane = $('ref-pane'), cv = $('ref-canvas'), body = $('ref-body'), empty = $('ref-empty');
+  if (!pane || !cv || !body) return;
+  if (!hasDoc(s) || s.mode !== 'pdf' || pane.hidden) {
+    cv.hidden = true;
+    if (empty) empty.hidden = false;
+    return;
+  }
+  const seq = ++ref.seq;
+  const pageNo = Math.min(s.numPages, Math.max(1, ref.page));
+  let page;
+  try { page = await s.pdfDoc.getPage(pageNo); } catch (_) { return; }
+  if (seq !== ref.seq) return;
+  const rot = (page.rotate + normRot(s.rotation)) % 360;   // 参考视图把旋转直接烘进 viewport
+  const base = page.getViewport({ scale: 1, rotation: rot });
+  const avail = Math.max(160, body.clientWidth - 28);
+  const scale = avail / base.width;
+  const vp = page.getViewport({ scale, rotation: rot });
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.floor(vp.width * dpr));
+  cv.height = Math.max(1, Math.floor(vp.height * dpr));
+  cv.style.width = Math.floor(vp.width) + 'px';
+  cv.style.height = Math.floor(vp.height) + 'px';
+  try {
+    // 连续翻参考页时上一张可能还在画：同一个 canvas 不能并行渲染，先取消
+    if (ref.task) { try { ref.task.cancel(); } catch (_) {} ref.task = null; }
+    ref.task = page.render({
+      canvasContext: cv.getContext('2d'), viewport: vp,
+      transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+    });
+    await ref.task.promise;
+  } catch (_) { return; }
+  if (seq !== ref.seq) return;
+  ref.task = null;
+  cv.hidden = false;
+  if (empty) empty.hidden = true;
+  const cnt = $('ref-count');
+  if (cnt) cnt.textContent = '/ ' + s.numPages;
+  const inp = $('ref-page');
+  if (inp) inp.value = String(pageNo);
+}
+
+function syncSplitPane(opts) {
+  const o = opts || {};
+  const s = App.state;
+  const pane = $('ref-pane');
+  if (!pane) return;
+  const want = !!s.split && s.mode === 'pdf' && hasDoc(s);
+  pane.hidden = !want;
+  document.body.classList.toggle('split-view', want);
+  const btn = $('btn-split');
+  if (btn) {
+    btn.classList.toggle('active', !!s.split);
+    btn.setAttribute('aria-pressed', s.split ? 'true' : 'false');
+  }
+  if (want) {
+    ref.page = Math.min(s.numPages, Math.max(1, Math.floor(s.refPage || s.currentPage || 1)));
+    s.refPage = ref.page;
+    const inp = $('ref-page');
+    if (inp) { inp.value = String(ref.page); inp.max = String(s.numPages || 1); }
+    refRender();   // 读 clientWidth 会强制同步布局，隐藏窗口里也不依赖 rAF
+  } else {
+    ref.seq++;   // 作废正在跑的参考页渲染
+    if (ref.task) { try { ref.task.cancel(); } catch (_) {} ref.task = null; }
+  }
+  // 参考视图占用宽度后「适应宽度」要重算
+  if (o.relayout !== false && hasDoc(s)) relayoutKeepingPosition();
+}
+App.syncSplitPane = syncSplitPane;
+
+App.setSplitView = function (on, opts) {
+  const s = App.state;
+  const o = opts || {};
+  const want = !!on;
+  // 没有文档时也允许先记下偏好：打开 PDF 会自动显示
+  if (want && hasDoc(s) && s.mode !== 'pdf') { toast('分屏参考视图只支持 PDF'); return false; }
+  s.split = want;
+  syncSplitPane();
+  if (want && !hasDoc(s)) toast('已开启分屏，打开 PDF 后显示参考视图');
+  // 设置面板自己会落盘，别再重复写一次（persist:false）
+  if (o.persist !== false) {
+    try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ splitView: want }); } catch (_) {}
+  }
+  return want;
+};
+App.splitState = () => ({ on: !!App.state.split, page: ref.page, follow: ref.follow, visible: !!($('ref-pane') && !$('ref-pane').hidden) });
+
+// 跟随：正文换页时参考页自动落到下一页（双页对照）。滚动时页码变化很密，去抖后再渲染。
+function scheduleRefFollow() {
+  if (!App.state.split || !ref.follow) return;
+  clearTimeout(refFollowTimer);
+  refFollowTimer = setTimeout(() => {
+    if (!App.state.split || !ref.follow) return;
+    refSetPage(Math.min(App.state.numPages, (App.state.currentPage || 1) + 1));
+  }, 180);
+}
+
 // ---------- 缩放控制 ----------
 // 缩放前后页面高度变了，滚动位置会漂；先记住当前页顶边相对视口的位置，改完再补回来
 function relayoutKeepingPosition() {
@@ -2040,7 +2868,9 @@ function syncScaleSelect(scale) {
       sel.appendChild(opt);
     }
     opt.value = String(scale);
-    opt.textContent = '自定义 ' + Math.round(scale * 100) + '%';
+    // 只写百分比：写「自定义 269%」会把下拉框撑宽，工具栏被挤到第二行，
+    // 阅读区整体下移 —— 连续缩放时锚点就会纵向漂移。
+    opt.textContent = Math.round(scale * 100) + '%';
   }
   sel.value = opt.value;
 }
@@ -2068,20 +2898,31 @@ function zoomAtPoint(next, clientX, clientY) {
   const host = document.elementFromPoint(clientX, clientY);
   const pageEl = (host && host.closest) ? host.closest('.page, .doc-page') : null;
   if (!pageEl || !pageEl.dataset || !pageEl.dataset.page) { setNumericScale(want); return; }
+  // v34：PDF 用页面标注层的逆 CTM 取锚点，旋转 90°/180° 后放大也不会偏；
+  // 富文档没有旋转，仍走原来的矩形 + zoom 换算（CSS zoom 不在 CTM 里，别混用）
+  const rich = s.mode === 'rich';
   const s0 = s.scale || 1;
   const r0 = pageEl.getBoundingClientRect();
-  const ux = (clientX - r0.left) / s0;
-  const uy = (clientY - r0.top) / s0;
+  const u = rich ? { x: (clientX - r0.left) / s0, y: (clientY - r0.top) / s0 } : clientToUnit(pageEl, clientX, clientY);
+  const ux = u.x, uy = u.y;
 
   s.scaleMode = String(want);
   applyLayout();
 
-  const r1 = pageEl.getBoundingClientRect();
-  const s1 = s.scale || 1;
   const v = App.els.viewer;
-  if (v) {
+  if (v && rich) {
+    const r1 = pageEl.getBoundingClientRect();
+    const s1 = s.scale || 1;
     v.scrollLeft += (r1.left + ux * s1) - clientX;
     v.scrollTop += (r1.top + uy * s1) - clientY;
+  } else if (v) {
+    const svg = pageEl.querySelector('.anno') || pageEl.querySelector('.anno-base');
+    const ctm = svg && svg.getScreenCTM ? svg.getScreenCTM() : null;
+    if (ctm) {
+      const p = new DOMPoint(ux, uy).matrixTransform(ctm);
+      v.scrollLeft += p.x - clientX;
+      v.scrollTop += p.y - clientY;
+    }
   }
   syncScaleSelect(s.scale);
 }
@@ -2248,32 +3089,42 @@ function runSmoke(fileName) {
   }, 200);
 }
 
-// ---------- 朗读（v9，Web Speech API，只读当前页） ----------
-// 一次读完一页就停：长文档连续朗读会让「停」变得难用，也容易和系统语音抢资源。
-const speakState = { status: 'idle', page: 0 };
+// ---------- 朗读（v35：跨页连续 + 句级高亮 + 位置记忆） ----------
+// 一次只把一句话交给系统语音：句与句之间才有「读到哪」的锚点，
+// 暂停 / 继续不会丢页，跨页也能接着读。整页塞进一个 utterance 做不到句级高亮。
+const speech = {
+  status: 'idle',      // idle | speaking | paused
+  page: 0,
+  index: 0,
+  list: [],
+  token: 0,
+  hlPage: 0,
+  lastPage: 0,
+  lastIndex: 0,
+  active: false,       // 当前是否真有一条 utterance 在念（跨页加载的间隙为 false）
+  docKey: '',          // 上次保存位置对应的文档 key，防止把上一本的页码写到新文档
+  driver: null,
+};
+
+const defaultSpeechDriver = {
+  speak(u) { window.speechSynthesis.speak(u); },
+  cancel() { try { window.speechSynthesis.cancel(); } catch (_) {} },
+  pause() { try { window.speechSynthesis.pause(); } catch (_) {} },
+  resume() { try { window.speechSynthesis.resume(); } catch (_) {} },
+};
+function speechDriver() { return speech.driver || defaultSpeechDriver; }
+// 测试钩子：换成可控驱动后，断言句序 / 跨页 / 暂停恢复，不依赖机器上有没有语音引擎
+App._setSpeechDriver = (d) => { speech.driver = d || null; };
 
 function syncSpeakUi() {
   const E = App.els || {};
   if (E.speak) {
-    E.speak.classList.toggle('active', speakState.status !== 'idle');
-    E.speak.title = speakState.status === 'speaking' ? '暂停朗读'
-      : speakState.status === 'paused' ? '继续朗读' : '朗读当前页';
+    E.speak.classList.toggle('active', speech.status !== 'idle');
+    E.speak.title = speech.status === 'speaking' ? '暂停朗读（跨页连续）'
+      : speech.status === 'paused' ? '继续朗读' : '朗读：从当前位置连续朗读（句级高亮）';
+    E.speak.setAttribute('aria-pressed', speech.status !== 'idle' ? 'true' : 'false');
   }
-  if (E.speakStop) E.speakStop.disabled = speakState.status === 'idle';
-}
-
-async function pageTextForSpeech(pdfPage) {
-  try {
-    const tc = await pdfPage.getTextContent();
-    const parts = [];
-    for (const it of tc.items) {
-      const s = String(it.str || '');
-      if (!s) continue;
-      parts.push(s);
-      if (!/\s$/.test(s)) parts.push(' ');
-    }
-    return parts.join('').replace(/\s+/g, ' ').trim();
-  } catch (_) { return ''; }
+  if (E.speakStop) E.speakStop.disabled = speech.status === 'idle';
 }
 
 // 富文档（Word / PPT / Excel / Markdown）没有 pdfPage，直接读渲染出来的 DOM 文本
@@ -2282,62 +3133,387 @@ function richTextForSpeech(pageNum) {
   if (!host) return '';
   const pages = Array.from(host.querySelectorAll('.doc-page'));
   const node = pages.find((p) => +p.dataset.page === pageNum) || pages[0] || host;
-  return String(node.innerText || '').replace(/\s+/g, ' ').trim();
+  // 只读正文，别把页眉页脚（「3 / 12」）也念出来
+  const body = node.querySelector ? node.querySelector('.doc-page-body') : null;
+  return String((body || node).innerText || '').replace(/\s+/g, ' ').trim();
 }
 
-function startSpeak(text, label) {
-  if (!text) { toast('这一页没有可朗读的文字（可能是扫描件）'); return false; }
-  const u = new SpeechSynthesisUtterance(text.slice(0, 6000));
-  u.lang = /[\u4e00-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
-  u.rate = 1;
-  u.onend = () => { speakState.status = 'idle'; syncSpeakUi(); };
-  u.onerror = () => { speakState.status = 'idle'; syncSpeakUi(); };
-  try { window.speechSynthesis.cancel(); } catch (_) {}
-  window.speechSynthesis.speak(u);
-  speakState.status = 'speaking';
+const SENT_END = '。！？!?；;';
+const SENT_CLOSERS = '”’"\')）】」』';
+// 断句：CJK 标点直接断；英文句点后面必须是空白或结尾，且前一个字符不是数字（避开 1.5 / e.g.）。
+// 过短的片段并进上一句，过长的按逗号 / 空格切成 <=180 字的块，避免一次念太久。
+function splitPlainText(text) {
+  const s = String(text || '');
+  if (!s.trim()) return [];
+  const raw = [];
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    let cut = SENT_END.includes(ch);
+    if (!cut && ch === '.') {
+      const next = s[i + 1] || '';
+      const prev = s[i - 1] || '';
+      if ((!next || /\s/.test(next)) && !/\d/.test(prev)) cut = true;
+    }
+    if (!cut) continue;
+    let end = i + 1;
+    while (end < s.length && SENT_CLOSERS.includes(s[end])) end++;
+    raw.push([start, end]);
+    start = end;
+    while (start < s.length && /\s/.test(s[start])) start++;
+    i = start - 1;
+  }
+  if (start < s.length) raw.push([start, s.length]);
+
+  const merged = [];
+  for (const [a, b] of raw) {
+    if (!s.slice(a, b).trim()) continue;
+    const last = merged[merged.length - 1];
+    if (b - a < 4 && last) last[1] = b;
+    else merged.push([a, b]);
+  }
+
+  const out = [];
+  for (const [a, b] of merged) {
+    let cur = a;
+    while (cur < b) {
+      let cut = Math.min(b, cur + 180);
+      if (cut < b) {
+        const slice = s.slice(cur, cut);
+        const at = Math.max(slice.lastIndexOf('，'), slice.lastIndexOf(','), slice.lastIndexOf(' '));
+        if (at > 40) cut = cur + at + 1;
+      }
+      const piece = s.slice(cur, cut).trim();
+      if (piece) out.push({ text: piece, start: cur, end: cut });
+      cur = cut;
+      while (cur < b && /\s/.test(s[cur])) cur++;
+    }
+  }
+  return out;
+}
+
+// PDF 页：把文本项拼成一条字符串，同时记录每个字符属于哪个 item 的第几个字符，
+// 这样断句后的范围还能精确回查到 textlayer 的 span。
+function buildFlatText(items) {
+  let flat = '';
+  const map = [];
+  for (let i = 0; i < items.length; i++) {
+    const str = String((items[i] && items[i].str) || '');
+    if (!str) continue;
+    for (let c = 0; c < str.length; c++) { flat += str[c]; map.push({ i, c }); }
+    if (!/\s$/.test(str)) { flat += ' '; map.push(null); }
+  }
+  return { flat, map };
+}
+
+async function pageSentences(n) {
+  const s = App.state;
+  if (s.mode === 'rich') {
+    const text = richTextForSpeech(n).replace(/\s+/g, ' ').trim();
+    return splitPlainText(text).map((x) => ({ text: x.text }));
+  }
+  const el = App.pageEl(n);
+  if (!el || !el._pdfPage) return [];
+  await buildTextLayer(n);          // 句级高亮要按 span 建 Range，文本层必须先就绪
+  const items = await getTextContent(n);
+  const { flat, map } = buildFlatText(items);
+  const out = [];
+  for (const p of splitPlainText(flat)) {
+    let a = p.start, b = p.end;
+    while (a < b && !map[a]) a++;
+    while (b > a && !map[b - 1]) b--;
+    if (a >= b) continue;
+    const first = map[a], last = map[b - 1];
+    out.push({ text: p.text, item0: first.i, off0: first.c, item1: last.i, off1: last.c + 1 });
+  }
+  return out;
+}
+
+async function safePageSentences(n) {
+  try { return await pageSentences(n); } catch (_) { return []; }
+}
+
+function sentenceRects(n, item) {
+  const el = App.pageEl(n);
+  if (!el || item.item0 == null) return [];
+  const sp0 = el.querySelector('.textlayer span[data-item="' + item.item0 + '"]');
+  const sp1 = el.querySelector('.textlayer span[data-item="' + item.item1 + '"]');
+  if (!sp0 || !sp1 || !sp0.firstChild || !sp1.firstChild) return [];
+  try {
+    const range = document.createRange();
+    range.setStart(sp0.firstChild, Math.min(item.off0, sp0.firstChild.length));
+    range.setEnd(sp1.firstChild, Math.min(item.off1, sp1.firstChild.length));
+    if (window.SelectionUI && SelectionUI._rectsForPage) {
+      return SelectionUI._rectsForPage(el, range);
+    }
+    const pr = el.getBoundingClientRect();
+    const unit = el._unit || { w: pr.width || 1, h: pr.height || 1 };
+    const scale = (pr.width / unit.w) || 1;
+    return Array.from(range.getClientRects()).map((r) => ({
+      x: (r.left - pr.left) / scale, y: (r.top - pr.top) / scale,
+      w: r.width / scale, h: r.height / scale,
+    }));
+  } catch (_) { return []; }
+}
+
+function clearSpeechHl() {
+  for (const el of document.querySelectorAll('#pages .speech-hl')) el.remove();
+  speech.hlPage = 0;
+}
+
+function paintSpeech(n, rects) {
+  const el = App.pageEl(n);
+  const host = el && el.querySelector('.speech-layer');
+  if (!host) return;
+  if (speech.hlPage && speech.hlPage !== n) {
+    const old = App.pageEl(speech.hlPage);
+    if (old) for (const x of old.querySelectorAll('.speech-hl')) x.remove();
+  }
+  host.innerHTML = '';
+  for (const r of rects) {
+    const d = document.createElement('div');
+    d.className = 'speech-hl';
+    d.style.left = r.x + 'px'; d.style.top = r.y + 'px';
+    d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
+    host.appendChild(d);
+  }
+  speech.hlPage = n;
+}
+
+function scrollToSpeech(n, rects) {
+  const el = App.pageEl(n);
+  if (!el || !rects.length) return;
+  const r = el.getBoundingClientRect();
+  const vr = App.els.viewer.getBoundingClientRect();
+  const c = rects[0];
+  const off = unitToSlotOffset(el, c.x + c.w / 2, c.y + c.h / 2);
+  const y = r.top + off.y;
+  if (y < vr.top + 24 || y > vr.bottom - 48) {
+    App.els.viewer.scrollTop += y - vr.top - vr.height * 0.35;
+    if (normRot(App.state.rotation) !== 0) {
+      App.els.viewer.scrollLeft += (r.left + off.x) - vr.left - vr.width / 2;
+    }
+  }
+}
+
+function highlightSentence(n, item) {
+  // 单页模式下目标页可能是 display:none，先切过去再量文字框；富文档没有句框也跟着翻页
+  if (n !== App.state.currentPage) scrollToPage(n, true, false);
+  if (!item || item.item0 == null) { clearSpeechHl(); return; }
+  const rects = sentenceRects(n, item);
+  paintSpeech(n, rects);
+  if (rects.length) scrollToSpeech(n, rects);
+}
+
+// ---- 位置记忆：按文档路径存 localStorage（只存页码 + 句序，不写库结构） ----
+function speechHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+function speechKey() {
+  const s = App.state;
+  const p = s.filePath || s.fileName;
+  return p ? 'trove.speech.v1.' + speechHash(p) : '';
+}
+function speechSavePos() {
+  const key = speechKey();
+  if (!key || speech.docKey !== key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify({
+      page: Math.max(1, speech.lastPage || speech.page || 1),
+      index: Math.max(0, speech.lastPage ? speech.lastIndex : (speech.index || 0)),
+      updated: Date.now(),
+    }));
+  } catch (_) {}
+}
+function speechLoadPos() {
+  const key = speechKey();
+  if (!key) return null;
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || 'null');
+    if (v && v.page >= 1) return v;
+  } catch (_) {}
+  return null;
+}
+
+function speechFinish() {
+  speech.token++;
+  speech.active = false;
+  speech.status = 'idle';
+  speech.list = [];
+  speech.index = 0;
+  clearSpeechHl();
+  speechSavePos();
   syncSpeakUi();
-  toast('开始朗读' + (label ? '：' + label : ''));
-  return true;
+  setStatus('朗读完成：已读到文档末尾');
+  toast('已读到文档末尾');
+}
+
+function speakCurrent() {
+  if (speech.status !== 'speaking') return;
+  const item = speech.list[speech.index];
+  if (!item) { speechNextPage(); return; }
+  const token = speech.token;
+  speech.lastPage = speech.page;
+  speech.lastIndex = speech.index;
+  highlightSentence(speech.page, item);
+  speechSavePos();
+  setStatus('朗读中：第 ' + speech.page + ' 页 · 第 ' + (speech.index + 1) + ' / ' + speech.list.length + ' 句');
+
+  const u = new SpeechSynthesisUtterance(String(item.text).slice(0, 2000));
+  u.lang = /[\u4e00-\u9fff]/.test(item.text) ? 'zh-CN' : 'en-US';
+  u.rate = 1;
+  u.onend = () => {
+    speech.active = false;
+    if (token !== speech.token || speech.status !== 'speaking') return;
+    speechAdvance();
+  };
+  u.onerror = (e) => {
+    speech.active = false;
+    if (token !== speech.token) return;
+    // 系统语音不可用：继续念下去只会空转，直接停下并说明原因
+    if (e && (e.error === 'not-allowed' || e.error === 'synthesis-unavailable' || e.error === 'audio-busy')) {
+      App.speakStop();
+      toast('系统语音不可用，朗读已停止');
+      return;
+    }
+    speechAdvance();   // 其它错误（没声音 / 被系统打断）不要卡死
+  };
+  speech.active = true;
+  try { speechDriver().speak(u); } catch (_) {
+    speech.active = false;
+    setTimeout(speechAdvance, 0);   // 别用同步递归，长文档会爆栈
+  }
+}
+
+function speechAdvance() {
+  if (speech.status !== 'speaking') return;
+  speech.index++;
+  if (speech.index < speech.list.length) { speakCurrent(); return; }
+  speechNextPage();
+}
+
+async function speechNextPage() {
+  const token = ++speech.token;
+  const s = App.state;
+  let n = (speech.page || s.currentPage || 1) + 1;
+  setStatus('朗读：正在准备第 ' + n + ' 页…');
+  while (n <= s.numPages) {
+    const list = await safePageSentences(n);
+    if (token !== speech.token || speech.status !== 'speaking') return;
+    if (list.length) {
+      speech.page = n;
+      speech.index = 0;
+      speech.list = list;
+      speakCurrent();
+      return;
+    }
+    setStatus('第 ' + n + ' 页没有可朗读的文字，已跳过');
+    n++;
+  }
+  speechFinish();
 }
 
 App.speakToggle = async function () {
-  if (!('speechSynthesis' in window)) { toast('当前环境不支持朗读'); return; }
-  if (speakState.status === 'speaking') {
-    window.speechSynthesis.pause();
-    speakState.status = 'paused';
-    syncSpeakUi();
-    return;
-  }
-  if (speakState.status === 'paused') {
-    window.speechSynthesis.resume();
-    speakState.status = 'speaking';
-    syncSpeakUi();
-    return;
-  }
+  if (!('speechSynthesis' in window) && !speech.driver) { toast('当前环境不支持朗读'); return; }
   const s = App.state;
   if (!s.pdfDoc && s.mode !== 'rich') { toast('先打开一个文档'); return; }
-  const pageNum = s.currentPage || 1;
-  // 富文档（Word / PPT / Excel / Markdown）走 DOM 文本，没有 pdfPage
-  if (s.mode === 'rich') {
-    const text = richTextForSpeech(pageNum);
-    if (!text) { toast('这篇文档没有可朗读的文字'); return; }
-    if (startSpeak(text, '第 ' + pageNum + ' 页')) speakState.page = pageNum;
+  if (speech.status === 'speaking') {
+    speechDriver().pause();
+    speech.status = 'paused';
+    syncSpeakUi();
+    setStatus('朗读已暂停');
     return;
   }
-  const el = App.pageEl(pageNum);
-  const pdfPage = el && el._pdfPage;
-  if (!pdfPage) { toast('这一页还没渲染好，稍等一下再点'); return; }
-  const text = (await pageTextForSpeech(pdfPage)).slice(0, 6000);
-  if (startSpeak(text, '第 ' + pageNum + ' 页')) speakState.page = pageNum;
+  if (speech.status === 'paused') {
+    // 句间准备下一页时暂停：没有 utterance 可 resume，直接重新起当前句
+    if (speech.active) speechDriver().resume();
+    speech.status = 'speaking';
+    syncSpeakUi();
+    setStatus('朗读继续：第 ' + speech.page + ' 页 · 第 ' + (speech.index + 1) + ' / ' + speech.list.length + ' 句');
+    if (!speech.active) speakCurrent();
+    return;
+  }
+
+  // 从头开始：从当前页读；若上次就停在这一页，从记住的句子续读
+  const pageNum = s.currentPage || 1;
+  const token = ++speech.token;
+  let list = await safePageSentences(pageNum);
+  if (token !== speech.token) return;
+  if (!list.length) {
+    let n = pageNum + 1;
+    while (n <= s.numPages) {
+      const l = await safePageSentences(n);
+      if (token !== speech.token) return;
+      if (l.length) { list = l; break; }
+      n++;
+    }
+    if (!list.length) { toast('这篇文档没有可朗读的文字（可能是扫描件）'); return; }
+    speech.page = n;
+  } else {
+    speech.page = pageNum;
+  }
+  const memo = speechLoadPos();
+  let idx = 0;
+  if (memo && memo.page === speech.page && memo.index > 0 && memo.index < list.length) {
+    idx = memo.index;
+    toast('从上次位置继续：第 ' + speech.page + ' 页第 ' + (idx + 1) + ' 句');
+  }
+  speech.index = idx;
+  speech.list = list;
+  speech.docKey = speechKey();
+  speech.lastPage = speech.page;
+  speech.lastIndex = idx;
+  speech.status = 'speaking';
+  syncSpeakUi();
+  if (!idx) toast('开始朗读：第 ' + speech.page + ' 页');
+  speakCurrent();
 };
 
 App.speakStop = function () {
-  if (!('speechSynthesis' in window)) return;
-  try { window.speechSynthesis.cancel(); } catch (_) {}
-  speakState.status = 'idle';
+  speech.token++;
+  speech.active = false;
+  speech.status = 'idle';
+  speech.list = [];
+  speech.index = 0;
+  try { speechDriver().cancel(); } catch (_) {}
+  clearSpeechHl();
+  speechSavePos();
   syncSpeakUi();
+  setStatus('朗读已停止');
 };
-App.speakStatus = function () { return speakState.status; };
+App.speakStatus = function () { return speech.status; };
+App.speechState = function () {
+  return {
+    status: speech.status, page: speech.page, index: speech.index,
+    total: speech.list.length, lastPage: speech.lastPage, lastIndex: speech.lastIndex,
+    text: (speech.list[speech.index] || {}).text || '',
+    highlighted: document.querySelectorAll('#pages .speech-hl').length,
+  };
+};
+
+// 朗读中按 H / U 直接给当前句加高亮 / 下划线（Zotero Read Aloud 的习惯）。
+// 只对 PDF 有效：富文档没有句框，给了也画不准。
+App.annotateSpeechSentence = function (kind) {
+  const s = speech.list[speech.index];
+  if (!s || s.item0 == null) { toast('当前句没有可标注的文字'); return null; }
+  const rects = sentenceRects(speech.page, s);
+  if (!rects.length) { toast('当前句没有可标注的文字'); return null; }
+  const underline = kind === 'underline' || kind === 'u';
+  const arr = App.state.annos.get(speech.page) || [];
+  const dup = arr.some((sh) => sh && sh.tool === 'mark'
+    && (sh.kind === 'underline' ? 'underline' : 'highlight') === (underline ? 'underline' : 'highlight')
+    && sh.text === s.text);
+  if (dup) { toast('这一句已经标注过了'); return null; }
+  const color = ($('sel-color') && $('sel-color').value) || '#ffd54f';
+  const sh = Anno.addShape(speech.page, {
+    tool: 'mark', color, width: 0, rects, text: s.text,
+    ...(underline ? { kind: 'underline' } : {}),
+  });
+  toast(underline ? '已给当前句加下划线' : '已高亮当前句');
+  return sh;
+};
 
 // 打印当前文档：交给系统默认程序（Windows Start-Process -Verb Print / macOS·Linux lp）
 App.printCurrent = async function () {
@@ -2353,18 +3529,34 @@ App.printCurrent = async function () {
 function bind() {
   const E = App.els = {
     open: $('btn-open'), zoomOut: $('btn-zoom-out'), zoomIn: $('btn-zoom-in'),
-    scale: $('scale-select'), prev: $('btn-prev'), next: $('btn-next'),
+    scale: $('scale-select'), prev: $('btn-prev'), next: $('btn-next'), spread: $('btn-spread'),
     pageInput: $('page-input'), pageCount: $('page-count'), fileName: $('file-name'),
     status: $('status-text'), zoom: $('zoom-text'), hint: $('empty-hint'),
     viewer: $('viewer'), pages: $('pages'),
     save: $('btn-save'),
     speak: $('btn-speak'), speakStop: $('btn-speak-stop'), print: $('btn-print'),
+    rotateLeft: $('btn-rotate-left'), rotateRight: $('btn-rotate-right'), split: $('btn-split'),
+    refPane: $('ref-pane'), refPrev: $('ref-prev'), refNext: $('ref-next'), refPage: $('ref-page'),
+    refFollow: $('ref-follow'), refClose: $('ref-close'),
   };
 
   // v9：朗读 / 停止 / 打印
   if (E.speak) E.speak.addEventListener('click', () => App.speakToggle());
   if (E.speakStop) E.speakStop.addEventListener('click', () => App.speakStop());
   if (E.print) E.print.addEventListener('click', () => App.printCurrent());
+
+  // v34：旋转与分屏
+  if (E.rotateLeft) E.rotateLeft.addEventListener('click', () => App.rotateView(-90));
+  if (E.rotateRight) E.rotateRight.addEventListener('click', () => App.rotateView(90));
+  if (E.split) E.split.addEventListener('click', () => App.setSplitView(!App.state.split));
+  if (E.refClose) E.refClose.addEventListener('click', () => App.setSplitView(false));
+  if (E.refPrev) E.refPrev.addEventListener('click', () => { ref.follow = false; if (E.refFollow) E.refFollow.checked = false; refSetPage(ref.page - 1); });
+  if (E.refNext) E.refNext.addEventListener('click', () => { ref.follow = false; if (E.refFollow) E.refFollow.checked = false; refSetPage(ref.page + 1); });
+  if (E.refPage) E.refPage.addEventListener('change', () => { ref.follow = false; if (E.refFollow) E.refFollow.checked = false; refSetPage(parseInt(E.refPage.value, 10) || 1); });
+  if (E.refFollow) E.refFollow.addEventListener('change', () => {
+    ref.follow = !!E.refFollow.checked;
+    if (ref.follow) refSetPage(Math.min(App.state.numPages || 1, (App.state.currentPage || 1) + 1));
+  });
 
   // 弹系统对话框选 PDF（工具栏「打开」、标签栏「＋」、Ctrl+O 都走这里）
   async function openViaDialog() {
@@ -2397,6 +3589,8 @@ function bind() {
           try {
             const payload = await window.pdfBridge.openDocPath({ path: t.path, page: t.page });
             if (!payload || !payload.ok || !payload.filePath) continue;
+            payload.rotation = normRot(t.rotation || 0);   // v34：恢复视图旋转与参考页
+            payload.refPage = Math.max(1, Math.floor(+t.refPage || t.page || 1));
             const tab = makeTab(payload);
             App.tabs.push(tab);
             opened++;
@@ -2473,6 +3667,7 @@ function bind() {
 
   // 文献库：暴露打开钩子给覆盖层用；工具栏「库」按钮回到库；启动即显示库
   window.__libOpen = (payload) => openDocument(payload, { newTab: true });
+  startReadingTracker();
   if (window.DocSwitch) window.DocSwitch.init();
   if (window.LibraryUI) {
     window.LibraryUI.init();
@@ -2482,7 +3677,11 @@ function bind() {
     if (window.pdfBridge.isApp) window.LibraryUI.show();
   }
   if (window.pdfBridge.getSettings) {
-    window.pdfBridge.getSettings().then((s) => applyTheme(s && s.theme)).catch(() => {});
+    window.pdfBridge.getSettings().then((s) => {
+      applyTheme(s && s.theme);
+      // v34：分屏偏好启动即生效（没有文档时先记着，打开 PDF 再显示）
+      if (s && s.splitView) { App.state.split = true; syncSplitPane({ relayout: false }); }
+    }).catch(() => {});
   }
   if (window.pdfBridge.onOpenSettings) {
     window.pdfBridge.onOpenSettings(() => {
@@ -2499,6 +3698,10 @@ function bind() {
 
   E.prev.addEventListener('click', prevPage);
   E.next.addEventListener('click', nextPage);
+  if (E.spread) E.spread.addEventListener('click', () => {
+    const m = App.setViewMode(App.state.viewMode === 'spread' ? 'scroll' : 'spread');
+    toast(m === 'spread' ? '已切换到双页对开' : '已切换到连续滚动');
+  });
   E.pageInput.addEventListener('change', () => scrollToPage(parseInt(E.pageInput.value, 10) || 1, false, true));
   E.save.addEventListener('click', doSave);
 
@@ -2525,6 +3728,15 @@ function bind() {
     if (e.target && e.target.closest && e.target.closest('button, a, [role="button"], [contenteditable="true"]')) return;
     if (window.LibraryUI && window.LibraryUI.isOpen()) return; // 库开着时方向键不应在后台翻 PDF
     if (e.defaultPrevented) return;                          // 弹窗/灯箱已经处理过这个键
+    // v35：朗读中 H / U 标注当前句（必须在工具快捷键之前拦，否则 H 会切成荧光笔）
+    if (speech.status !== 'idle' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const sk = e.key.toLowerCase();
+      if (sk === 'h' || sk === 'u') {
+        App.annotateSpeechSentence(sk);
+        e.preventDefault();
+        return;
+      }
+    }
     if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) {
       if (App.state.mode === 'rich') return;
       Anno.undo(); e.preventDefault(); return;
@@ -2537,6 +3749,19 @@ function bind() {
       if (k === 'p' && e.shiftKey) { exportCurrentPagePng(); e.preventDefault(); return; }
       if (k === 'p') { App.printCurrent(); e.preventDefault(); return; }   // v9：打印当前文档
       if (k === 'i' && e.shiftKey) { window.pdfBridge.openDevTools && window.pdfBridge.openDevTools(); e.preventDefault(); return; }
+      if (k === '[') { App.rotateView(-90); e.preventDefault(); return; }   // v34：逆时针旋转
+      if (k === ']') { App.rotateView(90); e.preventDefault(); return; }    // v34：顺时针旋转
+      if (k === 'd' && e.shiftKey) {                                        // 双页对开
+        const m = App.setViewMode(App.state.viewMode === 'spread' ? 'scroll' : 'spread');
+        toast(m === 'spread' ? '已切换到双页对开' : '已切换到连续滚动');
+        e.preventDefault(); return;
+      }
+    }
+    // B：给当前页加 / 删书签（存标注 sidecar，跨启动可用）
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'b' || e.key === 'B') && App.state.mode === 'pdf') {
+      bookmarkToggle(App.state.currentPage);
+      e.preventDefault();
+      return;
     }
     // Z：放大模式开关。滚轮在这模式下专职缩放（锚点跟光标），空格+左键拖动平移。
     if (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'z' || e.key === 'Z')) {
@@ -2673,6 +3898,22 @@ function bind() {
     openImageLightbox(pageEl, e.clientX, e.clientY);
   });
 
+  // 智能跳转：普通单击点到引用标记 / 参考文献条目时互跳（Sioyek Smart Jump 的做法）。
+  // 只在默认选择工具下生效；拖选、双击、带修饰键、画图工具、看图模式都不触发。
+  E.pages.addEventListener('click', (e) => {
+    if (e.button !== 0 || e.detail > 1) return;
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (document.body.classList.contains('tool-image') || document.body.classList.contains('zoom-pan')) return;
+    if (window.Anno && Anno.state && Anno.state.tool !== 'select') return;
+    if (String(window.getSelection && getSelection())) return;   // 拖选后残留选区不触发
+    if (!App.state || App.state.mode !== 'pdf' || !App.state.pdfDoc) return;
+    const t = e.target;
+    if (t && t.closest && t.closest('.anno, .anno-base, .sj-layer, .hl-layer, .speech-layer')) return;
+    const pageEl = t.closest && t.closest('#pages .page');
+    if (!pageEl) return;
+    Promise.resolve(App._smartJumpAt(e.clientX, e.clientY)).catch(() => {});
+  });
+
   // 页面右键菜单：把不常用的操作收在这里，工具栏就不用越堆越多
   E.pages.addEventListener('contextmenu', (e) => {
     const pageEl = e.target.closest && e.target.closest('.page');
@@ -2686,6 +3927,13 @@ function bind() {
       { label: '放大看这一块', run: () => openRegionLightbox(pageEl, e.clientX, e.clientY) },
       { label: '复制页码', run: () => { window.pdfBridge.copyText(String(n)); toast('已复制页码 ' + n); } },
       '-',
+      {
+        label: App.state.viewMode === 'spread' ? '改回连续滚动' : '改成双页对开',
+        run: () => {
+          const m = App.setViewMode(App.state.viewMode === 'spread' ? 'scroll' : 'spread');
+          toast(m === 'spread' ? '已切换到双页对开' : '已切换到连续滚动');
+        },
+      },
       {
         label: App.state.viewMode === 'page' ? '改成连续滚动' : '改成单页翻页',
         run: () => {
@@ -2734,9 +3982,12 @@ function bind() {
 
   let rt = null;
   window.addEventListener('resize', () => {
-    if (App.state.scaleMode === 'page-width' || App.state.scaleMode === 'page-fit') {
-      clearTimeout(rt); rt = setTimeout(applyLayout, 120);
-    }
+    clearTimeout(rt);
+    rt = setTimeout(() => {
+      if (App.state.scaleMode === 'page-width' || App.state.scaleMode === 'page-fit') applyLayout();
+      // v34：分屏宽度是百分比，窗口变化后参考页要按新宽度重排
+      if (App.state.split) refRender();
+    }, 120);
   });
 
   // 拖拽打开

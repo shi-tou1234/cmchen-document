@@ -544,6 +544,36 @@
     return k ? '[@' + k + ']' : '';
   }
 
+  // ---------- 文内引注（in-text citation with locator） ----------
+  // 差距报告里「文内引注定位符」的简化落地：编号制出 [n, p. X]，作者-年份制出
+  // (Surname, 2020, p. X)。定位符由用户填（页码 / 章节 / 图号），可空。
+  // 不做同上 / 前引缩写与作者消歧（保持差距报告的边界声明）。
+  function citeInText(it, opts) {
+    const o = opts || {};
+    const style = str(o.style) || 'gbt7714';
+    const locator = str(o.locator).replace(/^\s*,\s*/, '');
+    const list = authorsOf(it).filter((c) => c.creatorType !== 'editor');
+    const year = str(it && it.year) || 'n.d.';
+    const num = Math.max(1, Math.floor(+o.num || 1));
+    if (isNumericStyle(style) || (Csl && Csl.isCslStyle(style) && style.numeric)) {
+      // 编号制：定位符进方括号 —— [12, p. 5]
+      return '[' + num + (locator ? ', ' + locator : '') + ']';
+    }
+    const withLoc = (base) => base + (locator ? ', ' + locator : '');
+    // 作者-年份：1 位姓；2 位 A & B；3 位以上 A et al.（中文名 / 机构名按原文）
+    const surnames = list.map((c) => str(c.lastName) || str(c.firstName)).filter(Boolean);
+    let who;
+    if (!surnames.length) who = str(it && it.title).slice(0, 40) || '佚名';
+    else if (surnames.length === 1) who = surnames[0];
+    else if (surnames.length === 2) who = surnames[0] + ' & ' + surnames[1];
+    else who = surnames[0] + ' et al.';
+    if (style === 'mla') {
+      // MLA 9：正文引注不带年份，页码紧跟姓，无逗号
+      return '(' + who + (locator ? ' ' + locator : '') + ')';
+    }
+    return '(' + withLoc(who + ', ' + year) + ')';
+  }
+
   // 统一入口：先看是不是 CSL 样式（csl: 前缀），否则走 5 种内置样式。
   // num 只影响编号制样式（IEEE 的 [n]、CSL 的 citation-number）。
   function format(it, style, num) {
@@ -621,7 +651,7 @@
 
   return {
     format, gbt, apa, chicago, ieee, mla, authorsOf, authorNames, styleLabel, typeLabel,
-    citekey, citekeys, atCitation,
+    citekey, citekeys, atCitation, citeInText,
     styleList, isNumericStyle, isCslStyle, registerCslStyles, cslStyleInfo, cslSort,
     STYLES, TYPE_CODE, TYPE_NAME,
   };

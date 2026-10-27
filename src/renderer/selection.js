@@ -24,6 +24,68 @@ window.SelectionUI = (function () {
     }).filter((x) => x.unit && x.unit.w > 10 && x.r.width > 10 && x.r.height > 10);
   }
 
+  // 客户端矩形 → 页面单位坐标。
+  // PDF 页可能被视图旋转（v34）：用标注层的逆 CTM 换算，旋转、缩放一起算进去，
+  // 得到的仍是「未旋转页面坐标」——标注数据、导出副本都按这套坐标存。
+  // 富文档不旋转，仍按页面矩形 + CSS zoom 算。
+  function toUnitRect(el, r) {
+    const unit = el._unit || { w: el.offsetWidth || 1, h: el.offsetHeight || 1 };
+    if (window.App && App.state && App.state.mode !== 'rich') {
+      const svg = el.querySelector('.anno') || el.querySelector('.anno-base');
+      const ctm = svg && svg.getScreenCTM ? svg.getScreenCTM() : null;
+      if (ctm) {
+        const inv = ctm.inverse();
+        const pts = [
+          new DOMPoint(r.left, r.top).matrixTransform(inv),
+          new DOMPoint(r.right, r.top).matrixTransform(inv),
+          new DOMPoint(r.right, r.bottom).matrixTransform(inv),
+          new DOMPoint(r.left, r.bottom).matrixTransform(inv),
+        ];
+        const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+        const x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
+        const y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+        const x = Math.max(0, Math.min(unit.w, x0));
+        const y = Math.max(0, Math.min(unit.h, y0));
+        return {
+          x, y,
+          w: Math.max(0.5, Math.min(unit.w, x1) - x),
+          h: Math.max(0.5, Math.min(unit.h, y1) - y),
+        };
+      }
+    }
+    const pr = el.getBoundingClientRect();
+    const scale = pr.width / unit.w || 1;
+    return {
+      x: Math.max(0, (r.left - pr.left) / scale),
+      y: Math.max(0, (r.top - pr.top) / scale),
+      w: Math.max(0.5, r.width / scale),
+      h: Math.max(0.5, r.height / scale),
+    };
+  }
+
+  // 同一行相邻/重叠的框合并，避免一整段文字生成几十个碎片
+  function mergeInto(out, q) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(q.y - last.y) < Math.max(2, q.h * 0.35)
+      && q.x <= last.x + last.w + 2.5) {
+      const right = Math.max(last.x + last.w, q.x + q.w);
+      last.x = Math.min(last.x, q.x);
+      last.w = right - last.x;
+      last.h = Math.max(last.h, q.h);
+      last.y = Math.min(last.y, q.y);
+    } else out.push(q);
+  }
+
+  // 已知某一页时直接换算（朗读句级高亮用）：不用遍历所有页，长文档里更省
+  function rectsForPage(el, range) {
+    const out = [];
+    for (const r of range.getClientRects()) {
+      if (!r || r.width < 1 || r.height < 1) continue;
+      mergeInto(out, toUnitRect(el, r));
+    }
+    return out;
+  }
+
   function rectsForRange(range) {
     const pages = pageGeo();
     const groups = new Map();
@@ -37,25 +99,9 @@ window.SelectionUI = (function () {
         return !best || d < best.d ? { p, d } : best;
       }, null)?.p;
       if (!page) continue;
-      const scale = page.r.width / page.unit.w;
-      if (!scale) continue;
-      const q = {
-        x: Math.max(0, (r.left - page.r.left) / scale),
-        y: Math.max(0, (r.top - page.r.top) / scale),
-        w: Math.max(0.5, r.width / scale),
-        h: Math.max(0.5, r.height / scale),
-      };
+      const q = toUnitRect(page.el, r);
       const arr = groups.get(+page.el.dataset.page) || [];
-      // 同一行相邻/重叠的框合并，避免一整段文字生成几十个碎片
-      const last = arr[arr.length - 1];
-      if (last && Math.abs(q.y - last.y) < Math.max(2, q.h * 0.35)
-        && q.x <= last.x + last.w + 2.5) {
-        const right = Math.max(last.x + last.w, q.x + q.w);
-        last.x = Math.min(last.x, q.x);
-        last.w = right - last.x;
-        last.h = Math.max(last.h, q.h);
-        last.y = Math.min(last.y, q.y);
-      } else arr.push(q);
+      mergeInto(arr, q);
       groups.set(+page.el.dataset.page, arr);
     }
     return groups;
@@ -236,5 +282,5 @@ window.SelectionUI = (function () {
     });
   }
 
-  return { init, openComment, closeComment, _rectsForRange: rectsForRange };
+  return { init, openComment, closeComment, _rectsForRange: rectsForRange, _rectsForPage: rectsForPage };
 })();

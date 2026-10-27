@@ -130,14 +130,15 @@ function pageForPath(filePath) {
   return lastPageFor(filePath) || 0;
 }
 
-// 只更新已存在条目的页码：翻阅时高频调用，不重排列表、不重建菜单
-function recordPage(filePath, page) {
+// 只更新已存在条目的页码：翻阅时高频调用，不重排列表、不重建菜单。
+// total（总页数）由阅读器一并提供，列表用它算阅读进度百分比。
+function recordPage(filePath, page, total) {
   if (!filePath || !Number.isFinite(page)) return;
   const it = recentList().find((r) => r.path === filePath);
   if (it && it.page !== page) { it.page = page; saveWindowState(appState); }
   // 同步到库条目（若该文件属于某个条目）
   const li = library.findItemByPath(filePath);
-  if (li && li.page !== page) library.setPageByKey(li.key, page);
+  if (li && (li.page !== page || (total && li.pageTotal !== total))) library.setPageByKey(li.key, page, total);
 }
 
 // 读出字节 + 附上该文件上次的页码，供渲染进程直接落到上次位置
@@ -217,6 +218,8 @@ function saveSessionInfo(info) {
         kind: t.kind === 'rich' ? 'rich' : 'pdf',
         itemKey: String(t.itemKey || '').slice(0, 64),
         page: Math.max(1, Math.min(999999, Math.floor(+t.page) || 1)),
+        rotation: [0, 90, 180, 270].includes(+t.rotation) ? +t.rotation : 0,   // v34：视图旋转
+        refPage: Math.max(1, Math.min(999999, Math.floor(+t.refPage) || 1)),  // v34：分屏参考页
       });
       if (tabs.length >= MAX_SESSION_TABS) break;
     }
@@ -236,6 +239,8 @@ function readSessionInfo() {
         kind: t.kind === 'rich' ? 'rich' : 'pdf',
         itemKey: String(t.itemKey || ''),
         page: Math.max(1, Math.floor(+t.page) || 1),
+        rotation: [0, 90, 180, 270].includes(+t.rotation) ? +t.rotation : 0,
+        refPage: Math.max(1, Math.floor(+t.refPage) || 1),
       })).slice(0, MAX_SESSION_TABS),
     };
   } catch (_) { return { saved: 0, active: '', tabs: [] }; }
@@ -445,7 +450,7 @@ ipcMain.handle('pick-documents', () => pickDocumentsViaDialog());
 
 // 渲染进程上报当前页码（按文件记住，下次打开回到同一位置）
 ipcMain.on('set-page', (_e, info) => {
-  try { if (info) recordPage(info.path, info.page); }
+  try { if (info) recordPage(info.path, info.page, info.total); }
   catch (err) { if (win && !win.isDestroyed()) win.webContents.send('save-error', '阅读进度保存失败：' + err.message); }
 });
 
@@ -657,8 +662,12 @@ async function chooseDataDirViaDialog() {
 
 function importRefsFile(file) {
   try {
-    let raw = fs.readFileSync(file, 'utf8');
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    // EndNote 导出的 XML 有时是 UTF-16（带 BOM），按 utf8 读会成乱码；这里按字节嗅探解码
+    let raw = '';
+    const buf = fs.readFileSync(file);
+    if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) raw = require('iconv-lite').decode(buf, 'utf16le');
+    else if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) raw = require('iconv-lite').decode(buf, 'utf16be');
+    else { raw = buf.toString('utf8'); if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); }
     const parsed = formats.parseRefs(raw, file);
     const res = library.importItems(parsed.records);
     if (win) win.webContents.send('lib-changed');
@@ -670,10 +679,11 @@ async function importRefsViaDialog() {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
     title: '导入题录（BibTeX / RIS / EndNote / RefWorks / CSL-JSON）',
     filters: [
-      { name: '题录文件', extensions: ['bib', 'bibtex', 'ris', 'enw', 'refworks', 'json', 'txt'] },
+      { name: '题录文件', extensions: ['bib', 'bibtex', 'ris', 'enw', 'refworks', 'json', 'xml', 'txt'] },
       { name: 'BibTeX', extensions: ['bib', 'bibtex'] },
       { name: 'RIS', extensions: ['ris'] },
       { name: 'EndNote', extensions: ['enw'] },
+      { name: 'EndNote XML', extensions: ['xml'] },
       { name: 'RefWorks', extensions: ['refworks', 'txt'] },
     ],
     properties: ['openFile'],
@@ -936,6 +946,14 @@ ipcMain.handle('lib-open-item', async (_e, info) => {
   return payload;
 });
 ipcMain.handle('lib-update-item', (_e, info) => (info ? library.updateItem(info.key, info.patch || {}) : null));
+// 订阅条目 → 文献库（webpage 条目）。返回 ok + key，供界面把按钮置灰。
+ipcMain.handle('lib-add-item', (_e, info) => {
+  try {
+    const it = library.addItem(info || {});
+    if (win) win.webContents.send('lib-changed');
+    return { ok: true, key: it.key };
+  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
 // 回收站：默认“移除”= 软删除；永久删除只删索引，绝不删磁盘 PDF
 ipcMain.handle('lib-remove-item', (_e, info) => (info ? library.trashItem(info.key) : null));
 ipcMain.handle('lib-trash-item', (_e, info) => (info ? library.trashItem(info.key) : null));
@@ -1752,12 +1770,54 @@ ipcMain.handle('anno-save', (_e, info) => {
   try {
     // 空标注也落盘（用户清空后重开不应复活旧标注）
     const obj = { path: info.path, saved: Date.now(), pages: info.pages || [] };
+    // 用户书签存在同一个 sidecar 里，标注保存不能把它们冲掉
+    try {
+      const oldObj = JSON.parse(fs.readFileSync(annoFileFor(info.path), 'utf8'));
+      if (Array.isArray(oldObj.bookmarks)) obj.bookmarks = oldObj.bookmarks;
+    } catch (_) {}
     // 兜底：渲染层没带 id 的形状顺手补上（新建标注由渲染层生成 id，这里是保险）
     ensureAnnoIds(obj, '', () => {});
     atomicWrite(annoFileFor(info.path), JSON.stringify(obj));
     return true;
   } catch (err) { return { error: String(err && err.message ? err.message : err) }; }
 });
+// ---------- 用户书签（每份 PDF 一组，存标注 sidecar 的 bookmarks 字段） ----------
+function readSidecarBookmarks(filePath) {
+  try {
+    const obj = JSON.parse(fs.readFileSync(annoFileFor(filePath), 'utf8'));
+    const list = Array.isArray(obj.bookmarks) ? obj.bookmarks : [];
+    return list
+      .filter((b) => b && Number.isFinite(+b.page) && +b.page >= 1)
+      .map((b) => ({ page: Math.floor(+b.page), at: Number.isFinite(+b.at) ? +b.at : 0, label: String(b.label || '').slice(0, 60) }))
+      .sort((a, b) => a.page - b.page);
+  } catch (_) { return []; }
+}
+
+ipcMain.handle('bookmarks-load', (_e, info) => {
+  const p = info && info.path;
+  if (!p) return { ok: false, bookmarks: [] };
+  return { ok: true, bookmarks: readSidecarBookmarks(p) };
+});
+
+ipcMain.handle('bookmarks-save', (_e, info) => {
+  const p = info && info.path;
+  if (!p) return { ok: false, error: '没有文档路径' };
+  const list = (Array.isArray(info.bookmarks) ? info.bookmarks : [])
+    .filter((b) => b && Number.isFinite(+b.page) && +b.page >= 1)
+    .map((b) => ({ page: Math.floor(+b.page), at: Number.isFinite(+b.at) && +b.at > 0 ? +b.at : Date.now(), label: String(b.label || '').slice(0, 60) }))
+    .sort((a, b) => a.page - b.page);
+  try {
+    let obj = {};
+    try { obj = JSON.parse(fs.readFileSync(annoFileFor(p), 'utf8')); } catch (_) { obj = {}; }
+    obj.path = obj.path || p;
+    obj.saved = Date.now();
+    obj.bookmarks = list;
+    if (!Array.isArray(obj.pages)) obj.pages = [];
+    atomicWrite(annoFileFor(p), JSON.stringify(obj));
+    return { ok: true, bookmarks: list };
+  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
+
 ipcMain.handle('anno-load', (_e, info) => {
   if (!info || !info.path) return [];
   const file = annoFileFor(info.path);
@@ -1828,6 +1888,7 @@ function listAllAnnotations() {
           color: String(sh.color || ''),
           text, comment,
           kind: annoKindOf(sh),
+          replyTo: String(sh.replyTo || ''),
           itemKey: (meta && meta.itemKey) || parentKey,
           itemTitle: parent ? (parent.title || '(无标题)') : '',
           updated: (meta && meta.updated) || 0,
@@ -1979,6 +2040,95 @@ ipcMain.handle('anno-link', (_e, info) => {
 });
 
 ipcMain.handle('anno-list', () => listAllAnnotations());
+
+// ---------- 阅读时长统计（Calibre reading stats 式） ----------
+// 存 userData/reading-stats.json（不进 library.json：高频小写会搅乱库文件的保存节奏）。
+function readingStatsPath() { return path.join(app.getPath('userData'), 'reading-stats.json'); }
+
+ipcMain.handle('reading-stats-load', () => {
+  try {
+    const raw = fs.readFileSync(readingStatsPath(), 'utf8');
+    return { ok: true, stats: JSON.parse(raw) };
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn('[reading-stats] load failed:', err.message);
+    return { ok: true, stats: null };
+  }
+});
+
+ipcMain.handle('reading-stats-merge', (_e, info) => {
+  try {
+    const ReadingStats = require('./readingstats.js');
+    let disk = null;
+    try { disk = JSON.parse(fs.readFileSync(readingStatsPath(), 'utf8')); } catch (_) { disk = null; }
+    // 渲染进程传来的增量独立累计（见 renderer 侧心跳），与磁盘直接相加
+    const merged = ReadingStats.merge(disk, info && info.stats);
+    atomicWrite(readingStatsPath(), JSON.stringify(merged));
+    return { ok: true, stats: merged };
+  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
+
+// ---------- RSS 订阅（Zotero Feeds 的本地化实现） ----------
+// 按需联网：只在用户添加 / 刷新订阅时拉取，不后台轮询。解析在 feedparse.js（纯逻辑）。
+// 拉取用 Node 原生 http/https（不走 Chromium 网络栈）：系统代理会把 127.0.0.1 的本地
+// 测试源也劫持掉，而且订阅场景要的是「直连原文」，代理缓存/改写只会添乱。
+function feedHttpGet(url, redirects) {
+  return new Promise((resolve, reject) => {
+    const mod = /^https:\/\//i.test(url) ? require('https') : require('http');
+    const req = mod.get(url, { headers: { 'User-Agent': 'Trove/1.0 (local literature library)' }, timeout: 20000 }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && (redirects || 0) < 4) {
+        res.resume();
+        const next = new URL(res.headers.location, url).toString();
+        feedHttpGet(next, (redirects || 0) + 1).then(resolve, reject);
+        return;
+      }
+      if (res.statusCode !== 200) { res.resume(); reject(new Error('HTTP ' + res.statusCode)); return; }
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > 4 * 1024 * 1024) { req.destroy(); reject(new Error('订阅源超过 4MB，不像正常的 RSS')); return; }
+        chunks.push(c);
+      });
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => { req.destroy(new Error('拉取超时（20 秒）')); });
+    req.on('error', reject);
+  });
+}
+
+ipcMain.handle('feed-fetch', async (_e, info) => {
+  const url = String((info && info.url) || '').trim();
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: '订阅地址要以 http(s):// 开头' };
+  try {
+    const xml = await feedHttpGet(url);
+    const parsed = require('./feedparse.js').parseFeed(xml);
+    if (!parsed.entries.length) return { ok: false, error: '没有解析出任何条目（确认这是 RSS / Atom 源）', kind: parsed.kind };
+    return { ok: true, title: parsed.title || url, link: parsed.link, entries: parsed.entries };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+ipcMain.handle('feed-add', async (_e, info) => {
+  const url = String((info && info.url) || '').trim();
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: '订阅地址要以 http(s):// 开头' };
+  try {
+    const xml = await feedHttpGet(url);
+    const parsed = require('./feedparse.js').parseFeed(xml);
+    if (!parsed.entries.length) return { ok: false, error: '没有解析出任何条目（确认这是 RSS / Atom 源）' };
+    const r = library.addFeed(url, parsed.title || url);
+    if (!r.ok) return r;
+    if (win) win.webContents.send('lib-changed');
+    return { ok: true, feed: r.feed, entries: parsed.entries };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+ipcMain.handle('feed-remove', (_e, info) => {
+  const r = library.removeFeed(info && info.id);
+  if (r.ok && win) win.webContents.send('lib-changed');
+  return r;
+});
 ipcMain.handle('anno-set-tags', (_e, info) => {
   if (!info || !info.id) return { ok: false, error: '标注 id 为空' };
   return library.setAnnoTags(info.id, info.tags);
@@ -2107,6 +2257,28 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
       return { ok: true, path: filePath, images: copied, skipped };
     }
     let html = Md.render(outText);
+    // 公式：主进程用 KaTeX 把 data-md-math 占位渲染成最终 HTML。katex 不可用时占位原样保留
+    // （等宽源码显示），不算失败。有公式时把 css + woff2 字体带进 <文件名>.files/katex/，
+    // 否则别人打开导出文件没有字体，排版会退化。
+    let mathCount = 0;
+    const decodeEnt = (s) => String(s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+    try {
+      const katex = require('katex/dist/katex.min.js');
+      html = html.replace(
+        /<span class="md-math"[^>]*?data-md-math="([^"]*)"[^>]*>[\s\S]*?<\/span>|<div class="md-math-block"[^>]*?data-md-math="([^"]*)"[^>]*>[\s\S]*?<\/div>/g,
+        (whole, spanSrc, divSrc) => {
+          const display = divSrc !== undefined;
+          const src = decodeEnt(display ? divSrc : spanSrc);
+          try {
+            mathCount++;
+            return katex.renderToString(src, { displayMode: display, throwOnError: false, strict: false });
+          } catch (_) {
+            return whole;   // 单条失败退回源码占位，不影响其余公式
+          }
+        });
+    } catch (_) { /* 没有 katex（异常环境）：公式保持源码 */ }
     // R05：独立 HTML 里不能保留应用内部的占位链接（href="javascript:void(0)"，
     // 靠渲染层的 data-md-link 点击代理才可点）。这里按原有协议白名单换成真实 URL，
     // 非法协议维持不可点。GitHub / 音乐卡片走同一个 data-md-link 机制，一并覆盖。
@@ -2123,9 +2295,30 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
       if (rel.indexOf(filesDirName + '/') === 0) return '<img class="md-img" src="' + rel + '"' + rest + '>';
       return '<span class="md-img-missing">[图片缺失：' + rel + ']</span>';
     });
+    // 公式渲染成功过 → 把 KaTeX 的 css 和 woff2 字体带进 .files/katex/，导出文件离线可用。
+    // css 里的字体引用是相对路径 url(fonts/...)，保持 css 与 fonts 同级即可，不改写。
+    let katexHead = '';
+    if (mathCount > 0) {
+      const katexDist = path.join(__dirname, '..', 'node_modules', 'katex', 'dist');
+      const katexOut = path.join(filesDir, 'katex');
+      fs.mkdirSync(katexOut, { recursive: true });
+      let fontN = 0;
+      try {
+        fs.copyFileSync(path.join(katexDist, 'katex.min.css'), path.join(katexOut, 'katex.min.css'));
+        const fontsDir = path.join(katexDist, 'fonts');
+        fs.mkdirSync(path.join(katexOut, 'fonts'), { recursive: true });
+        for (const f of fs.readdirSync(fontsDir)) {
+          if (!f.endsWith('.woff2')) continue;
+          fs.copyFileSync(path.join(fontsDir, f), path.join(katexOut, 'fonts', f));
+          fontN++;
+        }
+        katexHead = '<link rel="stylesheet" href="' + filesDirName + '/katex/katex.min.css">\n';
+      } catch (_) { /* 资源拷贝失败不影响导出：公式结构在，字体退化到系统衬线 */ }
+      if (fontN === 0) katexHead = '';   // 没拷到字体就不引用，免得 404
+    }
     const page = '<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n' +
       '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
-      '<title>' + Md.esc(rawTitle) + '</title>\n' +
+      '<title>' + Md.esc(rawTitle) + '</title>\n' + katexHead +
       '<style>body{font-family:Georgia,"Noto Serif SC",serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.75;color:#24211d;background:#fdfcf9}' +
       'h1,h2,h3{line-height:1.35}img.md-img{max-width:100%;height:auto}blockquote{margin:1em 0;padding:.4em 1em;border-left:3px solid #c9b98a;background:#f6f1e3;color:#4c4436}' +
       'table{border-collapse:collapse}td,th{border:1px solid #d8d2c4;padding:4px 10px}code{background:#f0ece1;border-radius:3px;padding:1px 5px}' +
@@ -2134,7 +2327,7 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
       html + '\n</body>\n</html>\n';
     atomicWrite(filePath, page);
     appState.lastDir = path.dirname(filePath);
-    return { ok: true, path: filePath, images: copied, skipped };
+    return { ok: true, path: filePath, images: copied, skipped, math: mathCount };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }

@@ -119,6 +119,29 @@ module.exports = `(async () => {
   await App.doSearch('');
   await sleep(80);
 
+  // ---------- B08：PDF 设为双页对开后再打开富文档 ----------
+  // 富文档没有对开布局：有效模式必须落到单页，显示 / 导航 / 页码保持一致。
+  const shownRich = () => $$('#doc-view .doc-page').filter((el) => getComputedStyle(el).display !== 'none').map((el) => +el.dataset.page);
+  App.setViewMode('spread');
+  await sleep(200);
+  push('B08 富文档有效阅读模式为单页', App.effectiveViewMode() === 'page', App.effectiveViewMode());
+  push('B08 用户的 PDF 偏好仍保留为对开', App.state.viewMode === 'spread', App.state.viewMode);
+  push('B08 富文档不套用对开布局类', document.body.classList.contains('view-page') && !document.body.classList.contains('view-spread'),
+    document.body.className);
+  pageInput.value = '1';
+  pageInput.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(250);
+  push('B08 跳第 1 页只显示第 1 页', shownRich().join(',') === '1', shownRich().join(','));
+  pageInput.value = '2';
+  pageInput.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(250);
+  push('B08 跳第 2 页只显示第 2 页', shownRich().join(',') === '2', shownRich().join(','));
+  push('B08 页码状态与展示一致', App.state.currentPage === 2, App.state.currentPage);
+  push('B08 单页模式下阅读区从页首开始', ($('#viewer') || {}).scrollTop === 0, ($('#viewer') || {}).scrollTop);
+  App.setViewMode('scroll');
+  await sleep(200);
+  push('B08 切回连续滚动后两页都显示', shownRich().join(',') === '1,2', shownRich().join(','));
+
   // ---------- EPUB ----------
   await backToLibrary();
   const openedE = await openCard('itEpub', '.epub');

@@ -177,6 +177,6 @@ async function fetchMetadata(input, opts) {
 }
 
 module.exports = {
-  parseIdentifier, fetchMetadata, fetchByDoi, fetchByArxiv,
+  parseIdentifier, fetchMetadata, fetchByDoi, fetchByArxiv, getText,
   _crossrefToMeta: crossrefToMeta, _arxivEntry: arxivEntry,
 };

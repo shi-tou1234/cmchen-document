@@ -25,3 +25,27 @@ for (const [from, to] of files) {
   console.log(`[copy-pdfjs] ${to}  (${(size / 1024).toFixed(0)} KB)`);
 }
 console.log('[copy-pdfjs] 完成 -> src/renderer/pdfjs/');
+
+// katex：笔记公式渲染。只拷运行需要的 css + UMD js + woff2 字体（现代浏览器通用格式，
+// ttf/woff 不带），布局与 node_modules/katex/dist 保持一致，katex.min.css 里的
+// url(fonts/...) 相对引用原样可用。
+const katexDist = path.join(root, 'node_modules', 'katex', 'dist');
+const katexDest = path.join(root, 'src', 'renderer', 'katex');
+const katexFiles = ['katex.min.css', 'katex.min.js'];
+const katexFonts = fs.readdirSync(path.join(katexDist, 'fonts')).filter((f) => f.endsWith('.woff2'));
+
+fs.mkdirSync(path.join(katexDest, 'fonts'), { recursive: true });
+for (const f of katexFiles) {
+  const s = path.join(katexDist, f);
+  if (!fs.existsSync(s)) {
+    console.error('[copy-pdfjs] 缺少 katex 文件：' + s + '（请先 npm install）');
+    process.exit(1);
+  }
+  fs.copyFileSync(s, path.join(katexDest, f));
+  console.log('[copy-pdfjs] katex/' + f);
+}
+for (const f of katexFonts) {
+  fs.copyFileSync(path.join(katexDist, 'fonts', f), path.join(katexDest, 'fonts', f));
+}
+console.log(`[copy-pdfjs] katex/fonts ${katexFonts.length} 个 woff2`);
+console.log('[copy-pdfjs] 完成 -> src/renderer/katex/');

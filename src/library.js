@@ -106,7 +106,30 @@ function init(userDataDir) {
 function filePath() { return FILE || init(null); }
 
 function emptyStore() {
-  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {}, annoMeta: {} };
+  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {}, annoMeta: {}, feeds: [] };
+}
+
+// 订阅源：{ id, url, title, addedAt }。v8 的可选附加键——旧版本读到会忽略，
+// 新版本读到旧文件补默认值，不升库格式版本。
+function normalizeFeeds(raw) {
+  const src = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const f of src) {
+    if (!f || typeof f !== 'object') continue;
+    const url = str(f.url);
+    if (!/^https?:\/\//i.test(url)) continue;
+    out.push({
+      id: str(f.id) || genFeedId(),
+      url,
+      title: str(f.title) || url,
+      addedAt: Number.isFinite(+f.addedAt) ? +f.addedAt : 0,
+    });
+  }
+  return out;
+}
+
+function genFeedId() {
+  return 'feed' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
 // 标注的标签：{ "<annoId>": ["方法", "待读"] }。
@@ -280,6 +303,7 @@ function normalize(o) {
     s.tagColors = normalizeTagColors(o.tagColors);
     s.annoTags = normalizeAnnoTags(o.annoTags);
     s.annoMeta = normalizeAnnoMeta(o.annoMeta);
+    s.feeds = normalizeFeeds(o.feeds);
     if (Array.isArray(o.items)) s.items = o.items.filter((it) => it && it.key).map(migrateItem);
   }
   // v7→v8：标注标签搬进标注对象层（annoTags 只留着做兼容读，不再写）
@@ -770,9 +794,33 @@ function findItemByPath(p) {
   const abs = path.resolve(p);
   return load().items.find((x) => x.attachment && path.resolve(x.attachment.path) === abs) || null;
 }
-function setPageByKey(key, page) {
+// ---------- 订阅源 ----------
+function addFeed(url, title) {
+  const u = str(url);
+  if (!/^https?:\/\//i.test(u)) return { ok: false, error: '订阅地址要以 http(s):// 开头' };
+  const store = load();
+  if (store.feeds.some((f) => f.url === u)) return { ok: false, error: '这个订阅已经存在', exists: true };
+  const feed = { id: genFeedId(), url: u, title: str(title) || u, addedAt: now() };
+  store.feeds.push(feed);
+  save();
+  return { ok: true, feed };
+}
+
+function removeFeed(id) {
+  const store = load();
+  const i = store.feeds.findIndex((f) => f.id === String(id || ''));
+  if (i < 0) return { ok: false, error: '找不到这条订阅' };
+  store.feeds.splice(i, 1);
+  save();
+  return { ok: true };
+}
+
+function setPageByKey(key, page, total) {
   const it = findItem(key); if (!it) return null;
-  it.page = page; save(); return it;
+  it.page = page;
+  // 总页数由阅读器上报；只接受合法整数，老数据没有就保持缺省
+  if (Number.isFinite(+total) && +total >= 1) it.pageTotal = Math.floor(+total);
+  save(); return it;
 }
 
 function publicItem(it, collIds) {
@@ -793,7 +841,7 @@ function publicItem(it, collIds) {
     // v8：条目 → 标注（双向关联的条目侧）
     annoIds: (it.annoIds || []).slice(),
     collectionIds: it.collectionIds.filter((id) => collIds.has(id)),
-    page: it.page || 0, created: it.created || 0, updated: it.updated || 0,
+    page: it.page || 0, pageTotal: +it.pageTotal || 0, created: it.created || 0, updated: it.updated || 0,
     deletedAt: it.deletedAt || 0,
     hasFile: !!(it.attachment && fs.existsSync(it.attachment.path)),
     attachment: it.attachment,
@@ -814,6 +862,7 @@ function summary() {
     collections: s.collections.slice(),
     searches: s.searches.slice(),
     tagColors: Object.assign({}, s.tagColors || {}),
+    feeds: s.feeds.slice(),
     annoTags: Object.assign({}, s.annoTags || {}),   // v7 兼容读（写入统一走 annoMeta）
     annoMeta: Object.assign({}, s.annoMeta || {}),   // v8：标注对象层（text/comment/tags/itemKey/noteIds）
     items: s.items.map((it) => publicItem(it, collIds)),
@@ -839,7 +888,7 @@ function mergeStore(obj) {
   cache = combineStores(load(), obj);
   save();
   const inc = normalize(obj);
-  return { addedItems: cache.items.length - beforeCount, addedCollections: inc.collections.length, addedSearches: inc.searches.length };
+  return { addedItems: cache.items.length - beforeCount, addedCollections: inc.collections.length, addedSearches: inc.searches.length, addedFeeds: inc.feeds.length };
 }
 
 function combineStores(base, obj) {
@@ -851,6 +900,24 @@ function combineStores(base, obj) {
   }
   const searchIds = new Set(cur.searches.map((x) => x.id));
   for (const x of inc.searches) if (!searchIds.has(x.id)) { cur.searches.push(x); searchIds.add(x.id); }
+  // 订阅：按 URL 去重（当前库优先），同 ID 不同 URL 时给导入方换一个 ID 再并入。
+  // 标题：当前库只有 URL 当标题时，采用导入库更可读的标题；addedAt 取更早的时间。
+  const feedByUrl = new Map();
+  for (const f of cur.feeds) feedByUrl.set(f.url, f);
+  const feedIds = new Set(cur.feeds.map((f) => f.id));
+  for (const f of inc.feeds) {
+    const same = feedByUrl.get(f.url);
+    if (same) {
+      if ((!same.title || same.title === same.url) && f.title && f.title !== f.url) same.title = f.title;
+      if (f.addedAt > 0 && (!same.addedAt || f.addedAt < same.addedAt)) same.addedAt = f.addedAt;
+      continue;
+    }
+    let id = f.id;
+    if (feedIds.has(id)) id = genFeedId();
+    while (feedIds.has(id)) id = genFeedId();
+    const copy = { id, url: f.url, title: f.title || f.url, addedAt: f.addedAt || 0 };
+    cur.feeds.push(copy); feedIds.add(id); feedByUrl.set(copy.url, copy);
+  }
   // 标签颜色：当前库已有的优先，避免恢复旧备份把新配色覆盖
   if (!cur.tagColors) cur.tagColors = {};
   for (const [tag, color] of Object.entries(inc.tagColors || {})) {
@@ -1322,7 +1389,7 @@ module.exports = {
   init, filePath, load, save, summary,
   addPdf, addItem, updateItem, removeItem,
   trashItem, restoreItem, deleteItemForever, emptyTrash,
-  findItem, findItemByPath, setPageByKey,
+  findItem, findItemByPath, setPageByKey, addFeed, removeFeed,
   addTag, removeTag, renameTag, removeTagEverywhere, mergeTags, setTagColor,
   addRelation, removeRelation,
   addNote, updateNote, removeNote,

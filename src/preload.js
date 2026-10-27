@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   recentList: () => ipcRenderer.invoke('recent-list'),
   openPath: (path) => ipcRenderer.invoke('open-path', { path }),
   // 上报当前页码（主进程按文件记住，下次打开回到同一页）
-  reportPage: (path, page) => ipcRenderer.send('set-page', { path, page }),
+  reportPage: (path, page, total) => ipcRenderer.send('set-page', { path, page, total }),
   // 拖拽打开的文件也要进「最近打开」
   noteRecent: (path, page) => ipcRenderer.invoke('note-recent', { path, page }),
   // 冒烟模式回报结果
@@ -34,6 +34,14 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path }),
   // 标注条目化 —— 汇总所有文档的标注 + 给标注打标签
   listAnnotations: () => ipcRenderer.invoke('anno-list'),
+  feedFetch: (url) => ipcRenderer.invoke('feed-fetch', { url }),
+  feedAdd: (url) => ipcRenderer.invoke('feed-add', { url }),
+  feedRemove: (id) => ipcRenderer.invoke('feed-remove', { id }),
+  addItem: (fields) => ipcRenderer.invoke('lib-add-item', fields),
+  bookmarksLoad: (path) => ipcRenderer.invoke('bookmarks-load', { path }),
+  bookmarksSave: (path, bookmarks) => ipcRenderer.invoke('bookmarks-save', { path, bookmarks }),
+  readingStatsLoad: () => ipcRenderer.invoke('reading-stats-load'),
+  readingStatsMerge: (stats) => ipcRenderer.invoke('reading-stats-merge', { stats }),
   setAnnoTags: (id, tags) => ipcRenderer.invoke('anno-set-tags', { id, tags }),
   addAnnoTags: (ids, tags) => ipcRenderer.invoke('anno-add-tags', { ids, tags }),
   removeAnnoTag: (id, tag) => ipcRenderer.invoke('anno-remove-tag', { id, tag }),
