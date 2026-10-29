@@ -33,6 +33,8 @@ module.exports = `(async () => {
     if (!loaded) return { checks, stage: 'load' };
 
     const page = App.pageEl(1);
+    // 文本层是渲染完成之后异步铺的（buildTextLayer 不 await），直接查会偶发空。
+    await waitFor(() => page.querySelectorAll('.textlayer span').length > 0, 10000);
     const spans = Array.from(page.querySelectorAll('.textlayer span')).filter((x) => (x.textContent || '').trim().length > 1);
     push('页面有可选中文本', spans.length > 0, 'spans=' + spans.length);
     const selectText = async (idx) => {

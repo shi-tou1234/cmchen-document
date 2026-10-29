@@ -55,8 +55,18 @@ const probe = `(async()=>{
   push('annotation save error visible',$('#toast').textContent.includes('尚未保存'));
   const active=App.activeTabId;await App.closeTab(active);push('failed annotation save prevents closing tab',App.activeTabId===active&&App.tabs.some(t=>t.id===active));
   App.state.annos.set(1,[{id:'cjk',tool:'text',at:{x:100,y:100},text:'中文标注',size:14,color:'#000000'}]);
-  $('#btn-save').click();await wait(()=>$('#toast').textContent.includes('未导出'));
-  push('partial export is explicit',$('#toast').textContent.includes('未导出'));
+  // v36：中文标注不再一律跳过——有系统 CJK 字体就子集嵌入，没有才退回 Helvetica 并计数。
+  // 这两条路都要如实报出来，不能静默丢标注。
+  const cjkOut=${JSON.stringify(path.join(dir, 'cjk-copy.pdf'))};
+  const cjkRes=await pdfBridge.exportPdf(App.buildExportPayload(cjkOut));
+  push('中文标注导出成功',!!(cjkRes&&cjkRes.ok),JSON.stringify(cjkRes).slice(0,160));
+  push('中文标注要么子集嵌入、要么明确跳过',!!cjkRes&&(cjkRes.cjk?cjkRes.skipped===0:cjkRes.skipped>=1),
+    JSON.stringify({cjk:cjkRes&&cjkRes.cjk,font:cjkRes&&cjkRes.cjkFont,skipped:cjkRes&&cjkRes.skipped}));
+  $('#btn-save').click();
+  const saidDone=await wait(()=>/已保存副本|未导出|已取消导出/.test($('#toast').textContent));
+  push('导出提示与导出结果一致（中文没有被静默吞掉）',
+    saidDone&&(cjkRes&&cjkRes.cjk?!/未导出/.test($('#toast').textContent):/未导出/.test($('#toast').textContent)),
+    $('#toast').textContent);
   const before=(await pdfBridge.lib.summary()).items.map(i=>i.title).join('|');
   const failedMove=await pdfBridge.lib.chooseDataDir(${JSON.stringify(path.join(dir, 'fail-move'))},'move');
   push('migration commit failure reported',!failedMove.ok);

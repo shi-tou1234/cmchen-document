@@ -204,6 +204,7 @@
     matchNumericLine,
     matchAuthorYearLine,
     findBibStartIndex,
+    isBibHeading,
     findEntryLine,
     findMarkerPositions,
     buildLines,

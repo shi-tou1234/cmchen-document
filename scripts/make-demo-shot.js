@@ -2,7 +2,7 @@
 /*
  * 生成 README 用的界面截图（临时工具，不参与发布）。
  *   node scripts/make-demo-shot.js
- * 产物：docs/screenshot-library.png、docs/screenshot-reader.png
+ * 产物：docs/images/screenshot-library.png、docs/images/screenshot-reader.png
  *
  * 做法：造一份 4 页的演示 PDF + 一个含 7 条目的演示库，丢进临时 userData 启动真实 app，
  * 隐藏窗口跑探针，等界面稳定后 capturePage。不会碰用户自己的数据。
@@ -15,7 +15,7 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const ROOT = path.join(__dirname, '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
-const DOCS = path.join(ROOT, 'docs');
+const IMAGES = path.join(ROOT, 'docs', 'images');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'trove-shot-'));
 const DEMO_PDF = path.join(TMP, 'demo-paper.pdf');
 const LIB = path.join(TMP, 'library.json');
@@ -216,7 +216,7 @@ function launch(probeName, probeSrc, extraEnv) {
 }
 
 (async () => {
-  fs.mkdirSync(DOCS, { recursive: true });
+  fs.mkdirSync(IMAGES, { recursive: true });
   await makeDemoPdf(DEMO_PDF);
   seedLibrary();
   fs.writeFileSync(path.join(UDD, 'window-state.json'),
@@ -225,7 +225,7 @@ function launch(probeName, probeSrc, extraEnv) {
   console.log('[shot] library');
   launch('lib-shot', LIB_PROBE, {
     PDFREADER_LIBUI: '1',
-    PDFREADER_PROBE_SHOT: path.join(DOCS, 'screenshot-library.png'),
+    PDFREADER_PROBE_SHOT: path.join(IMAGES, 'screenshot-library.png'),
   });
 
   console.log('[shot] reader');
@@ -233,11 +233,11 @@ function launch(probeName, probeSrc, extraEnv) {
   fs.copyFileSync(DEMO_PDF, readerPdf);
   launch('reader-shot', READER_PROBE, {
     PDFREADER_PROBE_PDF: readerPdf,
-    PDFREADER_PROBE_SHOT: path.join(DOCS, 'screenshot-reader.png'),
+    PDFREADER_PROBE_SHOT: path.join(IMAGES, 'screenshot-reader.png'),
   });
 
   for (const f of ['screenshot-library.png', 'screenshot-reader.png']) {
-    const st = fs.statSync(path.join(DOCS, f));
+    const st = fs.statSync(path.join(IMAGES, f));
     console.log('[shot] ' + f + ' ' + Math.round(st.size / 1024) + ' KB');
   }
 })().catch((e) => { console.error(e); process.exit(1); });

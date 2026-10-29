@@ -6,16 +6,21 @@ const { atomicWrite } = require('./atomic-file');
 const resources = require('./data-resources');
 
 const settings = require('./settings.js');
-const fulltext = require('./fulltext.js');
+const search = require('./search-service.js');
 const formats = require('./formats.js');
 const metadata = require('./metadata.js');
 const fetchpdf = require('./fetchpdf.js');
 const pdfmeta = require('./pdfmeta.js');
+const doiscan = require('./doiscan.js');
+const fingerprint = require('./fingerprint.js');
+const identify = require('./identify.js');
 const docconvert = require('./docconvert.js');
 const Cite = require('./cite.js');
 const Csl = require('./csl.js');
 const Creators = require('./creators.js');
 const query = require('./query.js');
+const Review = require('./review.js');
+const PdfText = require('./pdftext.js');
 
 let win = null;
 
@@ -93,12 +98,29 @@ function loadWindowState() {
 function saveWindowState(s) {
   try { atomicWrite(stateFile, JSON.stringify(s)); } catch (_) {}
 }
+// 事件广播：窗口可能还没建立 / 已经销毁，逐个 try 掉，不影响索引本身。
+function broadcast(channel, payload) {
+  try {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try { w.webContents.send(channel, payload); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 let appState = loadWindowState();
 
 // ---------- 本地文献库（JSON 索引，零原生依赖） ----------
 const library = require('./library.js');
 library.init(currentDataDir());
-fulltext.init(currentDataDir());
+// 回顾（间隔重复复习）的状态存在 userData/recall.json，跟着标注一起走
+const recall = require('./recall.js');
+recall.init(USER_DATA);
+search.start(currentDataDir());
+// 索引服务的事件 → 所有窗口。增量队列每建好一个文件发一次 change，
+// 整批跑完再发一次 idle（带 done / failed / skipped / 耗时）。
+// 渲染进程据此刷新索引状态、重跑当前搜索——不用轮询，也不会因为「搜完才建好索引」漏结果。
+search.on('change', (ev) => broadcast('ft-index-changed', ev));
+search.on('idle', (ev) => broadcast('ft-index-idle', ev));
 // 老标注补稳定 id（v8 地基）：这次不动它，后面删一条标注就会把所有标签串位
 try {
   const up = upgradeAnnoIds();
@@ -192,7 +214,8 @@ async function readDocPayload(filePath, extra) {
 function citationInfo(it) {
   if (!it) return {};
   try {
-    return { item: it, citekey: Cite.citekey(it), citation: Cite.format(it, 'gbt7714') };
+    // 模板来自设置；空串时 Cite 用默认模板（与旧算法等价）
+    return { item: it, citekey: Cite.citekey(it, { template: (appSettings && appSettings.citeKeyTemplate) || '' }), citation: Cite.format(it, 'gbt7714') };
   } catch (_) {
     return { item: it, citekey: '', citation: '' };
   }
@@ -220,6 +243,9 @@ function saveSessionInfo(info) {
         page: Math.max(1, Math.min(999999, Math.floor(+t.page) || 1)),
         rotation: [0, 90, 180, 270].includes(+t.rotation) ? +t.rotation : 0,   // v34：视图旋转
         refPage: Math.max(1, Math.min(999999, Math.floor(+t.refPage) || 1)),  // v34：分屏参考页
+        // 2026-10-29：对照视图挂的另一篇文献（空 = 用当前文档的另一页）
+        refPath: String(t.refPath || '').slice(0, 1024),
+        refName: String(t.refName || '').slice(0, 200),
       });
       if (tabs.length >= MAX_SESSION_TABS) break;
     }
@@ -241,6 +267,8 @@ function readSessionInfo() {
         page: Math.max(1, Math.floor(+t.page) || 1),
         rotation: [0, 90, 180, 270].includes(+t.rotation) ? +t.rotation : 0,
         refPage: Math.max(1, Math.floor(+t.refPage) || 1),
+        refPath: String(t.refPath || '').slice(0, 1024),
+        refName: String(t.refName || '').slice(0, 200),
       })).slice(0, MAX_SESSION_TABS),
     };
   } catch (_) { return { saved: 0, active: '', tabs: [] }; }
@@ -465,12 +493,26 @@ ipcMain.handle('note-recent', (_e, info) => {
 // ---------- 数据目录 / 备份恢复 / 导入导出（v11-v12） ----------
 function annoDir() { return path.join(USER_DATA, 'annotations'); }
 
+// 显式重建会把损坏的原文件留在**同一个目录**里备份（`<hash>.broken-<时间戳>.json`）：
+// 它是留给用户手动捞回内容的证据，必须留着；但它已经不是任何文档正在用的 sidecar。
+// 凡是要枚举「当前活动标注」的地方都得排除它，否则扫描永远读到一份坏文件 → complete=false
+// → 回顾不敢清理孤儿卡片、界面一直报「扫描不完整」，用户明明已经修好了却还在报错（R7-02）。
+// 命名与识别放在一处：下面两个函数成对出现，改一个必须改另一个。
+const ANNO_BACKUP_RE = /\.broken-\d{6,}\.json$/i;
+function annoBackupNameFor(annoPath) {
+  return String(annoPath || '').replace(/\.json$/i, '') + '.broken-' + Date.now() + '.json';
+}
+function isActiveAnnoFile(name) {
+  const f = String(name || '');
+  return /\.json$/i.test(f) && !ANNO_BACKUP_RE.test(f);
+}
+
 function readAnnotationBundle(strict = false) {
   const out = [];
   try {
     const dir = annoDir();
     for (const f of fs.readdirSync(dir)) {
-      if (!/\.json$/i.test(f)) continue;
+      if (!isActiveAnnoFile(f)) continue;
       try {
         let raw = fs.readFileSync(path.join(dir, f), 'utf8');
         if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
@@ -490,6 +532,7 @@ function buildBackupPayload() {
     settings: settings.get(),
     library: library.exportStore(),
     annotations: readAnnotationBundle(true),
+    recall: recall.exportStore(),
     sourceDataDir: currentDataDir(),
     resources: files,
     images: Object.fromEntries(Object.entries(files).filter(([p]) => /^snapshots\/[^/]+\.png$/i.test(p)).map(([p, data]) => [path.basename(p), data])),
@@ -559,16 +602,28 @@ function restoreFromFile(file) {
       tx.add(path.join(annoDir(), name), JSON.stringify(data)); n++;
     }
     if (fs.existsSync(annoDir())) for (const name of fs.readdirSync(annoDir())) {
-      if (/\.json$/i.test(name) && !restoredNames.has(name)) tx.remove(path.join(annoDir(), name));
+      if (isActiveAnnoFile(name) && !restoredNames.has(name)) tx.remove(path.join(annoDir(), name));
     }
     const keepDir = settings.get().dataDir;
     const next = settings._sanitize(Object.assign({}, obj.settings || settings.get(), { dataDir: keepDir }));
     tx.add(settings.filePath(), JSON.stringify(next));
     tx.commit();
     library.resetCache(); library.resetUndo(); settings.resetCache(); appSettings = settings.get();
-    fulltext.init(currentDataDir());
+    // 回顾进度只在备份里有记录时才换：老备份没有这个字段，不该把现有进度清空。
+    // 写盘失败时 importStore 会回滚并返回原因，这里带回给界面（恢复成功但进度没落地，要让人知道）。
+    let recallWarn = '';
+    if (obj.recall) {
+      const rr = recall.importStore(obj.recall);
+      if (!rr || !rr.ok) recallWarn = (rr && rr.error) || '回顾进度没能写入磁盘';
+    }
+    search.restart(currentDataDir());
     if (win) win.webContents.send('lib-changed');
-    return { ok: true, path: file, preBackup: pre, items: normalized.items.length, annotations: n, images: Object.keys(obj.images || {}).length };
+    return {
+      ok: true, path: file, preBackup: pre, items: normalized.items.length, annotations: n,
+      images: Object.keys(obj.images || {}).length,
+      recall: obj.recall ? Object.keys((obj.recall && obj.recall.cards) || {}).length : 0,
+      warning: recallWarn || undefined,
+    };
   } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
   finally { tx.dispose(); }
 }
@@ -625,9 +680,9 @@ function switchDataDir(target, mode) {
     tx.add(settings.filePath(), JSON.stringify(settings._sanitize(Object.assign({}, settings.get(), { dataDir: abs }))));
     tx.commit();
     settings.resetCache(); appSettings = settings.get();
-    library.init(abs); library.resetCache(); library.resetUndo(); fulltext.init(abs);
+    library.init(abs); library.resetCache(); library.resetUndo(); search.restart(abs);
     // Indexes are rebuildable caches. Rebuild at the new paths using the existing queue.
-    if (!process.env.PDFREADER_NO_AUTO_INDEX && appSettings.autoIndex) fulltext.indexAll(store.items).catch(err => console.warn('[fulltext]', err.message));
+    if (!process.env.PDFREADER_NO_AUTO_INDEX && appSettings.autoIndex) search.indexAll(store.items).catch(err => console.warn('[fulltext]', err.message));
     if (win) win.webContents.send('lib-changed');
     return { ok: true, dataDir: abs, summary: library.summary() };
   } catch (err) {
@@ -769,7 +824,7 @@ function uniquePath(dir, base, ext) {
 }
 
 // 一个文件改了名，它的标注文件与全文索引也跟着搬到新路径对应的文件
-function moveSidecar(oldPath, newPath) {
+async function moveSidecar(oldPath, newPath) {
   const moved = { anno: false, ft: false };
   if (path.resolve(oldPath).toLowerCase() === path.resolve(newPath).toLowerCase()) return moved;
   try {
@@ -784,20 +839,16 @@ function moveSidecar(oldPath, newPath) {
       moved.anno = true;
     }
   } catch (_) {}
+  // 索引文件跟着搬家：交给索引服务（worker 里改写 path 字段并换文件），
+  // 主进程不再直接读写 fulltext 目录。
   try {
-    const oldFt = fulltext.fileFor(oldPath);
-    if (fs.existsSync(oldFt)) {
-      const obj = JSON.parse(fs.readFileSync(oldFt, 'utf8'));
-      obj.path = newPath;
-      atomicWrite(fulltext.fileFor(newPath), JSON.stringify(obj));
-      try { fs.unlinkSync(oldFt); } catch (_) {}
-      moved.ft = true;
-    }
+    const r = await search.moveIndex(oldPath, newPath);
+    moved.ft = !!(r && r.moved);
   } catch (_) {}
   return moved;
 }
 
-ipcMain.handle('lib-rename-file', (_e, info) => {
+ipcMain.handle('lib-rename-file', async (_e, info) => {
   const keys = Array.isArray(info && info.keys) ? info.keys : [];
   const out = { ok: true, renamed: 0, skipped: 0, failed: 0, changes: [], errors: [] };
   for (const key of keys) {
@@ -817,7 +868,7 @@ ipcMain.handle('lib-rename-file', (_e, info) => {
       const target = uniquePath(dir, base, ext);
       fs.renameSync(oldPath, target);
       library.setAttachment(key, target);   // 只接受路径字符串（内部会自己算 name）
-      const side = moveSidecar(oldPath, target);
+      const side = await moveSidecar(oldPath, target);
       out.renamed++;
       out.changes.push({ key, oldPath, newPath: target, anno: side.anno, ft: side.ft });
     } catch (err) {
@@ -891,6 +942,28 @@ ipcMain.handle('lib-new-note', (_e, info) => {
   return { ok: true, item: it ? library.summary().items.find((x) => x.key === it.key) : null };
 });
 
+// ---------- 导入时的题录识别（2026-10-29） ----------
+// 从 PDF 前两页的文本里找 DOI / arXiv，再走已有的抓取通道补全。
+// 全程有超时兜底：识别失败只意味着「没补全」，绝不能让导入变慢或失败。
+async function identifyPdfFile(p, opts) {
+  const o = opts || {};
+  let text = '';
+  try { text = await pdfmeta.readFirstPageText(p, 2, 8000); } catch (_) { text = ''; }
+  if (!String(text || '').trim()) return { ok: false, error: '首页没有可读文本（可能是扫描件）' };
+  const ids = doiscan.extractIdentifiers(text);
+  if (!ids.identifier) return { ok: false, error: '首页没有找到 DOI / arXiv 编号' };
+  const r = await metadata.fetchMetadata(ids.identifier, { timeout: o.timeout || 9000 });
+  if (!r || !r.ok) {
+    return { ok: false, error: (r && r.error) || '抓取失败', identifier: ids.identifier, source: ids.source };
+  }
+  return { ok: true, source: r.source, id: r.id, identifier: ids.identifier, metadata: r.metadata };
+}
+
+// 把识别结果落成条目字段。裁决逻辑在 identify.js（纯逻辑、可单测），这里只做调用。
+function identifiedFields(m, current) {
+  return identify.fieldsFromMetadata(m, current);
+}
+
 ipcMain.handle('lib-add-pdf', async (_e, info) => {
   const p = info && info.path;
   if (!p || !fs.existsSync(p)) return { ok: false, error: '文件不存在' };
@@ -905,7 +978,7 @@ ipcMain.handle('lib-add-pdf', async (_e, info) => {
       if (exist.deletedAt) {
         library.restoreItem(exist.key);
         const back = library.findItem(exist.key);
-        fulltext.indexOne(back).catch((err) => console.warn('[fulltext] index add failed:', err && err.message));
+        search.scheduleIndex(back);
         return { ok: true, item: back, deduped: true, restored: true };
       }
       return { ok: true, item: exist, deduped: true };
@@ -915,7 +988,7 @@ ipcMain.handle('lib-add-pdf', async (_e, info) => {
   let meta = {};
   const ext = docconvert.extOf(p);
   try { meta = ext === 'pdf' ? await pdfmeta.readMeta(p) : await docconvert.readZipCoreMeta(p); } catch (_) { meta = {}; }
-  const title = o.title || pdfmeta.usableTitle(meta.title);
+  let title = o.title || pdfmeta.usableTitle(meta.title);
   // PDF 元数据里的作者常写成 "A and B" / "A; B"，拆成多个作者再结构化
   const rawCreators = Array.isArray(o.creators) && o.creators.length
     ? o.creators
@@ -923,28 +996,338 @@ ipcMain.handle('lib-add-pdf', async (_e, info) => {
   const creatorList = (rawCreators.length === 1 && typeof rawCreators[0] === 'string')
     ? rawCreators[0].split(/\s+and\s+|;|；/).map((x) => x.trim()).filter(Boolean)
     : rawCreators;
-  const creators = Creators.normalizeCreators(creatorList);
-  const item = library.addPdf(p, Object.assign({}, o, {
+  let creators = Creators.normalizeCreators(creatorList);
+
+  // 2026-10-29：PDF 首页识别 DOI / arXiv 并补全题录。
+  // 内嵌元数据经常是「LaTeX with hyperref」「Microsoft Word - 文档1.doc」这种垃圾，
+  // 所以识别结果优先于内嵌元数据，但仍让调用方显式传入的字段排在第一位。
+  let identified = null;
+  const extra = {};
+  if (ext === 'pdf' && !o.skipIdentify) {
+    identified = await identifyPdfFile(p, { timeout: o.identifyTimeout });
+    if (identified.ok) {
+      const m = identified.metadata;
+      // 直接把完整的 opts 交给合并函数：它只读自己认识的字段，多余键（dedupe 等）会被忽略。
+      // 这样「调用方显式给了哪些字段」不需要在这里手工列举一遍——列漏一个就会被覆盖，
+      // 之前正是漏了 DOI / 卷期页 / 标签才出的问题。
+      // 内嵌元数据不在 o 里，所以 Crossref 的标题可以盖掉「LaTeX with hyperref」这类垃圾，
+      // 但盖不掉用户手填的内容。
+      const fill = identifiedFields(m, o);
+      if (fill.title) title = fill.title;
+      if (fill.creators) creators = Creators.normalizeCreators(fill.creators);
+      for (const k of ['year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'language', 'tags', 'itemType']) {
+        if (fill[k] !== undefined) extra[k] = fill[k];
+      }
+    }
+  }
+  // 没有识别结果时，至少把 PDF 自带的 keywords 当标签用（很多期刊 PDF 会写）。
+  // 显式传了标签就不动——keywords 只是补空位，不是覆盖。
+  if (!extra.tags && !(Array.isArray(o.tags) && o.tags.length) && meta.keywords) {
+    const kw = String(meta.keywords).split(/[;,；、]/).map((x) => x.trim()).filter((x) => x && x.length <= 40);
+    if (kw.length) extra.tags = kw.slice(0, 12);
+  }
+
+  const fp = fingerprint.fingerprintOf(p);
+  // ensurePdf 在同一段同步代码里完成「查重 + 建条目」：前面的识别要等网络，
+  // 两个并发导入可能都通过了开头的快速检查，只有在这里才能保证不会重复建条目。
+  const res = library.ensurePdf(p, Object.assign({}, o, extra, {
     title: title || undefined,
     creators,
+    fingerprint: fp,
   }));
-  fulltext.indexOne(item).catch((err) => console.warn('[fulltext] index add failed:', err && err.message));
-  return { ok: true, item, meta: { title: meta.title || '', author: meta.author || '' } };
+  const item = res.item;
+  if (!res.deduped || res.restored) {
+    search.scheduleIndex(item);
+  }
+  return {
+    ok: true,
+    item,
+    deduped: !!res.deduped,
+    restored: !!res.restored,
+    meta: { title: meta.title || '', author: meta.author || '' },
+    identified: (res.deduped || !identified || !identified.ok)
+      ? null : { source: identified.source, id: identified.id },
+    identifyError: (res.deduped || !identified || identified.ok) ? '' : identified.error,
+  };
+});
+
+// 给已有条目补全题录：只填空字段，不动用户已经填好的内容。
+ipcMain.handle('lib-identify-item', async (_e, info) => {
+  const it = info && library.findItem(info.key);
+  if (!it) return { ok: false, error: '条目不存在' };
+  if (!it.attachment || !it.attachment.path) return { ok: false, error: '这条没有附件' };
+  if (!fs.existsSync(it.attachment.path)) return { ok: false, error: '附件已丢失，先重新定位' };
+  const r = await identifyPdfFile(it.attachment.path, { timeout: (info && info.timeout) || 9000 });
+  if (!r.ok) return r;
+  // 标题还停在「从文件名猜出来的那个」时，允许被 Crossref 的正式标题替换；
+  // 用户改过的标题不动。
+  const cur = Object.assign({}, it);
+  if (cur.title && cur.title === library.guessTitleFromPath(it.attachment.path)) cur.title = '';
+  const patch = identifiedFields(r.metadata, cur);
+  if (!Object.keys(patch).length) {
+    return { ok: true, filled: [], message: '题录已经完整，没有需要补的字段', source: r.source, id: r.id };
+  }
+  library.updateItem(it.key, patch);
+  return { ok: true, filled: Object.keys(patch), source: r.source, id: r.id, title: r.metadata.title || '' };
 });
 ipcMain.handle('lib-open-item', async (_e, info) => {
   const it = info && library.findItem(info.key);
   if (!it || !it.attachment) return { ok: false, error: '条目无附件' };
-  if (!fs.existsSync(it.attachment.path)) return { ok: false, error: '文件已移动或删除', missingPath: it.attachment.path };
-  if (!docconvert.isSupported(it.attachment.path)) return { ok: false, error: '不支持这个文件格式' };
+  const oldPath = it.attachment.path;
+  let attachPath = oldPath;
+  let autoRelinked = false;
+  // 文件不在了：先在原目录里按指纹 / 同名找一次。找到就静默接回去再打开，
+  // 用户只看到「能打开了」，不用先跑一趟「重新定位」。
+  if (!fs.existsSync(attachPath)) {
+    const found = findInSameDir(it);
+    if (found) {
+      const r = relinkItemToPath(it, found);
+      if (r.ok) { attachPath = found; autoRelinked = true; }
+    }
+  }
+  if (!fs.existsSync(attachPath)) return { ok: false, error: '文件已移动或删除', missingPath: oldPath };
+  if (!docconvert.isSupported(attachPath)) return { ok: false, error: '不支持这个文件格式' };
   const extra = { itemKey: it.key };
   if (info.page && Number.isFinite(+info.page)) extra.startPage = Math.max(1, Math.floor(+info.page));
-  const payload = await readDocPayload(it.attachment.path, extra);
+  const payload = await readDocPayload(attachPath, extra);
   if (payload.ok) {
     Object.assign(payload, citationInfo(it));
-    rememberRecent(it.attachment.path, payload.startPage || 1);
+    rememberRecent(attachPath, payload.startPage || 1);
+    if (autoRelinked) payload.relinkedFrom = oldPath;
+    // 老库没有指纹：打开成功时顺手补一个，下次移动就能认回来
+    try { library.setAttachmentFingerprint(it.key, fingerprint.fingerprintOf(attachPath)); } catch (_) {}
+    // 「待读」的条目一旦打开就进入「在读」，队列自己会往前走
+    const fresh = library.findItem(it.key) || it;
+    if (fresh.readStatus === 'todo') {
+      try {
+        library.updateItem(it.key, { readStatus: 'reading' });
+        if (win) win.webContents.send('lib-changed');
+      } catch (_) {}
+    }
   }
   return payload;
 });
+// ---------- 相似文献（v36） ----------
+// 全文索引已经在了，这里只做两件事：把每个索引切成词频向量（按「路径 + 索引时间」缓存），
+// 再用余弦相似度排个序。索引一更新，stamp 变了，向量自动重算。
+const Similar = require('./similar.js');
+const fulltextRead = require('./fulltext.js');
+const similarVec = new Map();
+let similarCorpus = null;
+let similarCorpusKey = '';
+
+function similarDocsFor(targetPath, limit) {
+  // 主进程这份 fulltext 只用来读索引；索引本身由 worker / 进程内服务负责写。
+  // init 会清掉它自己的 entryCache，这里是每次调用都重设一次，避免数据目录切换后读错目录。
+  fulltextRead.init(currentDataDir());
+  const items = (library.load().items || []).filter((it) => !it.deletedAt && it.attachment && it.attachment.path);
+  const docs = [];
+  const keyParts = [];
+  for (const it of items) {
+    const abs = path.resolve(it.attachment.path);
+    let entry = null;
+    try { entry = fulltextRead.readIndex(abs); } catch (_) { entry = null; }
+    if (!entry || entry.error || !Array.isArray(entry.pages)) continue;
+    const stamp = String(entry.indexedAt || 0) + ':' + String(entry.size || 0);
+    let hit = similarVec.get(abs);
+    if (!hit || hit.stamp !== stamp) {
+      hit = { stamp, vector: Similar.vectorOf(Similar.textOfEntry(entry)) };
+      // 缓存别无限长：库搬过家或索引重建很多次之后，老路径的向量再也不会被用到
+      if (similarVec.size > 4000) similarVec.clear();
+      similarVec.set(abs, hit);
+    }
+    if (!hit.vector.size) continue;
+    docs.push({ path: abs, title: it.title || path.basename(abs), vector: hit.vector });
+    keyParts.push(abs + '|' + stamp);
+  }
+  keyParts.sort();
+  const key = crypto.createHash('sha1').update(keyParts.join(',')).digest('hex');
+  if (!similarCorpus || similarCorpusKey !== key) {
+    similarCorpus = Similar.buildCorpus(docs);
+    similarCorpusKey = key;
+  }
+  const me = similarVec.get(path.resolve(targetPath));
+  if (!me || !me.vector.size) return { ok: false, error: '这篇还没有可用的全文索引', indexed: similarCorpus.n };
+  const ranked = Similar.rank(me.vector, similarCorpus, { limit: Math.max(3, Math.min(20, Number(limit) || 8)) + 1 });
+  const out = [];
+  for (const r of ranked) {
+    if (path.resolve(r.path) === path.resolve(targetPath)) continue;
+    const it = library.findItemByPath(r.path);
+    if (!it || it.deletedAt) continue;
+    out.push({
+      key: it.key,
+      title: it.title || path.basename(r.path),
+      path: r.path,
+      score: Math.round(r.score * 1000) / 1000,
+      shared: r.shared.map((x) => x.term).slice(0, 6),
+    });
+  }
+  return { ok: true, items: out, indexed: similarCorpus.n, target: path.resolve(targetPath) };
+}
+
+// ---------- 跨文档 Portal（v36） ----------
+// 渲染层把「参考文献条目文本」发过来，这里在库里找对应条目，再在它的全文索引里找起始页。
+// 只回一个结果：跳错比不跳更糟，所以阈值放在 portal.matchEntry 里，宁缺勿滥。
+const Portal = require('./portal.js');
+ipcMain.handle('portal-target', (_e, info) => {
+  try {
+    const entry = String((info && info.entry) || '').trim();
+    if (!entry) return { ok: false, error: '没有条目文本' };
+    const cur = info && info.path ? path.resolve(info.path) : '';
+    const items = (library.load().items || []).filter((it) => !it.deletedAt && it.attachment && it.attachment.path);
+    const best = Portal.matchEntry(entry, items.filter((it) => path.resolve(it.attachment.path) !== cur));
+    if (!best) return { ok: true, found: false };
+    fulltextRead.init(currentDataDir());
+    let page = 0;
+    try {
+      const idx = fulltextRead.readIndex(best.item.attachment.path);
+      page = Portal.findStartPage(idx, best.item) || 0;
+    } catch (_) { page = 0; }
+    return {
+      ok: true, found: true,
+      key: best.item.key,
+      title: best.item.title || path.basename(best.item.attachment.path),
+      path: best.item.attachment.path,
+      page: page || 1,
+      score: Math.round(best.score * 1000) / 1000,
+      why: best.why,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('similar-docs', async (_e, info) => {
+  try {
+    const target = info && info.path ? path.resolve(info.path) : '';
+    if (!target) return { ok: false, error: '没有文档路径' };
+    // 目标文档还没索引（刚导入、或索引被清过）：先补这一份，否则算不出相似度
+    if (!fulltextRead.isFresh(target)) {
+      try { await search.indexOne(target); } catch (_) {}
+    }
+    return similarDocsFor(target, info && info.limit);
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// ---------- 参考文献表批量入库（v36） ----------
+// 渲染层把参考文献区的行（已按阅读顺序拼好）发过来，这里切分 + 解析 + 查重。
+// 两个阶段：dryRun（不联网，只出预览）→ import（按勾选入库，可联网补全）。
+// 解析器在 src/refimport.js（纯函数），这里只负责「读库、联网、写库」。
+const RefImport = require('./refimport.js');
+const REFI_MAX_FETCH = 60;      // 一次最多联网补全多少条：多了既慢又容易被 Crossref 限速
+
+function refiPreview(parsed, items) {
+  const plan = RefImport.plan(parsed.entries, items);
+  return plan.map((e) => ({
+    no: e.entryNo,
+    title: e.title,
+    year: e.year,
+    creators: (e.creators || []).map((c) => [c.lastName, c.firstName].filter(Boolean).join(' ')).slice(0, 6),
+    publication: e.publication,
+    volume: e.volume,
+    issue: e.issue,
+    pages: e.pages,
+    doi: e.doi,
+    arxiv: e.arxiv,
+    itemType: e.itemType,
+    confidence: e.confidence,
+    status: e.status,
+    why: e.why,
+    dupWith: e.dupWith,
+    rawText: e.rawText.length > 300 ? e.rawText.slice(0, 300) + '…' : e.rawText,
+  }));
+}
+
+async function refiFetchMeta(entry, timeout) {
+  const id = entry.doi
+    ? entry.doi
+    : (entry.arxiv ? 'arxiv:' + entry.arxiv : '');
+  if (!id) return null;
+  try {
+    const r = await metadata.fetchMetadata(id, { timeout: timeout || 12000 });
+    return r && r.ok ? r.metadata : null;
+  } catch (_) { return null; }
+}
+
+ipcMain.handle('import-references', async (_e, info) => {
+  try {
+    const o = info || {};
+    const lines = Array.isArray(o.lines) ? o.lines : [];
+    if (!lines.length) return { ok: false, error: '没有参考文献行' };
+    const parsed = RefImport.parseSection(lines, { max: o.max });
+    if (!parsed.entries.length) {
+      return { ok: false, error: '这一段里没认出条目', heading: parsed.heading };
+    }
+    const items = library.load().items || [];
+
+    if (o.dryRun !== false) {
+      return {
+        ok: true, dryRun: true,
+        heading: parsed.heading,
+        lines: parsed.lines,
+        truncated: parsed.truncated,
+        total: parsed.entries.length,
+        entries: refiPreview(parsed, items),
+      };
+    }
+
+    // ---- 导入阶段 ----
+    const pick = Array.isArray(o.pick) ? new Set(o.pick.map((x) => Number(x))) : null;
+    // 传了 pick 就只导勾选的；没传（老调用）才导全部 —— 空数组意味着「一条都不勾」，不能当成全选
+    const chosen = parsed.entries.filter((e) => e.title && (!pick || pick.has(e.entryNo)));
+    if (!chosen.length) return { ok: true, added: 0, skipped: 0, fetched: 0, failed: [], entries: [] };
+
+    const wantFetch = o.fetch !== false;
+    const budget = Math.max(0, Math.min(REFI_MAX_FETCH, Number(o.maxFetch) || REFI_MAX_FETCH));
+    let fetched = 0;
+    const failures = [];
+    const finalEntries = [];
+
+    if (wantFetch) {
+      // 小并发：Crossref 对突发请求不友好，3 路已经能把 60 条压到十几秒
+      const queue = chosen.filter((e) => (e.doi || e.arxiv)).slice(0, budget);
+      const CONC = 3;
+      let cursor = 0;
+      let done = 0;
+      const worker = async () => {
+        while (cursor < queue.length) {
+          const e = queue[cursor++];
+          const meta = await refiFetchMeta(e, o.timeout);
+          done++;
+          if (meta) { fetched++; Object.assign(e, RefImport.mergeMeta(e, meta)); }
+          else failures.push({ title: e.title, doi: e.doi || ('arxiv:' + e.arxiv) });
+          if (win && queue.length > 3) {
+            try { win.webContents.send('refi-progress', { done, total: queue.length, title: e.title }); } catch (_) {}
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CONC, queue.length) }, worker));
+    }
+
+    for (const e of chosen) finalEntries.push(e);
+    const records = finalEntries.map((e) => RefImport.toRecord(e));
+    const r = library.importItems(records, { skipDuplicates: true });
+    if (r.added && win) win.webContents.send('lib-changed');
+    return {
+      ok: true,
+      added: r.added,
+      skipped: r.skipped,
+      fetched,
+      wantFetch,
+      failures,
+      keys: r.keys,
+      entries: finalEntries.map((e) => ({
+        no: e.entryNo, title: e.title, year: e.year, doi: e.doi,
+        confidence: e.confidence, itemType: e.itemType,
+      })),
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 ipcMain.handle('lib-update-item', (_e, info) => (info ? library.updateItem(info.key, info.patch || {}) : null));
 // 订阅条目 → 文献库（webpage 条目）。返回 ok + key，供界面把按钮置灰。
 ipcMain.handle('lib-add-item', (_e, info) => {
@@ -1142,12 +1525,12 @@ function noteResults(q, ast) {
 // v33：搜索支持分页与结果类型计数。
 // 默认仍返回前 120 条（老行为），加 offset/limit 可以翻页；counts/total 覆盖全部命中，
 // 不受本页条数限制——UI 用它显示「全部 / 文献 / 正文 / 批注 / 笔记」各自的命中数。
-function fulltextResults(queryRaw, opts) {
+async function fulltextResults(queryRaw, opts) {
   const o = opts || {};
   const limit = Math.min(500, Math.max(1, Math.floor(+o.limit) || 120));
   const offset = Math.max(0, Math.floor(+o.offset) || 0);
   const ast = query.parseQuery(queryRaw);
-  const hit = fulltext.search(queryRaw);
+  const hit = await search.search(queryRaw);
   const items = library.load().items;
   const byKey = new Map(items.map(it => [it.key, it]));
   const byPath = new Map();
@@ -1241,23 +1624,28 @@ function fulltextResults(queryRaw, opts) {
   return pageOf(out);
 }
 ipcMain.handle('lib-search-full', (_e, info) => fulltextResults(info && info.query, info));
-ipcMain.handle('lib-ft-status', () => {
-  const s = fulltext.stats();
+ipcMain.handle('lib-ft-status', async () => {
   const items = library.summary().items.filter((x) => !x.deletedAt && x.attachment);
-  return Object.assign(s, {
+  const paths = items.map((x) => x.attachment.path);
+  // 新鲜度在 worker 里批量比（每个条目都要 stat + 读索引头），主进程只收一串布尔
+  const [s, fresh] = await Promise.all([search.stats(), search.freshness(paths)]);
+  const freshCount = fresh.filter(Boolean).length;
+  return Object.assign({}, s, {
     totalItems: items.length,
-    indexedItems: items.filter((x) => fulltext.isFresh(x.attachment.path)).length,
-    pending: items.filter((x) => !fulltext.isFresh(x.attachment.path)).length,
+    indexedItems: freshCount,
+    pending: items.length - freshCount,
+    worker: search.modeOf(),
+    queueing: search.pendingCount(),
   });
 });
 ipcMain.handle('lib-ft-index', async (_e, info) => {
   const items = library.summary().items;
-  const res = await fulltext.indexAll(items, { force: !!(info && info.force) });
-  return Object.assign({ ok: true }, res, { status: fulltext.stats() });
+  const res = await search.indexAll(items, { force: !!(info && info.force) });
+  return Object.assign({ ok: true }, res, { status: await search.stats() });
 });
-ipcMain.handle('lib-ft-clear', () => {
-  const removed = fulltext.clear();
-  return { ok: true, removed, status: fulltext.stats() };
+ipcMain.handle('lib-ft-clear', async () => {
+  const removed = await search.clear();
+  return { ok: true, removed, status: await search.stats() };
 });
 
 // ---------- 元数据 / BibTeX / RIS / 查重 / 批量 / 智能收藏集 (v12) ----------
@@ -1288,7 +1676,7 @@ ipcMain.handle('lib-fetch-pdf', async (_e, info) => {
   if (!r.ok) return Object.assign({ ok: false }, r, { sources: src });
   try {
     const updated = library.setAttachment(key, r.path);
-    fulltext.indexOne(updated).catch(err => console.warn('[fulltext] downloaded file:', err.message));
+    search.scheduleIndex(updated);
     if (win) win.webContents.send('lib-changed');
   } catch (err) {
     return { ok: false, error: '下载成功但挂载失败：' + (err && err.message ? err.message : err) };
@@ -1356,7 +1744,7 @@ ipcMain.handle('lib-fetch-pdf-batch', async (_e, info) => {
         if (r.ok) {
           try {
             const updated = library.setAttachment(key, r.path);
-            fulltext.indexOne(updated).catch(err => console.warn('[fulltext] downloaded file:', err.message));
+            search.scheduleIndex(updated);
             rec.status = 'ok'; rec.source = r.source; rec.bytes = r.bytes; fetched++;
           } catch (err) {
             rec.status = 'failed';
@@ -1608,7 +1996,7 @@ ipcMain.handle('save-text', async (_e, info) => {
   const base = String(info.defaultName || ('Trove-参考文献-' + new Date().toISOString().slice(0, 10)))
     .replace(/[\\/:*?"<>|]/g, '-').replace(/\.(md|txt|html|doc|rtf)$/i, '');
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: '保存参考文献表',
+    title: String(info.title || '保存参考文献表'),
     defaultPath: path.join(appState.lastBackupDir || '', base + '.' + FMT_EXT[fmt]),
     filters: FMT_FILTERS[fmt],
   });
@@ -1638,7 +2026,9 @@ ipcMain.handle('lib-trash-items', (_e, info) => {
   return Object.assign({ ok: true }, r);
 });
 ipcMain.handle('lib-add-search', (_e, info) => {
-  const x = library.addSearch(info && info.name, info && info.query);
+  // 第三参数是条件检索的条件数组（v35）；老调用方只传 name / query 时等价于串式检索
+  const spec = (info && info.spec) || null;
+  const x = library.addSearch(info && info.name, info && info.query, spec);
   return { ok: !!x, search: x };
 });
 ipcMain.handle('lib-remove-search', (_e, info) => ({ ok: library.removeSearch(info && info.id) }));
@@ -1651,6 +2041,93 @@ ipcMain.handle('lib-reveal-item', (_e, info) => {
   shell.showItemInFolder(it.attachment.path);
   return { ok: true, path: it.attachment.path };
 });
+
+// 对照视图的候选文献：库里有现存 PDF 的条目。只回标题/作者/年份/路径，不读文件内容。
+ipcMain.handle('lib-pdf-list', () => {
+  try {
+    const items = library.summary().items
+      .filter((x) => !x.deletedAt && x.attachment && /\.pdf$/i.test(x.attachment.path) && fs.existsSync(x.attachment.path))
+      .map((x) => ({
+        key: x.key,
+        title: x.title || '(无标题)',
+        path: x.attachment.path,
+        year: x.year || '',
+        authors: (x.creators || [])
+          .filter((c) => c && c.creatorType !== 'editor')
+          .map((c) => c.lastName || c.firstName)
+          .filter(Boolean).slice(0, 3).join('、'),
+      }));
+    return { ok: true, items };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err), items: [] };
+  }
+});
+
+/*
+ * 把条目指向新的附件路径：合并旧标注 sidecar、改写库索引、重建全文索引。
+ * 从「手动重新定位」与「指纹自动找回」两条路共用，避免两处各写一遍事务。
+ */
+function relinkItemToPath(it, newPath) {
+  const oldPath = it.attachment && it.attachment.path;
+  const tx = new resources.FileTransaction();
+  try {
+    if (!fs.existsSync(newPath)) throw new Error('选择的文件不存在');
+    const oldAnno = oldPath && annoFileFor(oldPath), newAnno = annoFileFor(newPath);
+    if (oldAnno && oldAnno !== newAnno && fs.existsSync(oldAnno)) {
+      const source = JSON.parse(fs.readFileSync(oldAnno, 'utf8'));
+      const target = fs.existsSync(newAnno) ? JSON.parse(fs.readFileSync(newAnno, 'utf8')) : { pages: [] };
+      for (const pg of source.pages || []) {
+        let dest = target.pages.find((p) => p.page === pg.page);
+        if (!dest) { dest = { page: pg.page, shapes: [] }; target.pages.push(dest); }
+        for (const shape of pg.shapes || []) {
+          const existing = shape.id && dest.shapes.find((s) => s.id === shape.id);
+          if (existing && JSON.stringify(existing) !== JSON.stringify(shape)) throw new Error('目标附件包含同 id 的不同标注，已保留原关联');
+          if (!existing) dest.shapes.push(shape);
+        }
+      }
+      target.path = newPath; target.saved = Date.now();
+      tx.add(newAnno, JSON.stringify(target)); // 原标注仍保留，其他引用旧附件的条目不受影响。
+    }
+    const store = library.exportStore();
+    const updated = store.items.find((x) => x.key === it.key);
+    updated.attachment = {
+      path: newPath,
+      name: path.basename(newPath),
+      fingerprint: fingerprint.fingerprintOf(newPath),
+    };
+    updated.updated = Date.now();
+    tx.add(library.filePath(), JSON.stringify(store));
+    tx.commit(); library.resetCache();
+    search.scheduleIndex(updated);
+    return { ok: true, item: library.summary().items.find((x) => x.key === it.key) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    tx.dispose();
+  }
+}
+
+// 同一个目录里找「像是原来那个文件」的候选：先比指纹，没有指纹再比文件名。
+// 只扫原目录一层——全盘扫描太慢，用户真要大范围找回时走「扫描文件夹找回」。
+function findInSameDir(it) {
+  const oldPath = it.attachment && it.attachment.path;
+  if (!oldPath) return '';
+  const dir = path.dirname(oldPath);
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return ''; }
+  const cands = entries
+    .filter((e) => e.isFile() && docconvert.isSupported(path.join(dir, e.name)))
+    .map((e) => path.join(dir, e.name))
+    .filter((p) => path.resolve(p) !== path.resolve(oldPath));
+  if (!cands.length) return '';
+  if (it.attachment.fingerprint) {
+    const hit = fingerprint.matchByFingerprint([{ key: it.key, fingerprint: it.attachment.fingerprint }], cands);
+    if (hit.length) return hit[0].path;
+  }
+  // 没有指纹时才退到同名匹配：同目录同名基本就是同一个文件（大小写改名 / 同步盘回写）
+  const byName = fingerprint.matchByBasename([{ key: it.key, name: it.attachment.name || path.basename(oldPath) }], cands);
+  return byName.length ? byName[0].path : '';
+}
 
 // 附件被移动/改名后重新定位：只更新库索引里的路径，原文件不动
 ipcMain.handle('lib-relink-item', async (_e, info) => {
@@ -1667,36 +2144,55 @@ ipcMain.handle('lib-relink-item', async (_e, info) => {
       ? it.attachment.path : (appState.lastDir || undefined),
   });
   if (canceled || !filePaths.length) return { ok: false, canceled: true };
-  const newPath = path.resolve(filePaths[0]);
-  const oldPath = it.attachment && it.attachment.path;
-  const tx = new resources.FileTransaction();
-  try {
-    if (!fs.existsSync(newPath)) throw new Error('选择的文件不存在');
-    const oldAnno = oldPath && annoFileFor(oldPath), newAnno = annoFileFor(newPath);
-    if (oldAnno && oldAnno !== newAnno && fs.existsSync(oldAnno)) {
-      const source = JSON.parse(fs.readFileSync(oldAnno, 'utf8'));
-      const target = fs.existsSync(newAnno) ? JSON.parse(fs.readFileSync(newAnno, 'utf8')) : { pages: [] };
-      for (const pg of source.pages || []) {
-        let dest = target.pages.find(p => p.page === pg.page);
-        if (!dest) { dest = { page: pg.page, shapes: [] }; target.pages.push(dest); }
-        for (const shape of pg.shapes || []) {
-          const existing = shape.id && dest.shapes.find(s => s.id === shape.id);
-          if (existing && JSON.stringify(existing) !== JSON.stringify(shape)) throw new Error('目标附件包含同 id 的不同标注，已保留原关联');
-          if (!existing) dest.shapes.push(shape);
-        }
-      }
-      target.path = newPath; target.saved = Date.now();
-      tx.add(newAnno, JSON.stringify(target)); // 原标注仍保留，其他引用旧附件的条目不受影响。
-    }
-    const store = library.exportStore();
-    const updated = store.items.find(x => x.key === it.key);
-    updated.attachment = { path: newPath, name: path.basename(newPath) }; updated.updated = Date.now();
-    tx.add(library.filePath(), JSON.stringify(store));
-    tx.commit(); library.resetCache();
-    fulltext.indexOne(updated).catch(err => console.warn('[fulltext] reindex failed:', err.message));
-    return { ok: true, item: library.summary().items.find(x => x.key === it.key) };
-  } catch (err) { return { ok: false, error: err.message }; }
-  finally { tx.dispose(); }
+  return relinkItemToPath(it, path.resolve(filePaths[0]));
+});
+
+/*
+ * 扫描一个文件夹，把「失联的附件」按指纹批量认回来。
+ * 只处理有指纹的条目：没有指纹就没法证明是同一个文件，宁可让用户手动选，
+ * 也不要按文件名把不相干的文件错挂上去。
+ */
+ipcMain.handle('lib-relink-scan', async (_e, info) => {
+  let dir = info && info.dir ? path.resolve(info.dir) : '';
+  if (!dir) {
+    const r = await dialog.showOpenDialog(win, {
+      title: '选择要扫描的文件夹（找回归档 / 整理后移动的附件）',
+      properties: ['openDirectory'],
+      defaultPath: appState.lastDir || undefined,
+    });
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+    dir = r.filePaths[0];
+  }
+  if (!fs.existsSync(dir)) return { ok: false, error: '文件夹不存在' };
+  const missing = library.summary().items.filter((x) => !x.deletedAt
+    && x.attachment && x.attachment.path && !fs.existsSync(x.attachment.path));
+  if (!missing.length) return { ok: true, scanned: 0, missing: 0, relinked: 0, details: [], message: '没有失联的附件' };
+  const targets = missing
+    .filter((x) => x.attachment.fingerprint)
+    .map((x) => ({ key: x.key, fingerprint: x.attachment.fingerprint }));
+  if (!targets.length) {
+    return { ok: true, scanned: 0, missing: missing.length, relinked: 0, details: [], message: '这些条目没有指纹记录，请用「重新定位…」手动选择' };
+  }
+  const candidates = fingerprint.walkFiles(dir, {
+    exts: [...docconvert.SUPPORTED_EXTS], maxDepth: 4, maxFiles: 8000,
+  });
+  const matches = fingerprint.matchByFingerprint(targets, candidates);
+  const details = [];
+  for (const m of matches) {
+    const it = library.findItem(m.key);
+    if (!it) continue;
+    const r = relinkItemToPath(it, m.path);
+    details.push({ key: m.key, title: it.title, path: m.path, ok: !!r.ok, error: r.ok ? '' : r.error });
+  }
+  if (win && matches.length) win.webContents.send('lib-changed');
+  return {
+    ok: true,
+    dir,
+    scanned: candidates.length,
+    missing: missing.length,
+    relinked: details.filter((d) => d.ok).length,
+    details,
+  };
 });
 
 // ---------- 标注自动保存 / 恢复（按文件路径，userData/annotations/<hash>.json） ----------
@@ -1705,6 +2201,33 @@ function annoFileFor(filePath) {
   const dir = path.join(app.getPath('userData'), 'annotations');
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, h + '.json');
+}
+
+// 读 sidecar 的结果必须分三种，不能一律 catch 成 null：
+//   missing —— 文件不存在，这份文档确实从没标注过，保存 / 归档都按空处理；
+//   ok      —— 读到了，可以放心合并（书签、标签都在里面）；
+//   broken  —— 存在但读不出来（权限、磁盘错误、JSON 截断、pages 不是数组）。
+// 以前全归成 null，于是「读不出来」被当成「没有标注」，下一次保存用空数组把
+// 还能人工修复的原文件直接覆盖掉，归档也顺理成章地读到一份合法空数据（第五 / 六轮审核 R6-01）。
+function readAnnoSidecar(filePath) {
+  const annoPath = annoFileFor(filePath);
+  let raw = '';
+  try {
+    raw = fs.readFileSync(annoPath, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { status: 'missing', data: null, annoPath, error: '' };
+    return { status: 'broken', data: null, annoPath, error: '读取失败：' + String((err && (err.code || err.message)) || err) };
+  }
+  let obj = null;
+  try {
+    obj = JSON.parse(raw.replace(/^\uFEFF/, ''));
+  } catch (e) {
+    return { status: 'broken', data: null, annoPath, error: 'JSON 解析失败：' + String((e && e.message) || e) };
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj) || (obj.pages != null && !Array.isArray(obj.pages))) {
+    return { status: 'broken', data: null, annoPath, error: '结构异常：pages 不是数组' };
+  }
+  return { status: 'ok', data: obj, annoPath, error: '' };
 }
 
 // ---------- 标注稳定 id（数据层 v8 的地基） ----------
@@ -1744,7 +2267,7 @@ function upgradeAnnoIds() {
   let dir = '';
   try { dir = annoDir(); } catch (_) { return { ok: false, upgraded: 0 }; }
   let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f)); } catch (_) { return { ok: false, upgraded: 0 }; }
+  try { files = fs.readdirSync(dir).filter(isActiveAnnoFile); } catch (_) { return { ok: false, upgraded: 0 }; }
   const map = {};
   let upgraded = 0;
   for (const f of files) {
@@ -1768,17 +2291,38 @@ function upgradeAnnoIds() {
 ipcMain.handle('anno-save', (_e, info) => {
   if (!info || !info.path) return false;
   try {
-    // 空标注也落盘（用户清空后重开不应复活旧标注）
+    const st = readAnnoSidecar(info.path);
+    // 既存文件坏掉时，绝不拿内存里的空状态去覆盖它：那份文件里可能还留着能人工捞回的文字。
+    // 只有渲染层明确带 force（用户点了「重建标注文件」并确认）才往下走，而且先按原样备份一份。
+    if (st.status === 'broken' && !info.force) {
+      return {
+        ok: false,
+        broken: true,
+        annoPath: st.annoPath,
+        error: '标注文件已损坏，本次修改没有保存：' + path.basename(st.annoPath) + '（' + st.error + '）',
+      };
+    }
+    let backup = '';
+    if (st.status === 'broken' && info.force) {
+      backup = annoBackupNameFor(st.annoPath);
+      try { fs.copyFileSync(st.annoPath, backup); }
+      catch (err) {
+        return {
+          ok: false,
+          broken: true,
+          annoPath: st.annoPath,
+          error: '无法备份损坏的标注文件，为免丢数据已中止：' + String((err && err.message) || err),
+        };
+      }
+    }
+    // 空标注也落盘（用户清空后重开不应复活旧标注）——这是「正常读到过」的前提下才有意义
     const obj = { path: info.path, saved: Date.now(), pages: info.pages || [] };
     // 用户书签存在同一个 sidecar 里，标注保存不能把它们冲掉
-    try {
-      const oldObj = JSON.parse(fs.readFileSync(annoFileFor(info.path), 'utf8'));
-      if (Array.isArray(oldObj.bookmarks)) obj.bookmarks = oldObj.bookmarks;
-    } catch (_) {}
+    if (st.status === 'ok' && Array.isArray(st.data.bookmarks)) obj.bookmarks = st.data.bookmarks;
     // 兜底：渲染层没带 id 的形状顺手补上（新建标注由渲染层生成 id，这里是保险）
     ensureAnnoIds(obj, '', () => {});
     atomicWrite(annoFileFor(info.path), JSON.stringify(obj));
-    return true;
+    return backup ? { ok: true, backup } : true;
   } catch (err) { return { error: String(err && err.message ? err.message : err) }; }
 });
 // ---------- 用户书签（每份 PDF 一组，存标注 sidecar 的 bookmarks 字段） ----------
@@ -1796,7 +2340,10 @@ function readSidecarBookmarks(filePath) {
 ipcMain.handle('bookmarks-load', (_e, info) => {
   const p = info && info.path;
   if (!p) return { ok: false, bookmarks: [] };
-  return { ok: true, bookmarks: readSidecarBookmarks(p) };
+  // 书签和标注同住一个 sidecar：文件坏了要如实说出来，别让界面以为「一个书签都没有」
+  const st = readAnnoSidecar(p);
+  if (st.status === 'broken') return { ok: false, broken: true, bookmarks: [], annoPath: st.annoPath, error: st.error };
+  return { ok: true, broken: false, bookmarks: readSidecarBookmarks(p) };
 });
 
 ipcMain.handle('bookmarks-save', (_e, info) => {
@@ -1807,8 +2354,12 @@ ipcMain.handle('bookmarks-save', (_e, info) => {
     .map((b) => ({ page: Math.floor(+b.page), at: Number.isFinite(+b.at) && +b.at > 0 ? +b.at : Date.now(), label: String(b.label || '').slice(0, 60) }))
     .sort((a, b) => a.page - b.page);
   try {
-    let obj = {};
-    try { obj = JSON.parse(fs.readFileSync(annoFileFor(p), 'utf8')); } catch (_) { obj = {}; }
+    const st = readAnnoSidecar(p);
+    // 与 anno-save 同一条底线：读不出来的原文件不能被一份空书签覆盖
+    if (st.status === 'broken') {
+      return { ok: false, broken: true, annoPath: st.annoPath, error: '标注文件已损坏，书签没有保存：' + st.error };
+    }
+    const obj = st.status === 'ok' ? st.data : {};
     obj.path = obj.path || p;
     obj.saved = Date.now();
     obj.bookmarks = list;
@@ -1819,22 +2370,27 @@ ipcMain.handle('bookmarks-save', (_e, info) => {
 });
 
 ipcMain.handle('anno-load', (_e, info) => {
-  if (!info || !info.path) return [];
-  const file = annoFileFor(info.path);
+  if (!info || !info.path) return { ok: false, status: 'missing', pages: [], annoPath: '' };
+  const st = readAnnoSidecar(info.path);
+  if (st.status === 'missing') return { ok: true, status: 'missing', pages: [], annoPath: st.annoPath };
+  // 读不出来就如实上报：渲染层要据此禁止自动保存与归档，否则一次 flush 就把原文件换掉了。
+  // 这里不回退成 []——「空」和「读失败」在界面上长得一模一样，那是最坏的一种失败方式。
+  if (st.status === 'broken') {
+    return { ok: false, status: 'broken', pages: [], annoPath: st.annoPath, error: st.error };
+  }
+  const file = st.annoPath;
   const fileId = path.basename(file, '.json');
-  try {
-    const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const pages = Array.isArray(obj.pages) ? obj.pages : [];
-    // 老标注首次打开：补 id → 回写文件 → 库里的标签键重映射过去
-    const res = ensureAnnoIds(obj, fileId, () => {
-      try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (_) {}
-    });
-    if (res.changed) {
-      try { library.remapAnnoTags(res.map); } catch (_) {}
-      if (win) win.webContents.send('lib-changed');
-    }
-    return pages;
-  } catch (_) { return []; }
+  const obj = st.data;
+  const pages = Array.isArray(obj.pages) ? obj.pages : [];
+  // 老标注首次打开：补 id → 回写文件 → 库里的标签键重映射过去
+  const res = ensureAnnoIds(obj, fileId, () => {
+    try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (_) {}
+  });
+  if (res.changed) {
+    try { library.remapAnnoTags(res.map); } catch (_) {}
+    if (win) win.webContents.send('lib-changed');
+  }
+  return { ok: true, status: 'ok', pages, annoPath: file };
 });
 
 // 把所有文档的标注汇总成一张表（标注条目化的第一步）。
@@ -1842,7 +2398,7 @@ ipcMain.handle('anno-load', (_e, info) => {
 const ANNO_KIND = {
   mark: '高亮', highlight: '高亮', comment: '批注', quote: '摘录', underline: '下划线',
   pen: '手绘', rect: '矩形', arrow: '箭头', line: '直线', text: '文字', note: '便签',
-  image: '图片', select: '选区',
+  image: '图片', select: '选区', stamp: '印章',
 };
 function annoKindOf(shape) {
   if (!shape) return '标注';
@@ -1854,15 +2410,28 @@ function annoKindOf(shape) {
   return shape.text ? '高亮' : '选区';
 }
 
-function listAllAnnotations() {
+// 扫描标注目录，同时报告「这次扫描是不是完整的」。
+// 单个文件读失败时以前只跳过、调用方无从分辨，于是「读失败」被当成「标注被删了」，
+// 回顾进度跟着被永久清掉（第四轮审核 R4-01）。现在把 completeness 一并带出去。
+function scanAllAnnotations() {
   const out = [];
+  const failures = [];
+  let complete = true;
   let dir = '';
-  try { dir = annoDir(); } catch (_) { return out; }
+  try { dir = annoDir(); } catch (_) { return { list: out, complete: false, failures: ['标注目录不可用'] }; }
   let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f)); } catch (_) { return out; }
+  try { files = fs.readdirSync(dir).filter(isActiveAnnoFile); }
+  catch (err) {
+    return { list: out, complete: false, failures: ['目录读不到：' + String((err && (err.code || err.message)) || err)] };
+  }
   for (const f of files) {
     let obj = null;
-    try { obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+    try { obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); }
+    catch (err) {
+      complete = false;
+      if (failures.length < 8) failures.push(f + '：' + String((err && (err.code || err.message)) || err));
+      continue;
+    }
     const pages = (obj && Array.isArray(obj.pages)) ? obj.pages : [];
     const filePath = String((obj && obj.path) || '');
     const fileId = f.replace(/\.json$/i, '');
@@ -1897,8 +2466,10 @@ function listAllAnnotations() {
     }
   }
   out.sort((a, b) => (a.fileName === b.fileName ? a.page - b.page : a.fileName.localeCompare(b.fileName)));
-  return out;
+  return { list: out, complete, failures };
 }
+
+function listAllAnnotations() { return scanAllAnnotations().list; }
 
 // 编辑标注对象：改文字 / 批注 / 颜色。文字与批注同时写回标注真身（阅读器要看到），
 // 颜色只存在于真身，库里记一份更新时间。
@@ -1909,7 +2480,7 @@ ipcMain.handle('anno-update', (_e, info) => {
   let dir = '';
   try { dir = annoDir(); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
   let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f)); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
+  try { files = fs.readdirSync(dir).filter(isActiveAnnoFile); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
   let touched = null;
   for (const f of files) {
     const full = path.join(dir, f);
@@ -2041,6 +2612,85 @@ ipcMain.handle('anno-link', (_e, info) => {
 
 ipcMain.handle('anno-list', () => listAllAnnotations());
 
+// ---------- 回顾（间隔重复复习） ----------
+// 卡片只存「什么时候该再看一遍」，标注正文仍从 anno-list 拿：渲染层已经有一份，
+// 不必为了复习再读一遍所有标注文件。到期列表也在这里算，界面只管显示。
+function recallValidIds() {
+  try {
+    const scan = scanAllAnnotations();
+    return { ids: new Set(scan.list.map((a) => a.id)), complete: scan.complete, failures: scan.failures };
+  } catch (err) {
+    // 整个扫描炸了：同样当作「不完整」，宁可留脏卡片也不能清进度
+    return { ids: new Set(), complete: false, failures: [String((err && err.message) || err)] };
+  }
+}
+ipcMain.handle('recall-state', (_e, info) => {
+  const now = Date.now();
+  // 标注删掉之后卡片要跟着走，否则「待复习」永远清不掉；
+  // 但扫描不完整（有标注文件读失败）时跳过清理——读失败 ≠ 标注被删（R4-01）。
+  const scan = recallValidIds();
+  const pr = recall.prune(scan.ids, now, { complete: scan.complete });
+  return {
+    ok: true, now,
+    cards: recall.all(),
+    due: recall.dueList(now, info && info.limit),
+    stats: recall.stats(now),
+    pruned: pr.removed || 0,
+    scanIncomplete: !scan.complete,
+    scanFailures: scan.failures || [],
+  };
+});
+ipcMain.handle('recall-add', (_e, info) => recall.add(info && info.ids, Date.now()));
+ipcMain.handle('recall-rate', (_e, info) => recall.rate(info && info.id, info && info.rating, Date.now()));
+ipcMain.handle('recall-remove', (_e, info) => recall.remove(info && info.id));
+
+/*
+ * 批注 → 跨条目综述草稿（2026-10-29）。
+ * 范围：显式 keys（当前列表 / 已选条目）> collectionId > query（智能收藏集）> 全库。
+ * 汇总批注时把 annoMeta 里的标签补上——listAllAnnotations 只读标注真身，不带标签。
+ */
+ipcMain.handle('lib-review-draft', (_e, info) => {
+  const o = info || {};
+  try {
+    // 主进程里也要注册用户 CSL 样式，否则草稿里的 csl: 样式会退化成默认样式
+    try {
+      const st = listUserCslStyles();
+      if (st && st.ok && st.styles && st.styles.length) Cite.registerCslStyles(st.styles);
+    } catch (_) {}
+    const s = library.summary();
+    const items = s.items.filter((x) => !x.deletedAt);
+    const meta = s.annoMeta || {};
+    const annos = listAllAnnotations().map((a) => Object.assign({}, a, {
+      tags: (meta[a.id] && Array.isArray(meta[a.id].tags)) ? meta[a.id].tags.slice() : [],
+    }));
+    // 只有「没传 keys」才继续往下解析范围；传了空数组就是明确的空范围（一条都不要），
+    // 不能因为 length 为 0 就当成全库。
+    let keys = Array.isArray(o.keys) ? o.keys.map(String) : null;
+    if (keys === null && o.collectionId) {
+      const id = String(o.collectionId);
+      keys = items.filter((x) => (x.collectionIds || []).indexOf(id) >= 0).map((x) => x.key);
+    }
+    if (keys === null && o.query) {
+      keys = items.filter((x) => {
+        try { return query.matchLibraryItem(x, o.query); } catch (_) { return false; }
+      }).map((x) => x.key);
+    }
+    const r = Review.build({
+      items,
+      annos,
+      keys,
+      groupBy: o.groupBy,
+      style: o.style,
+      includeQuotes: o.includeQuotes,
+      includeComments: o.includeComments,
+      title: o.title,
+    });
+    return { ok: true, markdown: r.markdown, stats: r.stats };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 // ---------- 阅读时长统计（Calibre reading stats 式） ----------
 // 存 userData/reading-stats.json（不进 library.json：高频小写会搅乱库文件的保存节奏）。
 function readingStatsPath() { return path.join(app.getPath('userData'), 'reading-stats.json'); }
@@ -2168,7 +2818,8 @@ ipcMain.handle('export-note', async (_e, info) => {
 ipcMain.handle('export-note-bundle', async (_e, info) => {
   const Md = require('./markdown.js');
   const key = info && info.key;
-  const fmt = info && info.fmt === 'md' ? 'md' : 'html';
+  // v35：多了 doc（Word 能直接打开的 HTML 文档）；md 仍是 Markdown，其余按 HTML
+  const fmt = info && info.fmt === 'md' ? 'md' : (info && info.fmt === 'doc' ? 'doc' : 'html');
   const it = key ? library.findItem(key) : null;
   if (!it) return { ok: false, error: '找不到这条笔记所属的条目' };
   const notes = it.notes || [];
@@ -2202,15 +2853,17 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
 
   const rawTitle = String((info && info.title) || it.title || '未命名笔记').trim() || '未命名笔记';
   const safeTitle = rawTitle.replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 80);
-  const ext = fmt === 'md' ? 'md' : 'html';
+  const ext = fmt === 'md' ? 'md' : (fmt === 'doc' ? 'doc' : 'html');
   let filePath = '';
   if (info && info.outPath) {
     filePath = String(info.outPath);   // 测试 / 脚本直写，不弹对话框
   } else {
     const picked = await dialog.showSaveDialog(win, {
-      title: fmt === 'md' ? '导出笔记（Markdown，图片在同目录的 .files 文件夹）' : '导出笔记（HTML，图片在同目录的 .files 文件夹）',
+      title: fmt === 'md' ? '导出笔记（Markdown，图片在同目录的 .files 文件夹）'
+        : (fmt === 'doc' ? '导出笔记（Word 文档，图片在同目录的 .files 文件夹）'
+          : '导出笔记（HTML，图片在同目录的 .files 文件夹）'),
       defaultPath: path.join(appState.lastDir || '', safeTitle + '.' + ext),
-      filters: [{ name: fmt === 'md' ? 'Markdown' : 'HTML', extensions: [ext] }],
+      filters: [{ name: fmt === 'md' ? 'Markdown' : (fmt === 'doc' ? 'Word 文档' : 'HTML'), extensions: [ext] }],
     });
     if (picked.canceled || !picked.filePath) return { ok: false, canceled: true };
     filePath = picked.filePath;
@@ -2316,6 +2969,29 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
       } catch (_) { /* 资源拷贝失败不影响导出：公式结构在，字体退化到系统衬线 */ }
       if (fontN === 0) katexHead = '';   // 没拷到字体就不引用，免得 404
     }
+    if (fmt === 'doc') {
+      // Word 能直接打开 HTML：给一份带 mso 命名空间与页面设置的版本，字号 / 行距 / 表格边框
+      // 按 A4 论文笔记的常见排版给。故意不引 KaTeX 的 css（Word 不会加载相对路径的样式表，
+      // 公式会退化成 KaTeX 展开后的普通文字与符号，仍可读，但不保证位置精确）。
+      const wordPage = '<html xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+        'xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">\n' +
+        '<head><meta charset="utf-8"><title>' + Md.esc(rawTitle) + '</title>\n' +
+        '<!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom>' +
+        '<w:DoNotOptimizeForBrowser/></w:WordDocument></xml><![endif]-->\n' +
+        '<style>@page{size:A4;margin:2.2cm 2cm}' +
+        'body{font-family:"Noto Serif SC",Georgia,serif;font-size:11pt;line-height:1.7;color:#222}' +
+        'h1{font-size:17pt}h2{font-size:14pt}h3{font-size:12pt}' +
+        'img.md-img{max-width:100%;height:auto}' +
+        'table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:3px 8px}' +
+        'blockquote{margin:1em 0;padding:.3em 1em;border-left:3px solid #bbb;color:#444}' +
+        'code{font-family:Consolas,"Courier New",monospace;font-size:10pt}' +
+        'pre{background:#f4f4f4;padding:8px;border:1px solid #e0e0e0}' +
+        '.md-img-missing{color:#a05a2c}.q-from{color:#666}</style></head>\n<body>\n' +
+        html + '\n</body></html>\n';
+      atomicWrite(filePath, wordPage);
+      appState.lastDir = path.dirname(filePath);
+      return { ok: true, path: filePath, images: copied, skipped, math: mathCount, fmt };
+    }
     const page = '<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n' +
       '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
       '<title>' + Md.esc(rawTitle) + '</title>\n' + katexHead +
@@ -2327,7 +3003,7 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
       html + '\n</body>\n</html>\n';
     atomicWrite(filePath, page);
     appState.lastDir = path.dirname(filePath);
-    return { ok: true, path: filePath, images: copied, skipped, math: mathCount };
+    return { ok: true, path: filePath, images: copied, skipped, math: mathCount, fmt };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }
@@ -2337,7 +3013,7 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
 async function exportAllNotesToFile(outPath) {
   try {
     const dir = annoDir();
-    const files = fs.readdirSync(dir).filter((f) => /\.json$/i.test(f));
+    const files = fs.readdirSync(dir).filter(isActiveAnnoFile);
     const docs = [];
     let total = 0;
     for (const f of files) {
@@ -2401,6 +3077,135 @@ async function exportAllNotesToFile(outPath) {
 }
 
 ipcMain.handle('export-all-notes', (_e, info) => exportAllNotesToFile(info && info.outPath));
+
+// ---------- 批注归档：一个文件带走全部（借鉴 Okular 的 Archive） ----------
+// 打包内容：原文档 + 标注数据（annotations.json，可再导入）+ 人可读的 Markdown 摘要。
+// 为什么要 zip 而不是「另一个带标注的 PDF」：带标注的 PDF 只能看，不能改也不能回读；
+// 归档里的 JSON 才是可恢复的那份，PDF 只是「当时看的是什么」。
+const ANNO_TOOL_NAMES = {
+  mark: '高亮', highlight: '荧光', pen: '手绘', line: '直线', rect: '矩形', arrow: '箭头',
+  text: '文字', note: '便签', stamp: '印章', image: '图片', select: '选区',
+};
+
+function archiveMarkdownFor(filePath, fileName, obj) {
+  const pages = (obj && Array.isArray(obj.pages)) ? obj.pages : [];
+  const rows = [];
+  let total = 0;
+  for (const pg of pages) {
+    for (const sh of (pg && pg.shapes) || []) {
+      if (!sh) continue;
+      const text = String(sh.text || '').trim();
+      const comment = String(sh.comment || '').trim();
+      if (!text && !comment) continue;
+      total++;
+      rows.push({ page: Number(pg.page) || 0, sh, text, comment });
+    }
+  }
+  rows.sort((a, b) => (a.page - b.page) || String(a.sh.id || '').localeCompare(String(b.sh.id || '')));
+  const out = ['# ' + (fileName || '文档') + ' · 批注归档', ''];
+  out.push('> 导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }));
+  out.push('> 原文档：' + filePath);
+  out.push('> 批注：' + total + ' 条，分布在 ' + pages.filter((p) => (p.shapes || []).length).length + ' 页');
+  out.push('');
+  let lastPage = -1;
+  for (const r of rows) {
+    if (r.page !== lastPage) { out.push('## 第 ' + r.page + ' 页', ''); lastPage = r.page; }
+    const kind = String(r.sh.kind === 'quote' ? '摘录' : (ANNO_TOOL_NAMES[r.sh.tool] || '标注'));
+    out.push('### ' + kind + (r.sh.stamp ? ' · ' + (r.sh.text || '') : ''));
+    out.push('');
+    if (r.sh.stamp) {
+      out.push('- 印章：' + String(r.sh.text || r.sh.stamp));
+    } else if (r.text) {
+      out.push('> ' + r.text.replace(/\n/g, '\n> '));
+    }
+    if (r.comment) out.push('', '**批注**：' + r.comment);
+    out.push('');
+  }
+  if (!rows.length) out.push('（这份文档还没有带文字的批注。）', '');
+  return out.join('\n');
+}
+
+ipcMain.handle('export-anno-archive', async (_e, info) => {
+  try {
+    const srcPath = info && info.path ? path.resolve(info.path) : '';
+    if (!srcPath) return { ok: false, error: '没有文档路径' };
+    if (!fs.existsSync(srcPath)) return { ok: false, error: '原文档不在了：' + srcPath };
+    const JSZip = require('jszip');
+    const zip = new JSZip();
+    const base = path.basename(srcPath).replace(/\.[^.]+$/, '');
+    const ext = path.extname(srcPath).toLowerCase();
+    let obj = null;
+    // 读 sidecar 要区分「没有批注」和「读不出来」。
+    // 前者 = 文件不存在（从没标注过），出空归档是正常的；
+    // 后者 = 权限、磁盘错误、JSON 损坏——必须中止。把解析失败悄悄换成 pages=[]
+    // 会生成一个「看起来成功」的空恢复包，比直接报错更误导人（用户会以为已备份）。
+    const st = readAnnoSidecar(srcPath);
+    const annoPath = st.annoPath;
+    if (st.status === 'broken') {
+      return {
+        ok: false,
+        broken: true,
+        annoPath,
+        error: '标注文件已损坏，未生成归档：' + path.basename(annoPath) +
+          '（' + st.error + '）。原文件仍在原处，可先备份再修复。',
+      };
+    }
+    obj = st.status === 'ok' ? st.data : null;
+    const pages = (obj && Array.isArray(obj.pages)) ? obj.pages : [];
+    const nAnnos = pages.reduce((n, p) => n + ((p && p.shapes) || []).length, 0);
+
+    zip.file('README.txt', [
+      'Trove 批注归档',
+      '==============',
+      '',
+      '原文档  ：' + path.basename(srcPath),
+      '导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }),
+      '批注数量：' + nAnnos,
+      '',
+      '目录说明：',
+      '  ' + path.basename(srcPath) + '   原文档（未改动，标注不在里面）',
+      '  标注.md                       人可读的批注清单（按页排）',
+      '  annotations.json              标注原始数据，可回读 / 迁移',
+      '',
+      '为什么标注不在 PDF 里：归档的目的是「可恢复」。画进 PDF 的标注只能看，',
+      '改不了也导不回来；JSON 才是可恢复的那一份，PDF 只说明「当时看的是什么」。',
+      '如果要一份画好标注的 PDF，用「导出副本」。',
+      '',
+    ].join('\r\n'));
+
+    zip.file('annotations.json', JSON.stringify({
+      app: 'Trove',
+      version: 1,
+      exportedAt: Date.now(),
+      source: srcPath,
+      fileName: path.basename(srcPath),
+      pages,
+    }, null, 2));
+    zip.file('标注.md', archiveMarkdownFor(srcPath, path.basename(srcPath), obj));
+    zip.file(path.basename(srcPath), fs.readFileSync(srcPath));
+
+    const buf = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: ext === '.pdf' ? 3 : 6 },   // PDF 已经压过了，再压收益很小
+    });
+
+    let target = info && info.outPath;
+    if (!target) {
+      const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        title: '导出批注归档（单个 zip）',
+        defaultPath: base + '-批注归档.zip',
+        filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
+      });
+      if (canceled || !filePath) return { ok: false, canceled: true };
+      target = filePath;
+    }
+    fs.writeFileSync(target, buf);
+    return { ok: true, path: target, annotations: nAnnos, bytes: buf.length };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 
 // v26：菜单栏去掉后，这几件事改从界面里发起
 // 1) 清空「最近打开」记录（文档快速切换面板上的「清空」）
@@ -2468,7 +3273,7 @@ function hexToRgb(hex) {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 }
 
-function drawAnno(page, sh, font, lib) {
+function drawAnno(page, sh, fonts, lib, stats) {
   const { rgb, LineCapStyle } = lib;
   const [r, g, b] = hexToRgb(sh.color);
   const color = rgb(r, g, b);
@@ -2514,20 +3319,75 @@ function drawAnno(page, sh, font, lib) {
       width: Math.abs(sh.b.x - sh.a.x), height: Math.abs(sh.b.y - sh.a.y),
       borderColor: color, borderWidth: t, opacity: 0,
     });
+  } else if (sh.tool === 'stamp') {
+    drawStamp(page, sh, fonts, lib, stats);
   } else if (sh.tool === 'text') {
-    // Helvetica 只支持 Latin-1；含 CJK 等字符会抛错，交由上层 per-shape try/catch 跳过
+    // Helvetica 只认 Latin-1：含 CJK 的标注必须换字体，否则整条会抛错被跳过。
+    // 没有可用的中文字体时才走原来的「跳过并计数」。
     const size = sh.size || 14;
+    const st = stats || {};
     String(sh.text).split('\n').forEach((ln, i) => {
-      page.drawText(ln, { x: sh.at.x, y: sh.at.y - size - i * size * 1.25, size, font, color });
+      const pick = pickFont(ln, fonts, st);
+      if (!pick) throw new Error('没有可用的中文字体');
+      page.drawText(pick.text, { x: sh.at.x, y: sh.at.y - size - i * size * 1.25, size, font: pick.font, color });
     });
   }}
+
+// 按内容挑字体：纯 Latin-1 用 Helvetica（体积为零），含其它字符用 CJK 字体。
+// 返回 null 表示「这条需要中文但系统里没有中文字体」，由调用方计入 skipped。
+function pickFont(text, fonts, stats) {
+  const str = String(text || '');
+  const needCjk = /[^\x00-\xFF]/.test(str);
+  if (!needCjk) return { font: fonts.latin, text: str };
+  if (!fonts.cjk) return null;
+  const safe = PdfText.sanitize(str, fonts.cjk.has);
+  if (safe !== str && stats) stats.missingGlyphs = (stats.missingGlyphs || 0) + 1;
+  return { font: fonts.cjk.font, text: safe };
+}
+
+// 印章：圆角框做不出来（pdf-lib 不支持圆角），用细边框矩形 + 居中文字，
+// 视觉上跟阅读器里的印章一致。✓ 在常见中文字体里没有字形，直接用两段线画。
+function drawStamp(page, sh, fonts, lib, stats) {
+  const { rgb } = lib;
+  const [r, g, b] = hexToRgb(sh.color || '#2e7d32');
+  const color = rgb(r, g, b);
+  const size = sh.size || 15;
+  const text = String(sh.text || '');
+  let units = 0;
+  for (const ch of text) units += /[\u3400-\u9fff\uf900-\ufaff]/.test(ch) ? 1 : 0.58;
+  const w = Math.max(size * 1.9, units * size + size * 1.1);
+  const h = size * 1.85;
+  page.drawRectangle({
+    x: sh.at.x, y: sh.at.y, width: w, height: h,
+    borderColor: color, borderWidth: Math.max(1.2, size * 0.11), opacity: 0,
+  });
+  if (text === '✓') {
+    const t = Math.max(1.4, size * 0.12);
+    const x0 = sh.at.x + w * 0.26, y0 = sh.at.y + h * 0.52;
+    page.drawLine({ start: { x: x0, y: y0 }, end: { x: x0 + w * 0.18, y: y0 - h * 0.22 }, color, thickness: t, lineCap: lib.LineCapStyle.Round });
+    page.drawLine({ start: { x: x0 + w * 0.18, y: y0 - h * 0.22 }, end: { x: x0 + w * 0.48, y: y0 + h * 0.26 }, color, thickness: t, lineCap: lib.LineCapStyle.Round });
+    return;
+  }
+  const pick = pickFont(text, fonts, stats);
+  if (!pick) throw new Error('没有可用的中文字体');
+  let tw = 0;
+  try { tw = pick.font.widthOfTextAtSize(pick.text, size); } catch (_) { tw = w * 0.6; }
+  page.drawText(pick.text, {
+    x: sh.at.x + Math.max(2, (w - tw) / 2),
+    y: sh.at.y + (h - size) / 2 + size * 0.14,
+    size, font: pick.font, color,
+  });
+}
 
 ipcMain.handle('export-pdf', async (_e, payload) => {
   try {
     const { PDFDocument, rgb, StandardFonts, LineCapStyle } = require('pdf-lib');
     const lib = { rgb, LineCapStyle };
     const doc = await PDFDocument.load(payload.data, { ignoreEncryption: true });
-    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const fonts = { latin: await doc.embedFont(StandardFonts.Helvetica), cjk: null };
+    // 系统里有中文字体就嵌子集；没有就照旧走 Helvetica，让中文标注计入 skipped
+    try { fonts.cjk = await PdfText.embedCjkFont(doc); } catch (_) { fonts.cjk = null; }
+    const stats = { missingGlyphs: 0 };
     const pages = doc.getPages();
     let skipped = 0;
     const reasons = [];
@@ -2535,7 +3395,7 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
       const page = pages[pg.index];
       if (!page) continue;
       for (const sh of pg.shapes) {
-        try { drawAnno(page, sh, font, lib); }
+        try { drawAnno(page, sh, fonts, lib, stats); }
         catch (err) {
           skipped++;
           // 只留前几条，够定位是哪类标注失败即可；界面仍然只显示总数。
@@ -2554,7 +3414,12 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
       target = filePath;
     }
     fs.writeFileSync(target, out);
-    return { ok: true, path: target, skipped, reasons };
+    return {
+      ok: true, path: target, skipped, reasons,
+      cjk: !!fonts.cjk,
+      cjkFont: fonts.cjk ? path.basename(fonts.cjk.path) : '',
+      missingGlyphs: stats.missingGlyphs,
+    };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }
@@ -2597,7 +3462,7 @@ app.whenReady().then(() => {
     setTimeout(() => {
       try {
         const items = library.summary().items;
-        fulltext.indexAll(items).then((r) => {
+        search.indexAll(items).then((r) => {
           if (r && (r.failed || r.done)) console.log('[fulltext] auto index ' + JSON.stringify({ done: r.done, skipped: r.skipped, failed: r.failed }));
         }).catch((err) => console.warn('[fulltext] auto index failed:', err && err.message));
       } catch (_) {}
@@ -2651,3 +3516,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// 索引 worker 是常驻线程，退出前显式收掉，别让它拖住进程
+app.on('will-quit', () => { try { search.stop(); } catch (_) {} });

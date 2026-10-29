@@ -9,7 +9,31 @@ const Anno = window.Anno = (() => {
     color: '#e53935',
     width: 3,
     textHeight: 18,
+    stamp: 'ok',           // v36：当前印章预设 id
   };
+
+  // 印章（借鉴 Okular）：点一下就落一个带框的标记，不拖不画。
+  // 预设里放的是「审阅时最常盖的那几个」，颜色各自固定 —— 印章的含义靠颜色区分，
+  // 跟着取色器变色会让「已阅」变成红色，反而读不出来。
+  const STAMPS = [
+    { id: 'ok', text: '已阅', color: '#2e7d32' },
+    { id: 'no', text: '存疑', color: '#c62828' },
+    { id: 'star', text: '★', color: '#ef6c00' },
+    { id: 'done', text: '✓', color: '#1565c0' },
+    { id: 'todo', text: '待办', color: '#6a1b9a' },
+  ];
+  const STAMP_BY_ID = new Map(STAMPS.map((x) => [x.id, x]));
+
+  // 印章的框：文字宽度按「CJK 算一个全角、拉丁算半个」估，够用且不依赖测量
+  function stampBox(sh) {
+    const size = sh.size || 15;
+    const text = String(sh.text || (STAMP_BY_ID.get(sh.stamp) || STAMPS[0]).text);
+    let units = 0;
+    for (const ch of text) units += /[\u3400-\u9fff\uf900-\ufaff]/.test(ch) ? 1 : 0.58;
+    const w = Math.max(size * 1.9, units * size + size * 1.1);
+    const h = size * 1.85;
+    return { x: sh.at.x, y: sh.at.y, w, h, size, text };
+  }
   const undoStack = []; // {type:'add'|'del'|'clear', n, shape|shapes}
   let hintShown = false; // 看图模式的提示只弹一次
   let drawing = null;   // 正在绘制的临时 shape
@@ -145,6 +169,32 @@ const Anno = window.Anno = (() => {
         }
         break;
       }
+      case 'stamp': {
+        // 印章：圆角框 + 居中文字。用 dirty 的虚线感（dasharray）区分于普通矩形框，
+        // 一眼能看出「这是盖章，不是画的框」。
+        const box = stampBox(sh);
+        const g = document.createElementNS(NS, 'g');
+        g.setAttribute('class', 'stamp-mark');
+        g.appendChild(el('rect', {
+          x: box.x, y: box.y, width: box.w, height: box.h,
+          rx: Math.min(6, box.h * 0.22), ry: Math.min(6, box.h * 0.22),
+          fill: 'none', stroke: sh.color || '#2e7d32', 'stroke-width': Math.max(1.2, box.size * 0.11),
+        }));
+        const t = el('text', {
+          x: box.x + box.w / 2, y: box.y + box.h / 2,
+          fill: sh.color || '#2e7d32', 'font-size': box.size,
+          'font-family': 'system-ui, "Segoe UI", "Microsoft YaHei", sans-serif',
+          'font-weight': '600', 'text-anchor': 'middle', 'dominant-baseline': 'central',
+          'letter-spacing': '0.5',
+        });
+        t.textContent = box.text;
+        g.appendChild(t);
+        const ti = el('title', {});
+        ti.textContent = '印章：' + box.text + (sh.comment ? '\n' + sh.comment : '');
+        g.appendChild(ti);
+        top.appendChild(g);
+        break;
+      }
       case 'note': {
         // 便签：黄色小标记 + 原生 <title> 悬停提示显示内容（不需要额外 DOM 弹层）
         const m = 16;
@@ -236,6 +286,20 @@ const Anno = window.Anno = (() => {
     const tool = state.tool;
     if (tool === 'select') return;
     const p = toUnit(svg, e.clientX, e.clientY);
+    if (tool === 'stamp') {
+      // 落章是「一次点击」的动作：不进拖拽手势，也不等 pointerup，
+      // 否则用户点一下再移开鼠标，章会跟着跑到别处。
+      const preset = STAMP_BY_ID.get(state.stamp) || STAMPS[0];
+      const sh = {
+        id: newAnnoId(), tool: 'stamp', at: p, stamp: preset.id, text: preset.text,
+        color: preset.color, width: 0, size: state.textHeight || 15,
+      };
+      shapesOf(n).push(sh);
+      undoStack.push({ type: 'add', n, shape: sh });
+      renderPage(n);
+      notify();
+      return;
+    }
     if (tool === 'text' || tool === 'note') {
       // 点到已有的便签/文字 → 打开编辑器改它；没点中才新建
       // （原来不管点哪儿都开一个空编辑器，保存过的便签再也点不开）
@@ -365,6 +429,10 @@ const Anno = window.Anno = (() => {
       const h = lines.length * sh.size * 1.25;
       const bw = sh.tool === 'note' ? 16 : w; // 便签命中框就是 16 单位的标记本身
       return p.x >= sh.at.x - r && p.x <= sh.at.x + bw + r && p.y >= sh.at.y - r && p.y <= sh.at.y + Math.max(h, sh.tool === 'note' ? 16 : h) + r;
+    }
+    if (sh.tool === 'stamp') {
+      const b = stampBox(sh);
+      return p.x >= b.x - r && p.x <= b.x + b.w + r && p.y >= b.y - r && p.y <= b.y + b.h + r;
     }
     if (sh.tool === 'rect') {
       const x1 = Math.min(sh.a.x, sh.b.x) - r, y1 = Math.min(sh.a.y, sh.b.y) - r;
@@ -547,9 +615,11 @@ const Anno = window.Anno = (() => {
   // ---- 工具切换 + 「更多」浮层 ----
   function setTool(t) {
     state.tool = t;
-    document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image');
+    document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image', 'tool-stamp');
     document.body.classList.add('tool-' + t);
     for (const b of document.querySelectorAll('.ntool')) b.classList.toggle('active', b.dataset.tool === t);
+    const bar = document.getElementById('stamp-bar');
+    if (bar) bar.hidden = t !== 'stamp';
     if (t === 'image' && !hintShown) {
       // 同一条提示只弹一次，不然每次按 V 都闪一下
       hintShown = true;
@@ -598,6 +668,17 @@ const Anno = window.Anno = (() => {
     document.getElementById('note-width').addEventListener('change', (e) => { state.width = parseFloat(e.target.value) || 3; });
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-clear-page').addEventListener('click', clearPage);
+    // 印章预设：点一个就切过去（保持印章工具不变，方便连着盖）
+    const sbar = document.getElementById('stamp-bar');
+    if (sbar) {
+      sbar.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-stamp]');
+        if (!b) return;
+        state.stamp = b.dataset.stamp;
+        setTool('stamp');
+        for (const x of sbar.querySelectorAll('[data-stamp]')) x.classList.toggle('active', x.dataset.stamp === state.stamp);
+      });
+    }
     setTool('select');
   }
 

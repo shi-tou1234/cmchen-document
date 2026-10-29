@@ -12,7 +12,7 @@ module.exports = `(async () => {
     // v27 起对齐 Zotero：单击只选中，双击才打开
     c.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
-    return await waitFor(() => document.body.classList.contains('has-doc') && App.state.numPages === 3, 10000);
+    return await waitFor(() => document.body.classList.contains('has-doc') && App.state.numPages === 3 && App.state.itemKey === key && $('#tabs .tab.active')?.dataset.tabId === App.activeTabId && ['ok', 'missing'].includes(App.state.annoState.status), 10000);
   };
   push('标签页初始为空', App.tabs.length === 0 && $('#tabbar').hidden);
   await open('itA');
@@ -41,7 +41,7 @@ module.exports = `(async () => {
   push('标签栏渲染两个标签', tabs.length === 2, 'rendered=' + tabs.length + ' err=' + (App.lastLoadError || ''));
   if (tabs.length < 2) return { checks, stage: 'render', tabsHtml: $('#tabs').innerHTML };
   tabs[0].click();
-  await waitFor(() => App.state.filePath === firstPath, 10000);
+  await waitFor(() => App.state.filePath === firstPath && $('#tabs .tab.active')?.dataset.tabId === App.activeTabId && ['ok', 'missing'].includes(App.state.annoState.status), 10000);
   push('点标签切回第一个文档', App.state.filePath === firstPath, App.state.filePath);
   push('切回后页码恢复到条目进度', App.state.currentPage === 2, 'page=' + App.state.currentPage);
   await waitFor(() => (App.state.annos.get(1) || []).some((s) => s.text === 'tab-anno'), 5000);

@@ -11,6 +11,7 @@ const $ = (id) => document.getElementById(id);
 const TOOL_KEYS = {
   v: 'image', p: 'pen', h: 'highlight', l: 'line',
   r: 'rect', a: 'arrow', t: 'text', n: 'note', e: 'eraser',
+  s: 'stamp',   // v36：印章（S = Stamp）
 };
 
 const App = window.App = {
@@ -33,6 +34,10 @@ const App = window.App = {
     rotation: 0,           // v34：整篇文档的视图旋转 0/90/180/270（只改显示，不改原文件）
     split: false,          // v34：分屏参考视图（用户偏好，富文档时自动隐藏）
     refPage: 1,            // v34：参考视图页码
+    refPath: '',           // 2026-10-29：对照视图挂的另一篇文献（空 = 用当前文档的另一页）
+    refName: '',
+    refDoc: null,          // 对照文档的 PDFDocumentProxy（与主文档相互独立）
+    refDocPages: 0,
     annos: new Map(),    // pageNum -> shape[]
     rendered: new Map(), // pageNum -> bool
     visible: new Set(),  // 当前视口内的页
@@ -41,6 +46,10 @@ const App = window.App = {
     sj: { byPage: new Map(), builtTo: 0 },  // 智能跳转：按页存的跨页行缓存 page → [{page,text,x,y,w,h,idx}]
     bookmarks: [],   // 用户书签 [{page, at, label}]，存标注 sidecar
     bookmarksReady: null,   // 这一份文档的书签读盘 promise（首次操作前要等它）
+    // 这一份文档的标注读盘结果：{ status: 'unknown'|'ok'|'missing'|'broken', annoPath, error }
+    // broken 时必须禁止自动保存与归档——内存里现在这份「空标注」并不是磁盘上的真相，
+    // 拿它去 flush 等于把还能人工修复的原文件换掉（第六轮审核 R6-01）。
+    annoState: { status: 'unknown', annoPath: '', error: '' },
   },
   tabs: [],          // v12：多标签页会话（内存里保留原始字节，切换不重新读盘）
   activeTabId: null,
@@ -377,6 +386,7 @@ function sessionTabs() {
       itemKey: t.itemKey || '', page: Math.max(1, Math.floor(+t.page || 1)),
       rotation: normRot(t.rotation || 0),
       refPage: Math.max(1, Math.floor(+t.refPage || 1)),
+      refPath: t.refPath || '', refName: t.refName || '',
     });
   }
   const cur = currentTab();
@@ -409,6 +419,13 @@ async function loadPdf(data, fileName, smoke, meta) {
   const s = App.state;
   const m = meta || {};
   const my = ++loadSeq;
+  // 换文档就把在跑的重排任务作废：它读的是上一份的页，留着只会串内容
+  if (reflow.busy || reflow.open) reflowCancel();
+  // 上一份文档的标注读盘状态不能带过来：它会让新文档一打开就被判成「标注损坏」
+  s.annoState = { status: 'unknown', annoPath: '', error: '' };
+  s.annoBrokenNotified = false;
+  // 这次加载是为哪个标签开的：结尾回写标签时要用它，不能拿「此刻的活动标签」凑合
+  const tabId = App.activeTabId;
   // v9：切文档前先停掉朗读，别让上一篇的声音念着新一篇的文字
   if (App.speakStop) App.speakStop();
   try {
@@ -420,7 +437,22 @@ async function loadPdf(data, fileName, smoke, meta) {
     const pdfDoc = await task.promise;
     // 已经有更新的载入开始了：这份文档直接丢弃，别去 destroy 新文档
     if (my !== loadSeq) { try { await pdfDoc.destroy(); } catch (_) {} return; }
-    if (s.pdfDoc) { try { await s.pdfDoc.destroy(); } catch (_) {} }
+    // 销毁是异步的，而 await 期间共享的 s.pdfDoc / s.refDoc 可能已经被更新的载入换成别的文档。
+    // 所以先把「要销毁的旧实例」抓在手里，恢复后不再从共享状态读它们。
+    const prevPdf = s.pdfDoc;
+    const prevRef = s.refDoc;
+    // 切主文档时对照文档也要换：先作废还在跑的对照加载（它们要挂的是即将消失的旧文档），
+    // 再销毁旧对照。放在销毁等待之前，新的主文档加载会自己再 ++，不会被这一跳误伤。
+    refLoadSeq++;
+    if (prevPdf) { try { await prevPdf.destroy(); } catch (_) {} }
+    // 关键：销毁等待结束后必须再校验一次代际。等待期间用户可能又打开了 C 并已完成加载，
+    // 旧调用在这里不退出的话会把已经显示的 C 换回 B，结尾的 syncActiveTab 还会把
+    // C 的标签路径改成 B（第三轮审核 P2）。
+    if (my !== loadSeq) { try { await pdfDoc.destroy(); } catch (_) {} return; }
+    if (prevRef) { try { await prevRef.destroy(); } catch (_) {} }
+    if (my !== loadSeq) { try { await pdfDoc.destroy(); } catch (_) {} return; }
+    s.refDoc = null;
+    s.refDocPages = 0;
 
     // 重置
     s.mode = 'pdf';
@@ -431,6 +463,8 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.currentPage = 1;
     s.rotation = normRot(m.rotation || 0);   // v34：标签 / 会话里记的视图旋转
     s.refPage = Math.max(1, Math.floor(+m.refPage || +m.startPage || 1));
+    s.refPath = m.refPath || '';
+    s.refName = m.refName || '';
     s.fileName = fileName || '';
     s.filePath = m.filePath || '';
     s.itemKey = m.itemKey || '';
@@ -465,7 +499,10 @@ async function loadPdf(data, fileName, smoke, meta) {
     // 早先顺序颠倒导致首次加载时 App.io 仍为 null —— 一个元素都没被观察，
     // 滚轮滚动时后续页面永不渲染（◀▶/页码框因 scrollToPage 内部会强制渲染而看不出来）。
     setupObserver();
-    await buildPageBlocks(pdfDoc);
+    // 建页块本身也有 await（逐页 getPage）。期间又开了别的文档时，页面容器已经被
+    // 新加载接管，这里必须立刻收手，别把旧文档的页块塞进新文档的容器里。
+    const built = await buildPageBlocks(pdfDoc, my);
+    if (!built || my !== loadSeq) return;
     syncSplitPane({ relayout: false });   // 先定分屏宽度，再算「适应宽度」，避免首屏缩放跳一下
     applyLayout();
     // 阅读方式（连续滚动 / 单页 / 对开）跟着设置走
@@ -484,15 +521,21 @@ async function loadPdf(data, fileName, smoke, meta) {
     if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide(); // 进入阅读，收起库覆盖层
-    restoreAnnos(s.filePath);   // 恢复该文件上次保存的标注（异步，不阻塞首屏）
+    startAnnoRestore(s.filePath);   // 恢复该文件上次保存的标注（异步，不阻塞首屏）
     // v29：PDF 自带的批注不自动写入，只提示一次；用户点「导入 PDF 批注」才合并
     if (window.NativeAnnos) NativeAnnos.hint().catch(() => {});
     refreshSidebar();           // 侧栏若开着，立刻按新文档重建
 
-    syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
+    // 只回写给「这次加载」对应的标签：拿 currentTab() 凑合时，
+    // 一旦活动标签已经不是它，就会把别人的路径改成这份文档的。
+    if (!tabId || App.activeTabId === tabId) {
+      syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
+    }
     renderTabs();
     if (smoke) runSmoke(fileName);
   } catch (err) {
+    // 已经被更新的加载取代：失败信息不要盖掉新文档的状态栏
+    if (my !== loadSeq) return;
     App.lastLoadError = String(err && err.stack || err);
     console.error(err);
     setStatus('打开失败：' + (err && err.message ? err.message : err));
@@ -531,8 +574,15 @@ function setupRichObserver() {
 function loadRichDoc(payload) {
   const s = App.state;
   const my = ++loadSeq;
+  if (reflow.busy || reflow.open) reflowCancel();   // 重排只服务 PDF，切到富文档就收掉
+  s.annoState = { status: 'unknown', annoPath: '', error: '' };
+  s.annoBrokenNotified = false;
   try {
     if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
+    // 富文档没有分屏：对照文档一并释放，别让它挂在内存里
+    refLoadSeq++;
+    if (s.refDoc) { try { s.refDoc.destroy(); } catch (_) {} }
+    s.refDoc = null; s.refDocPages = 0; s.refPath = ''; s.refName = '';
     if (App.io) { try { App.io.disconnect(); } catch (_) {} }
     if (App.vo) { try { App.vo.disconnect(); } catch (_) {} }
 
@@ -605,7 +655,7 @@ function loadRichDoc(payload) {
     if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide();
-    restoreAnnos(s.filePath);   // 富文档的标注也按文件路径存取，和 PDF 一致
+    startAnnoRestore(s.filePath);   // 富文档的标注也按文件路径存取，和 PDF 一致
     refreshSidebar();
     syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
     renderTabs();
@@ -631,6 +681,8 @@ function syncActiveTab(extra) {
   if (App.state.filePath) t.filePath = App.state.filePath;
   t.rotation = normRot(App.state.rotation || 0);
   if (App.state.split) t.refPage = Math.max(1, App.state.refPage || 1);
+  t.refPath = App.state.refPath || '';
+  t.refName = App.state.refName || '';
   if (extra) Object.assign(t, extra);
 }
 
@@ -649,6 +701,8 @@ function makeTab(payload) {
       page: Math.max(1, Math.floor(+payload.startPage || 1)),
       rotation: 0,
       refPage: Math.max(1, Math.floor(+payload.startPage || 1)),
+      refPath: payload.refPath || '',
+      refName: payload.refName || '',
     };
   }
   const raw = payload.data;
@@ -665,6 +719,8 @@ function makeTab(payload) {
     page: Math.max(1, Math.floor(+payload.startPage || 1)),
     rotation: normRot(payload.rotation || 0),
     refPage: Math.max(1, Math.floor(+payload.refPage || payload.startPage || 1)),
+    refPath: payload.refPath || '',
+    refName: payload.refName || '',
   };
 }
 
@@ -694,6 +750,7 @@ function loadTab(tab) {
   loadPdf(tab.data.slice(), tab.fileName, false, {
     filePath: tab.filePath, itemKey: tab.itemKey, item: tab.item, citation: tab.citation,
     startPage: tab.page, rotation: tab.rotation, refPage: tab.refPage,
+    refPath: tab.refPath || '', refName: tab.refName || '',
   });
 }
 
@@ -706,14 +763,20 @@ async function switchTab(id, page) {
   }
   syncActiveTab();
   const previous = App.activeTabId;
-  if (await App.flushAnnos() === false || previous !== App.activeTabId || !tabById(id)) return;
+  if (!(await flushBeforeLeave('切换标签')) || previous !== App.activeTabId || !tabById(id)) return;
   if (page) t.page = Math.max(1, Math.floor(+page || 1));
   loadTab(t);
 }
 
 function closeDocument() {
   const s = App.state;
+  if (reflow.busy || reflow.open) reflowCancel();
+  s.annoState = { status: 'unknown', annoPath: '', error: '' };
+  s.annoBrokenNotified = false;
   if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
+  refLoadSeq++;
+  if (s.refDoc) { try { s.refDoc.destroy(); } catch (_) {} }
+  s.refDoc = null; s.refDocPages = 0; s.refPath = ''; s.refName = '';
   if (App.io) { try { App.io.disconnect(); } catch (_) {} }
   if (App.vo) { try { App.vo.disconnect(); } catch (_) {} }
   if (App.richVO) { try { App.richVO.disconnect(); } catch (_) {} }
@@ -759,7 +822,7 @@ async function closeTab(id) {
   const wasActive = App.tabs[idx].id === App.activeTabId;
   if (wasActive) {
     syncActiveTab();
-    if (await App.flushAnnos() === false || App.activeTabId !== id) return;
+    if (!(await flushBeforeLeave('切换标签')) || App.activeTabId !== id) return;
     idx = App.tabs.findIndex(t => t.id === id);
     if (idx < 0) return;
   }
@@ -791,7 +854,7 @@ async function openDocument(payload, opts) {
   }
   if (App.state.filePath) {
     const previous = App.activeTabId;
-    if (await App.flushAnnos() === false || previous !== App.activeTabId) return;
+    if (!(await flushBeforeLeave('打开另一份文档')) || previous !== App.activeTabId) return;
     syncActiveTab();
   }
   let tab;
@@ -840,14 +903,18 @@ App.closeTab = closeTab;
 App.renderTabs = renderTabs;
 
 
-async function buildPageBlocks(pdfDoc) {
+// seq：发起这次建页的加载代际号。逐页 getPage 是 await，期间可能已有更新的加载
+// 清空容器并重建；返回 false 表示这次建页作废，调用方不要再往下写界面状态。
+async function buildPageBlocks(pdfDoc, seq) {
   const s = App.state;
   const host = App.els.pages;
   host.innerHTML = '';
   s.unitMaxW = 1; s.unitMaxH = 1;
   const dims = [];
   for (let n = 1; n <= s.numPages; n++) {
+    if (seq != null && seq !== loadSeq) return false;
     const page = await pdfDoc.getPage(n);
+    if (seq != null && seq !== loadSeq) return false;
     const vp = page.getViewport({ scale: 1 });
     dims.push({ page, w: vp.width, h: vp.height });
     s.unitMaxW = Math.max(s.unitMaxW, vp.width);
@@ -890,6 +957,7 @@ async function buildPageBlocks(pdfDoc) {
     App.io.observe(el);  // 不加三元兜底：观察器缺失应当直接抛错暴露，而不是静默变成空白页
     if (App.vo) App.vo.observe(el);
   }
+  return true;
 }
 
 function mkSvg(cls, unitW, unitH) {
@@ -901,12 +969,27 @@ function mkSvg(cls, unitW, unitH) {
 }
 
 // ---------- 文本层（选中/复制）与全文搜索 ----------
+// 取一页的 PDFPageProxy：不要求这一页已经渲染出 DOM。
+// 智能跳转/参考文献入库要扫文末的页，而用户此刻多半停在第 1 页——那些页的元素根本
+// 还没建，只按 App.pageEl 拿就会一律返回空，参考文献入库于是永远报「没读到参考文献
+// （扫描版）」，这是假警报。pdfDoc.getPage 是异步且被 PDF.js 自己缓存的。
+async function pdfPageAt(n) {
+  const el = App.pageEl(n);
+  if (el && el._pdfPage) return el._pdfPage;
+  const s = App.state;
+  if (!s.pdfDoc) return null;
+  try { return await s.pdfDoc.getPage(n); } catch (_) { return null; }
+}
+
 async function getTextContent(n) {
   const s = App.state;
   if (s.textCache.has(n)) return s.textCache.get(n);
+  // 已渲染的页走快路径（一个 tick 都不多等），没渲染的页才去 pdfDoc 现取
   const el = App.pageEl(n);
-  if (!el || !el._pdfPage) return [];
-  const tc = await el._pdfPage.getTextContent();
+  let pg = el && el._pdfPage;
+  if (!pg) pg = await pdfPageAt(n);
+  if (!pg) return [];
+  const tc = await pg.getTextContent();
   const items = (tc && tc.items) || [];
   s.textCache.set(n, items);
   return items;
@@ -1225,9 +1308,9 @@ function sjLineRect(items, line) {
 
 // 归一化一页的文本项（scale=1 视口坐标，与搜索高亮同坐标系）
 async function sjPageItems(n) {
-  const el = App.pageEl(n);
-  if (!el || !el._pdfPage) return [];
-  const vp = el._pdfPage.getViewport({ scale: 1 });
+  const pg = await pdfPageAt(n);
+  if (!pg) return [];
+  const vp = pg.getViewport({ scale: 1 });
   let items;
   try { items = await getTextContent(n); } catch (_) { return []; }
   const norm = [];
@@ -1339,6 +1422,47 @@ App._smartJumpAt = async function (clientX, clientY, pageElHint) {
 
 App._smartJumpLast = function () { return App.state._sjLast || null; };
 
+// ---------- 跨文档 Portal（v36） ----------
+// 置信度不足就不开：宁可只是「跳到参考文献」，也不要把不相干的一篇怼到对开栏里。
+const portal = { ready: null };
+
+function portalEnabled() {
+  return !(portal.off === true);
+}
+
+async function portalFollow(entry) {
+  const s = App.state;
+  const text = String(entry || '').trim();
+  if (!text || !s.filePath) return null;
+  if (!window.pdfBridge || !pdfBridge.portalTarget) return null;
+  if (!portalEnabled()) return null;
+  let r = null;
+  try { r = await pdfBridge.portalTarget({ entry: text, path: s.filePath }); } catch (_) { return null; }
+  if (!r || !r.ok || !r.found) return null;
+  if (r.path && s.filePath && String(r.path) === String(s.filePath)) return null;
+  if ((r.score || 0) < 0.75) {
+    // 弱匹配只提示、不动作：跳错一篇比不跳更让人困惑
+    setStatus('库里可能有这条引用：' + r.title + '（把握不大，没有自动打开）');
+    return null;
+  }
+  if (!s.split) App.setSplitView(true);
+  const ok = await loadRefDoc(r.path, r.title, { page: r.page || 1 });
+  if (!ok) return null;
+  setStatus('引用跟随：已在对开栏打开 ' + r.title + ' · 第 ' + (r.page || 1) + ' 页');
+  toast('引用跟随：' + r.title, 2600);
+  return r;
+}
+
+// 设置里读到 portal=false 就关掉（默认开）
+function portalLoadPref() {
+  try {
+    const p = window.pdfBridge && window.pdfBridge.getSettings ? window.pdfBridge.getSettings() : null;
+    Promise.resolve(p).then((st) => { portal.off = !!(st && st.portal === false); }).catch(() => {});
+  } catch (_) {}
+}
+App.portalFollow = portalFollow;
+
+
 async function sjExecute(loc) {
   const s = App.state;
   const sjMod = SJ();
@@ -1382,6 +1506,12 @@ async function sjExecute(loc) {
       sjPaint(ln.page, rect ? [rect] : []);
       result.toPage = ln.page; result.entryText = ln.text.slice(0, 80);
       setStatus('引用 ' + (cite.numbers ? '[' + cite.numbers.join(',') + ']' : cite.surname + ' ' + cite.year) + ' → 参考文献');
+      // Portal：把这条参考文献整段（可能跨行）交给主进程，在库里找那一篇并开到对开栏。
+      // 不 await：跳转本身已经完成了，找库慢不该让页面卡在这里。
+      const entryFull = (window.Portal && window.Portal.entryAt)
+        ? window.Portal.entryAt(lines, entryIdx, { maxLines: 6 })
+        : ln.text;
+      portalFollow(entryFull).catch(() => {});
     } else {
       setStatus('没找到对应的参考文献条目');
     }
@@ -1449,6 +1579,201 @@ function sjScrollToRect(pageN, rect) {
   App.els.viewer.scrollTop += (pr.top + off.y) - vr.top - vr.height * 0.3;
   if (normRot(App.state.rotation) !== 0) {
     App.els.viewer.scrollLeft += (pr.left + off.x) - vr.left - vr.width / 2;
+  }
+}
+
+// ---------- 参考文献表批量入库（v36） ----------
+// 交互只有三步：从文末往前找到「参考文献 / References」→ 把那一节的行交给主进程解析 →
+// 列表逐条过目（默认只勾「新增且认得出」的）→ 导入。可联网按 DOI 补全题录。
+// 这一层不写任何东西：写库发生在用户点「导入」之后、由主进程做。
+const refi = {
+  open: false, busy: false, lines: [], entries: [], picked: new Set(),
+  info: null, seq: 0,
+};
+
+function refiSetStatus(text, cls) {
+  const el = $('refi-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'refi-status' + (cls ? ' ' + cls : '');
+}
+
+// 参考文献区的行（按阅读顺序）。标题找不到时退回最后两页，并把这件事写在界面上。
+async function refiScanLines() {
+  const s = App.state;
+  const total = s.numPages || 0;
+  if (!total || !SJ()) return { lines: [], page: 0, found: false };
+  const look = Math.min(total, 20);   // 参考文献再长，标题也不会离文末太远
+  const ensure = async (n) => {
+    if (s.sj.byPage.has(n)) return s.sj.byPage.get(n);
+    const items = await sjPageItems(n);
+    const rows = items.length ? SJ().buildLines(items).map((ln) => Object.assign({ page: n }, ln)) : [];
+    s.sj.byPage.set(n, rows);
+    return rows;
+  };
+  let startPage = 0, startIdx = 0, misses = 0;
+  for (let n = total; n > total - look && n >= 1; n--) {
+    const rows = await ensure(n);
+    const at = rows.findIndex((ln) => SJ().isBibHeading(ln.text));
+    if (at >= 0) { startPage = n; startIdx = at; misses = 0; }
+    else if (startPage) { misses++; if (misses >= 2) break; }
+  }
+  const found = startPage > 0;
+  if (!found) { startPage = Math.max(1, total - 1); startIdx = 0; }
+  const out = [];
+  for (let n = startPage; n <= total; n++) {
+    const rows = n === startPage ? (await ensure(n)).slice(startIdx) : await ensure(n);
+    for (const ln of rows) {
+      const t = String(ln.text || '').trim();
+      if (t) out.push(t);
+    }
+  }
+  return { lines: out, page: startPage, found };
+}
+
+const REFI_CONF = {
+  meta: ['补全', 'ok'], id: ['可补全', 'id'], parsed: ['仅标题', 'parsed'], weak: ['认不出', 'weak'],
+};
+
+function refiRowHtml(e) {
+  const on = refi.picked.has(e.no);
+  const dup = e.status === 'dup';
+  const conf = REFI_CONF[e.confidence] || REFI_CONF.weak;
+  const badge = dup ? ['已有', 'dup'] : conf;
+  const meta = [];
+  if (e.creators && e.creators.length) meta.push(e.creators.join(', ') + (e.creators.length >= 6 ? ' 等' : ''));
+  if (e.year) meta.push(e.year);
+  if (e.publication) meta.push(e.publication);
+  const vip = [e.volume && ('vol. ' + e.volume), e.issue && ('no. ' + e.issue), e.pages].filter(Boolean).join(', ');
+  if (vip) meta.push(vip);
+  const id = e.doi ? ('DOI ' + e.doi) : (e.arxiv ? ('arXiv ' + e.arxiv) : '');
+  return '<label class="refi-row' + (dup || e.confidence === 'weak' ? ' refi-dim' : '') + '" data-refi-no="' + e.no + '">' +
+    '<input type="checkbox" data-refi-pick="' + e.no + '"' + (on ? ' checked' : '') + ' />' +
+    '<span class="refi-main">' +
+      '<span class="refi-title">' + escHtml(e.title || '（没认出标题）') + '</span>' +
+      '<span class="refi-meta">' + escHtml(meta.join(' · ') || '—') + '</span>' +
+      '<span class="refi-raw">' + escHtml(e.rawText || '') + '</span>' +
+      (id ? '<span class="refi-id">' + escHtml(id) + '</span>' : '') +
+    '</span>' +
+    '<span class="refi-badge refi-badge-' + badge[1] + '" title="' + escHtml(e.why || '') + '">' + escHtml(badge[0]) + '</span>' +
+  '</label>';
+}
+
+function refiRender() {
+  const list = $('refi-list');
+  if (!list) return;
+  if (!refi.entries.length) {
+    list.innerHTML = '<div class="refi-empty">没认出条目。这张 PDF 的参考文献可能是图片（扫描版），或者标题不叫 References。</div>';
+  } else {
+    list.innerHTML = refi.entries.map(refiRowHtml).join('');
+  }
+  const add = refi.entries.filter((e) => e.status === 'new').length;
+  const dup = refi.entries.filter((e) => e.status === 'dup').length;
+  const weak = refi.entries.filter((e) => e.status === 'weak' || e.confidence === 'weak').length;
+  const cnt = $('refi-count');
+  if (cnt) cnt.textContent = '共 ' + refi.entries.length + ' 条 · 新增 ' + add + ' · 已有 ' + dup + ' · 认不出 ' + weak;
+  const go = $('refi-go');
+  if (go) {
+    go.disabled = refi.busy || !refi.picked.size;
+    go.textContent = refi.picked.size ? '导入 ' + refi.picked.size + ' 条' : '导入选中';
+  }
+}
+
+function refiDefaultPick(entries) {
+  // 默认只勾「库里没有、并且认得出」的：既不会重复入库，也不会把切错的残句塞进去
+  for (const e of entries) {
+    if (e.status === 'new' && e.confidence !== 'weak') refi.picked.add(e.no);
+  }
+}
+
+async function openRefImport() {
+  const s = App.state;
+  if (!s.pdfDoc || s.mode !== 'pdf') { toast('先打开一份 PDF'); return; }
+  const box = $('refi-modal');
+  if (!box) return;
+  const seq = ++refi.seq;
+  refi.open = true;
+  refi.entries = [];
+  refi.lines = [];
+  refi.picked = new Set();
+  refi.busy = false;
+  box.hidden = false;
+  refiSetStatus('正在读取参考文献…');
+  const list = $('refi-list');
+  if (list) list.innerHTML = '';
+  const cnt = $('refi-count');
+  if (cnt) cnt.textContent = '';
+
+  let scan = null;
+  try { scan = await refiScanLines(); } catch (_) { scan = null; }
+  if (seq !== refi.seq) return;   // 期间关掉了弹窗 / 换了文档
+  if (!scan || !scan.lines.length) {
+    refiSetStatus('没读到参考文献：这份 PDF 可能没有文字层（扫描版）。', 'refi-warn');
+    refiRender();
+    return;
+  }
+  refi.lines = scan.lines;
+  refiSetStatus('已取到 ' + scan.lines.length + ' 行，正在解析…（第 ' + scan.page + ' 页起）');
+  let r = null;
+  try {
+    r = await pdfBridge.importReferences({ lines: scan.lines, dryRun: true });
+  } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+  if (seq !== refi.seq) return;
+  if (!r || !r.ok) {
+    refiSetStatus('解析失败：' + ((r && r.error) || '未知错误'), 'refi-warn');
+    refiRender();
+    return;
+  }
+  refi.entries = r.entries || [];
+  refi.info = r;
+  refi.picked = new Set();
+  refiDefaultPick(refi.entries);
+  const hint = [];
+  if (!scan.found && !r.heading) hint.push('没找到「参考文献」标题，这是最后几页的解析结果，请逐条核对。');
+  if (r.truncated) hint.push('条目太多，只解析了前 ' + refi.entries.length + ' 条。');
+  refiSetStatus((hint.length ? hint.join(' ') + ' ' : '') + '（第 ' + scan.page + ' 页起）', hint.length ? 'refi-warn' : '');
+  refiRender();
+}
+
+function closeRefImport() {
+  const box = $('refi-modal');
+  refi.seq++;
+  refi.open = false;
+  refi.busy = false;
+  if (box) box.hidden = true;
+}
+
+async function refiGo() {
+  if (refi.busy || !refi.picked.size) return;
+  refi.busy = true;
+  refiRender();
+  refiSetStatus('正在入库…');
+  const picks = refi.entries.filter((e) => refi.picked.has(e.no)).map((e) => e.no);
+  const fetchOn = $('refi-fetch') ? $('refi-fetch').checked : true;
+  let r = null;
+  try {
+    r = await pdfBridge.importReferences({ lines: refi.lines, dryRun: false, pick: picks, fetch: fetchOn });
+  } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+  refi.busy = false;
+  if (!r || !r.ok) {
+    refiSetStatus('导入失败：' + ((r && r.error) || '未知错误'), 'refi-warn');
+    refiRender();
+    return;
+  }
+  const bits = ['已入库 ' + r.added + ' 条'];
+  if (r.fetched) bits.push('联网补全 ' + r.fetched + ' 条');
+  if (r.skipped) bits.push('跳过重复 ' + r.skipped + ' 条');
+  if (r.failures && r.failures.length) bits.push('补全失败 ' + r.failures.length + ' 条');
+  refiSetStatus(bits.join('，'), r.added ? 'refi-ok' : 'refi-warn');
+  toast('参考文献入库：' + bits.join('，'), 3200);
+  // 导入后这些条目已在库里：原地把它们标成「已有」，按钮置灰，避免第二次点成重复导入
+  const done = new Set(picks);
+  refi.entries = refi.entries.map((e) => done.has(e.no) ? Object.assign({}, e, { status: 'dup', why: '本次已导入' }) : e);
+  refi.picked = new Set();
+  refiRender();
+  if (r.failures && r.failures.length) {
+    const el = $('refi-status');
+    if (el) el.title = r.failures.map((f) => (f.title || '') + ' → ' + (f.doi || '')).join('\n');
   }
 }
 
@@ -2461,9 +2786,97 @@ App.quoteSelection = async function (text, page) {
 };
 
 // ---------- 标注自动保存 / 恢复（按文件路径存 userData/annotations/） ----------
-async function saveAnnosNow() {
+// ---------- 标注的「可信状态」与「本次恢复」凭据 ----------
+// 打开文档时先把内存标注清空，再异步把磁盘上的标注读回来。中间这段时间里，
+// 内存里的「空」既不是「这份文档没有标注」，也不是「用户删光了」——它只是**还没读完**。
+// 此时任何写盘（自动保存 / 归档 / 切文档前保存）都会把上次正常保存的标注一次性抹掉，
+// 而且事后无从分辨是丢了还是删了。所以写盘前必须：①等这次恢复落地；②状态是可信的。
+// 可信 = ok（有内容）或 missing（确实没有文件）；unknown / broken 一律不动笔。
+//
+// 凭据是「每次加载一份」的：路径 + 加载代际 + promise。用旧文档的恢复结果放行，
+// 等于把 A 的结论用在 B 上（第七轮审核 R7-01）。
+let annoRestore = { gen: -1, path: '', promise: null };
+let annoRetry = 0;
+
+function startAnnoRestore(filePath) {
+  annoRetry = 0;
+  const token = { gen: loadSeq, path: String(filePath || ''), promise: null };
+  annoRestore = token;
+  token.promise = restoreAnnos(filePath);
+  return token;
+}
+
+// 等到「这一份文档、这一次加载」的标注恢复出结果。
+// 返回 true 表示等到了、且等待期间没有切文档（可以放心用 App.state.annoState 判断）。
+async function annoRestoreSettled(path0, gen0) {
+  const t = annoRestore;
+  if (!t || !t.promise) return false;
+  if (t.gen !== gen0 || t.path !== path0) return false;
+  try { await t.promise; } catch (_) {}
+  return annoRestore === t && loadSeq === gen0 && App.state.filePath === path0;
+}
+
+function annoStateOk() {
+  const st = App.state.annoState;
+  return !!st && (st.status === 'ok' || st.status === 'missing');
+}
+
+// 不是 unknown/broken 才返回空串。调用前必须先 await annoRestoreSettled。
+function annoUnsafeReason(force) {
+  const st = App.state.annoState;
+  if (force) return '';
+  if (!st) return '标注状态未知';
+  if (st.status === 'broken') return st.error || '标注文件读不出来';
+  if (st.status !== 'ok' && st.status !== 'missing') return '标注还没有读完（不能把「没读完」当成「没有标注」）';
+  return '';
+}
+
+// 兼容旧调用点：只问「是不是已确认损坏」
+function annoBrokenReason() {
+  const st = App.state.annoState;
+  if (!st || st.status !== 'broken') return '';
+  return st.error || '标注文件读不出来';
+}
+App.annoBrokenReason = annoBrokenReason;
+
+function annoBrokenMessage() {
+  const st = App.state.annoState;
+  if (st && st.status !== 'broken') {
+    return '标注还在读取，这次改动先留在内存里；读完会自动补存（不必重画）';
+  }
+  const name = st && st.annoPath ? st.annoPath.split(/[\\/]/).pop() : '标注文件';
+  return name + ' 已损坏，本次修改不会保存（原文件保留在 ' + (st.annoPath || 'annotations 目录') + '），' +
+    '可在命令面板执行「重建标注文件」把原文件另存一份后重新开始';
+}
+
+// force = 用户明确要求重建（主进程会先把损坏的原文件另存为 *.broken-<时间戳>.json）
+async function saveAnnosNow(force) {
   const s = App.state;
   if (!s.filePath || !window.pdfBridge.saveAnnos) return;
+  if (!force) {
+    // 先看这次文档的标注有没有读完，再决定动不动笔（R7-01）：
+    // 刚打开就保存会把「空」写回去，覆盖上次正常保存的标注，且主进程的损坏检查查不出来
+    // ——磁盘上那份是把.request 写成功的合法 JSON，看起来跟「用户删光了」一模一样。
+    const path0 = s.filePath;
+    const gen0 = loadSeq;
+    const settled = await annoRestoreSettled(path0, gen0);
+    if (!settled) {
+      // 这批改动还留在内存里，别让用户白画：等这次读盘落地后再补一次（最多重试 20 次，
+      // 避免在没有恢复句柄的环境里空转出一个永不停止的定时器）
+      clearTimeout(App._annoSaveTimer);
+      if (annoRetry < 20) { annoRetry++; App._annoSaveTimer = setTimeout(saveAnnosNow, 300); }
+      return false;
+    }
+    const why = annoUnsafeReason(force);
+    if (why) {
+      const st = s.annoState;
+      const what = (st && st.status === 'broken') ? '标注文件已损坏' : '标注还没有读完';
+      setStatus('标注没有保存：' + what + '（' + why + '）');
+      // 每次改动都弹会把界面刷爆，一份文档只提示一次
+      if (!s.annoBrokenNotified) { s.annoBrokenNotified = true; toast(annoBrokenMessage(), 7000); }
+      return false;
+    }
+  }
   const pages = [];
   for (const [n, shapes] of s.annos) {
     if (!shapes || !shapes.length) continue;
@@ -2472,9 +2885,24 @@ async function saveAnnosNow() {
     pages.push({ page: n, shapes: JSON.parse(JSON.stringify(shapes)) });
   }
   try {
-    const result = await window.pdfBridge.saveAnnos(s.filePath, pages);
-    if (result !== true) throw new Error(result && result.error || '写入失败');
-    return true;
+    const result = await window.pdfBridge.saveAnnos(s.filePath, pages, force ? { force: true } : undefined);
+    if (result !== true && !(result && result.ok === true)) {
+      // 主进程拦下来的（读盘时还没查出来，或状态还没回来就先改了标注）：
+      // 把状态补上，后续归档 / 保存才会一起停手
+      if (result && result.broken) {
+        s.annoState = { status: 'broken', annoPath: result.annoPath || s.annoState.annoPath, error: result.error || '' };
+        setStatus('标注没有保存：标注文件已损坏（原文件已保留）');
+        if (!s.annoBrokenNotified) { s.annoBrokenNotified = true; toast(annoBrokenMessage(), 7000); }
+        return false;
+      }
+      throw new Error((result && result.error) || '写入失败');
+    }
+    if (force) {
+      // 重建成功：磁盘上现在是一份干净的标注，后续自动保存恢复
+      s.annoState = { status: 'ok', annoPath: s.annoState.annoPath, error: '' };
+      s.annoBrokenNotified = false;
+    }
+    return force && result && result.backup ? result : true;
   } catch (err) {
     setStatus('标注保存失败：' + err.message);
     toast('标注尚未保存，请检查磁盘或目录权限后重试', 5000);
@@ -2482,6 +2910,49 @@ async function saveAnnosNow() {
   }
 }
 App.flushAnnos = saveAnnosNow;
+
+// 切文档 / 关标签前先保存当前标注。返回 true 表示可以继续走。
+// 标注文件损坏时不能 flush（会把还能人工修复的原文件换成一份合法空数据），
+// 但也不能因此把导航卡死——只如实提示「这批改动没保存」，人得能走。
+async function flushBeforeLeave(where) {
+  // 先等这批标注读完：读到的内容会并进内存（restore 是往 Map 里追加，不清空用户刚画的），
+  // 存下去才是「旧的 + 新的」。不等就用空覆盖上一次的正常保存（R7-01）。
+  if (App.state.filePath) await annoRestoreSettled(App.state.filePath, loadSeq);
+  if (annoBrokenReason()) {
+    clearTimeout(App._annoSaveTimer);
+    toast('当前文档的标注文件已损坏，改动没有保存' + (where ? '（' + where + '后这些改动会丢失）' : ''), 6000);
+    return true;
+  }
+  if ((await App.flushAnnos()) === false) {
+    toast('标注尚未保存，已取消' + (where || '离开文档') + '；请等待标注读取完成，或解决写入问题后重试', 6000);
+    return false;
+  }
+  return true;
+}
+App.flushBeforeLeave = flushBeforeLeave;
+
+// 显式重建：把损坏的原文件先另存一份，再用内存里的标注重写。
+// 只应在用户确认「原文件我不要了 / 已自己备份」之后调用（命令面板入口）。
+App.rebuildAnnosFile = async function () {
+  const s = App.state;
+  if (!s.filePath) return { ok: false, error: '没有文档路径' };
+  // 重建的判断依据是「读盘状态」，而状态要等这次读盘结束才有意义；
+  // 没等就直接看 'unknown'，会把「还在读」误判成「没坏，无需重建」。
+  await annoRestoreSettled(s.filePath, loadSeq);
+  if (annoBrokenReason() === '') return { ok: true, note: '当前标注文件没有损坏，无需重建' };
+  clearTimeout(App._annoSaveTimer);
+  const r = await saveAnnosNow(true);
+  if (r && r.ok === true && r.backup) {
+    setStatus('已重建标注文件；原文件另存为 ' + r.backup.split(/[\\/]/).pop());
+    toast('已重建标注文件；损坏的原文件已另存一份：' + r.backup, 7000);
+    refreshAnnoPane();
+    return { ok: true, backup: r.backup };
+  }
+  const msg = (r && r.error) || '重建失败';
+  setStatus('重建标注文件失败：' + msg);
+  toast('重建失败：' + msg, 6000);
+  return { ok: false, error: msg };
+};
 // v29：探针入口 —— 导入 PDF 自带批注（与界面按钮同一条路径）
 App.importNativeAnnos = function (opts) {
   return window.NativeAnnos ? window.NativeAnnos.import(opts) : Promise.resolve({ ok: false, error: 'NativeAnnos 未加载' });
@@ -2508,11 +2979,38 @@ async function restoreAnnos(filePath) {
     })();
     await App.state.bookmarksReady;
   }
-  if (!filePath || !window.pdfBridge.loadAnnos) return;
-  let saved = null;
-  try { saved = await window.pdfBridge.loadAnnos(filePath); } catch (_) {}
-  if (!saved || !saved.length) return;
+  if (!filePath) return;
+  App.state.annoState = { status: 'unknown', annoPath: '', error: '' };
+  App.state.annoBrokenNotified = false;
+  if (!window.pdfBridge.loadAnnos && !window.pdfBridge.loadAnnosState) {
+    // 压根没有读标注的通道，也就没有什么「还没读完」可等——留在 unknown 会把所有保存永久挡住
+    App.state.annoState = { status: 'ok', annoPath: '', error: '' };
+    return;
+  }
+  // 优先用「带状态」的读法：空数组既可能是「没标注过」，也可能是「读不出来」，
+  // 后者如果当成前者，下一次自动保存 / 归档就把还能修复的原文件覆盖了（R6-01）
+  let res = null;
+  try {
+    res = window.pdfBridge.loadAnnosState
+      ? await window.pdfBridge.loadAnnosState(filePath)
+      : { ok: true, status: 'ok', pages: await window.pdfBridge.loadAnnos(filePath) };
+  } catch (err) {
+    res = { ok: false, status: 'broken', pages: [], error: String((err && err.message) || err) };
+  }
+  if (!res) res = { ok: false, status: 'broken', pages: [], error: '没有返回结果' };
   if (!stillCurrent()) return;
+  const st = res.status || (res.ok === false ? 'broken' : 'ok');
+  App.state.annoState = { status: st, annoPath: res.annoPath || '', error: res.error || '' };
+  if (st === 'broken') {
+    // 不写任何标注，也不再往下走：内存里的空不是磁盘上的真相。
+    // 状态栏 + 一次性提示，说清「修改不会保存」和原文件在哪，别让用户以为标注丢了。
+    setStatus('标注文件读不出来，已按空标注显示；修改将不会保存（原文件已保留）');
+    toast('标注文件已损坏（' + (res.error || '读取失败') + '）。为免覆盖原文件，本次打开期间不会自动保存标注。' +
+      '可在命令面板执行「重建标注文件」把原文件另存后重新开始。', 8000);
+    return;
+  }
+  const saved = Array.isArray(res.pages) ? res.pages : [];
+  if (!saved.length) return;
   const s = App.state;
   for (const entry of saved) {
     const n = Math.min(s.numPages, Math.max(1, entry.page || 1));
@@ -2715,16 +3213,189 @@ App.viewRotation = () => normRot(App.state.rotation || 0);
 // 不复用主视图的页块，避免两套标注层、两套文本层互相抢事件与内存。
 const ref = { seq: 0, page: 1, follow: false, task: null };
 let refFollowTimer = null;
+let refLoadSeq = 0;
+
+// 参考视图当前该显示多少页：挂了对照文献就用它自己的页数，否则用主文档的。
+function refTotal() {
+  const s = App.state;
+  return s.refDoc ? (s.refDocPages || s.refDoc.numPages || 0) : (s.numPages || 0);
+}
+
+// 对照文档的标题与「跟随」开关：跨文档时跟随没有意义（两篇页码不对应），禁用并取消。
+function updateRefHeader() {
+  const s = App.state;
+  const cross = !!s.refDoc;
+  const nameEl = $('ref-name');
+  if (nameEl) {
+    nameEl.hidden = !cross;
+    nameEl.textContent = cross ? (s.refName || '对照文献') : '';
+    nameEl.title = cross ? (s.refPath || '') : '';
+  }
+  const follow = $('ref-follow');
+  if (follow) {
+    follow.disabled = cross;
+    if (cross) { follow.checked = false; ref.follow = false; }
+  }
+  const pick = $('ref-pick');
+  if (pick) pick.classList.toggle('active', cross);
+}
+
+/*
+ * 加载对照文献（跨文档分屏）。
+ * 与主文档完全独立：自己的 PDFDocumentProxy、自己的页数，不参与标注 / 文本层 / 搜索。
+ * path 为空或等于当前文档时退回「同一份的另一页」。
+ */
+async function loadRefDoc(path, name, opts) {
+  const s = App.state;
+  const o = opts || {};
+  const p = String(path || '');
+  if (!p || p === s.filePath) { clearRefDoc(); return true; }
+  if (!window.pdfBridge || !window.pdfBridge.openDocPath) return false;
+  const my = ++refLoadSeq;
+  let payload = null;
+  try { payload = await window.pdfBridge.openDocPath({ path: p }); }
+  catch (err) { payload = { ok: false, error: err && err.message }; }
+  if (my !== refLoadSeq) return false;
+  if (!payload || !payload.ok) {
+    toast('打不开对照文献：' + ((payload && payload.error) || '未知错误'));
+    clearRefDoc();
+    return false;
+  }
+  if (payload.kind === 'rich' || (!payload.data && Array.isArray(payload.pages))) {
+    toast('对照视图只支持 PDF');
+    clearRefDoc();
+    return false;
+  }
+  const bytes = payload.data instanceof Uint8Array ? payload.data : new Uint8Array(payload.data);
+  let doc = null;
+  try { doc = await window.pdfjsLib.getDocument({ data: bytes.slice() }).promise; }
+  catch (_) {
+    if (my === refLoadSeq) { toast('对照文献解析失败'); clearRefDoc(); }
+    return false;
+  }
+  if (my !== refLoadSeq) { try { await doc.destroy(); } catch (_) {} return false; }
+  // 旧对照文档的销毁是异步的。await 期间用户可能点了「用当前文档的另一页」或换了别的对照，
+  // 代际号会变；等销毁结束必须再校验一次，否则已取消的加载会把文档重新挂回去。
+  const old = s.refDoc;
+  if (old) { try { await old.destroy(); } catch (_) {} }
+  if (my !== refLoadSeq) { try { await doc.destroy(); } catch (_) {} return false; }
+  s.refDoc = doc;
+  s.refDocPages = doc.numPages;
+  s.refPath = p;
+  s.refName = String(name || payload.fileName || p.split(/[\\/]/).pop() || '');
+  ref.page = Math.min(doc.numPages, Math.max(1, Math.floor(+o.page || 1)));
+  s.refPage = ref.page;
+  // 标签也要跟着更新 refPage：会话保存读的是标签，只改全局状态会存下旧页码
+  const t = currentTab();
+  if (t) { t.refPath = s.refPath; t.refName = s.refName; t.refPage = ref.page; }
+  updateRefHeader();
+  syncSplitPane({ relayout: false });
+  scheduleSessionSave();
+  return true;
+}
+App.loadRefDoc = loadRefDoc;
+
+function clearRefDoc() {
+  const s = App.state;
+  refLoadSeq++;
+  if (s.refDoc) { try { s.refDoc.destroy(); } catch (_) {} }
+  s.refDoc = null;
+  s.refDocPages = 0;
+  s.refPath = '';
+  s.refName = '';
+  const t = currentTab();
+  if (t) { t.refPath = ''; t.refName = ''; }
+  updateRefHeader();
+  if (s.split && hasDoc(s) && s.mode === 'pdf') syncSplitPane({ relayout: false });
+  scheduleSessionSave();
+}
+App.clearRefDoc = clearRefDoc;
+
+// 只释放对照文档的位图 / 解析结果，保留 refPath：关掉分屏后重新打开不用重新挑文献。
+function unloadRefDoc() {
+  const s = App.state;
+  refLoadSeq++;
+  if (s.refDoc) { try { s.refDoc.destroy(); } catch (_) {} }
+  s.refDoc = null;
+  s.refDocPages = 0;
+}
+
+// ---------- 对照文献选择器 ----------
+// 候选来自主进程的 lib-pdf-list（库里有现存 PDF 的条目），不在渲染层复制一份库状态。
+// 每次打开都重新请求：库可能刚导入 / 改名 / 删过条目，缓存一份列表只会显示过期数据。
+let refPickerItems = null;
+let refPickerError = '';
+
+function closeRefPicker() {
+  const modal = $('ref-picker');
+  if (modal) modal.hidden = true;
+}
+
+function renderRefPickerItems() {
+  const list = $('ref-picker-list');
+  if (!list) return;
+  if (refPickerError) {
+    list.innerHTML = '<button class="ref-picker-empty ref-picker-retry" data-ref-retry="1">'
+      + escHtml('读取失败：' + refPickerError + '（点击重试）') + '</button>';
+    return;
+  }
+  const qEl = $('ref-picker-q');
+  const q = String((qEl && qEl.value) || '').trim().toLowerCase();
+  const items = (refPickerItems || []).filter((x) => {
+    if (!q) return true;
+    return (String(x.title || '') + ' ' + String(x.authors || '')).toLowerCase().indexOf(q) >= 0;
+  });
+  if (!items.length) {
+    list.innerHTML = '<div class="ref-picker-empty">没有匹配的 PDF 条目</div>';
+    return;
+  }
+  list.innerHTML = items.slice(0, 300).map((x) => {
+    const meta = [x.authors, x.year].filter(Boolean).join(' · ');
+    return '<button class="ref-picker-item" data-ref-path="' + escHtml(x.path) + '"'
+      + ' data-ref-title="' + escHtml(x.title) + '">'
+      + '<span class="rp-title">' + escHtml(x.title) + '</span>'
+      + '<span class="rp-meta">' + escHtml(meta || '—') + '</span>'
+      + '</button>';
+  }).join('');
+}
+
+async function loadRefPickerItems() {
+  const list = $('ref-picker-list');
+  if (list) list.innerHTML = '<div class="ref-picker-empty">读取中…</div>';
+  let r = null;
+  try { r = await window.pdfBridge.lib.pdfList(); } catch (err) { r = { ok: false, error: err && err.message }; }
+  if (r && r.ok && Array.isArray(r.items)) {
+    refPickerItems = r.items;
+    refPickerError = '';
+  } else {
+    refPickerItems = [];
+    refPickerError = (r && r.error) || '未知错误';
+  }
+  renderRefPickerItems();
+}
+
+async function openRefPicker() {
+  const modal = $('ref-picker');
+  if (!modal) return;
+  modal.hidden = false;
+  const q = $('ref-picker-q');
+  if (q) { q.value = ''; setTimeout(() => { try { q.focus(); } catch (_) {} }, 20); }
+  await loadRefPickerItems();
+}
+App.openRefPicker = openRefPicker;
+
 
 function refSetPage(n, opts) {
   const s = App.state;
   if (!hasDoc(s) || s.mode !== 'pdf') return;
-  ref.page = Math.min(s.numPages, Math.max(1, Math.floor(+n || 1)));
+  const total = refTotal();
+  if (!total) return;
+  ref.page = Math.min(total, Math.max(1, Math.floor(+n || 1)));
   s.refPage = ref.page;
   const t = currentTab();
   if (t) t.refPage = ref.page;
   const inp = $('ref-page');
-  if (inp) { inp.value = String(ref.page); inp.max = String(s.numPages || 1); }
+  if (inp) { inp.value = String(ref.page); inp.max = String(total); }
   if (!opts || opts.render !== false) refRender();
   scheduleSessionSave();
 }
@@ -2739,12 +3410,16 @@ async function refRender() {
     if (empty) empty.hidden = false;
     return;
   }
+  const doc = s.refDoc || s.pdfDoc;
+  const total = refTotal();
+  if (!doc || !total) { cv.hidden = true; return; }
   const seq = ++ref.seq;
-  const pageNo = Math.min(s.numPages, Math.max(1, ref.page));
+  const pageNo = Math.min(total, Math.max(1, ref.page));
   let page;
-  try { page = await s.pdfDoc.getPage(pageNo); } catch (_) { return; }
+  try { page = await doc.getPage(pageNo); } catch (_) { return; }
   if (seq !== ref.seq) return;
-  const rot = (page.rotate + normRot(s.rotation)) % 360;   // 参考视图把旋转直接烘进 viewport
+  // 跨文档对照不套用主文档的视图旋转：对方有自己的横竖版式，跟着转只会看着别扭
+  const rot = (page.rotate + (s.refDoc ? 0 : normRot(s.rotation))) % 360;
   const base = page.getViewport({ scale: 1, rotation: rot });
   const avail = Math.max(160, body.clientWidth - 28);
   const scale = avail / base.width;
@@ -2768,9 +3443,9 @@ async function refRender() {
   cv.hidden = false;
   if (empty) empty.hidden = true;
   const cnt = $('ref-count');
-  if (cnt) cnt.textContent = '/ ' + s.numPages;
+  if (cnt) cnt.textContent = '/ ' + total;
   const inp = $('ref-page');
-  if (inp) inp.value = String(pageNo);
+  if (inp) { inp.value = String(pageNo); inp.max = String(total); }
 }
 
 function syncSplitPane(opts) {
@@ -2786,15 +3461,30 @@ function syncSplitPane(opts) {
     btn.classList.toggle('active', !!s.split);
     btn.setAttribute('aria-pressed', s.split ? 'true' : 'false');
   }
+  updateRefHeader();
   if (want) {
-    ref.page = Math.min(s.numPages, Math.max(1, Math.floor(s.refPage || s.currentPage || 1)));
+    // 对照文档还没加载时 refTotal() 拿到的是主文档页数，不能拿它夹取会话里记的对照页：
+    // 5 页的对照文献会被夹成主文档的 3 页。真实页数等 loadRefDoc 加载完再夹。
+    const pendingCross = !!(s.refPath && s.refPath !== s.filePath && !s.refDoc);
+    const total = refTotal();
+    ref.page = pendingCross
+      ? Math.max(1, Math.floor(s.refPage || 1))
+      : Math.min(total, Math.max(1, Math.floor(s.refPage || s.currentPage || 1)));
     s.refPage = ref.page;
     const inp = $('ref-page');
-    if (inp) { inp.value = String(ref.page); inp.max = String(s.numPages || 1); }
-    refRender();   // 读 clientWidth 会强制同步布局，隐藏窗口里也不依赖 rAF
+    if (inp) { inp.value = String(ref.page); inp.max = String(total || 1); }
+    // 对照文献按需加载：分屏没开时不去读第二份 PDF
+    if (pendingCross) {
+      // 带上标签 / 会话里记的对照页，重开分屏时回到上次看的那页
+      loadRefDoc(s.refPath, s.refName, { page: s.refPage }).catch(() => {});
+    } else {
+      refRender();   // 读 clientWidth 会强制同步布局，隐藏窗口里也不依赖 rAF
+    }
   } else {
     ref.seq++;   // 作废正在跑的参考页渲染
     if (ref.task) { try { ref.task.cancel(); } catch (_) {} ref.task = null; }
+    // 关掉分屏就释放对照文档，别让它一直占着内存；refPath 保留，下次打开自动重载
+    if (s.refDoc) unloadRefDoc();
   }
   // 参考视图占用宽度后「适应宽度」要重算
   if (o.relayout !== false && hasDoc(s)) relayoutKeepingPosition();
@@ -2816,7 +3506,12 @@ App.setSplitView = function (on, opts) {
   }
   return want;
 };
-App.splitState = () => ({ on: !!App.state.split, page: ref.page, follow: ref.follow, visible: !!($('ref-pane') && !$('ref-pane').hidden) });
+App.splitState = () => ({
+  on: !!App.state.split, page: ref.page, follow: ref.follow,
+  visible: !!($('ref-pane') && !$('ref-pane').hidden),
+  refPath: App.state.refPath || '', refName: App.state.refName || '',
+  refPages: App.state.refDoc ? (App.state.refDocPages || 0) : (App.state.numPages || 0),
+});
 
 // 跟随：正文换页时参考页自动落到下一页（双页对照）。滚动时页码变化很密，去抖后再渲染。
 function scheduleRefFollow() {
@@ -2958,6 +3653,15 @@ App.buildExportPayload = function (outPath) {
       const g = { tool: sh.tool === 'note' ? 'text' : sh.tool, color: sh.color, width: sh.width };
       if (sh.tool === 'pen' || sh.tool === 'highlight') g.pts = sh.pts.map(conv);
       else if (sh.tool === 'text' || sh.tool === 'note') { g.at = conv(sh.at); g.size = sh.size; g.text = (sh.tool === 'note' ? '[note] ' : '') + sh.text; }
+      else if (sh.tool === 'stamp') {
+        // 印章：画布上框是从 at 往右下扩展，PDF 坐标系 y 朝上，所以要把「框的左下角」
+        // 换算过去（at.y + 框高），否则导出后会整体偏上半个框。
+        const h = (sh.size || 15) * 1.85;
+        g.at = conv({ x: sh.at.x, y: sh.at.y + h });
+        g.size = sh.size || 15;
+        g.text = sh.text || '';
+        g.stamp = sh.stamp || '';
+      }
       else if (sh.tool === 'mark') {
         // 单位坐标（左上原点）→ PDF 坐标（左下原点）：两个角都转换后取最小/最大
         g.rects = (sh.rects || []).map((r) => {
@@ -2978,6 +3682,71 @@ App.buildExportPayload = function (outPath) {
   }
   return { fileName: s.fileName, data: s.sourceBytes, pages, outPath };
 };
+
+// 批注归档（v36）：原文档 + 标注 JSON + 可读清单，一个 zip 带走。
+// 与「导出副本」的分工：副本是「给别人的、画好的 PDF」，归档是「给自己的、可恢复的包」。
+// outPath 只给探针/自动化用：界面入口不传它，仍走系统保存对话框。
+async function doExportArchive(outPath) {
+  const s = App.state;
+  if (s.mode !== 'pdf' || !s.filePath) { toast('先把文档存到本地，再导出归档'); return; }
+  if (!window.pdfBridge || !pdfBridge.exportAnnoArchive) { toast('当前环境不支持归档导出'); return; }
+  // 归档读的是磁盘上的 sidecar，而标注改动要等 600ms 才落盘（notifyAnnoChanged）。
+  // 不先 flush 就打包，会把「刚改完的那批」漏掉；第一条标注还没保存时甚至导出零批注。
+  // 同时记住路径与加载代际：flush 是异步的，期间切了文档就不能再按新文档的口径打包。
+  const path0 = s.filePath;
+  const gen0 = loadSeq;
+  const sameDoc = () => loadSeq === gen0 && App.state.filePath === path0 && App.state.mode === 'pdf';
+
+  clearTimeout(App._annoSaveTimer);   // 无论走哪条分支，都别留一个待触发的写盘定时器
+
+  // 先看这次文档的标注有没有读完。这条比「是否损坏」更早成立：
+  // 文档刚打开时内存是空的、磁盘上的旧标注还没读回来，此时归档 = 把空写进 sidecar 再打包，
+  // 用户的旧标注一次性没了，而主进程的保护查不出来（新写的文件是完全合法的 JSON）。
+  const settled = await annoRestoreSettled(path0, gen0);
+  if (!settled) { setStatus('文档已切换，已取消归档'); return { ok: false, error: 'doc-changed' }; }
+  const st0 = App.state.annoState;
+  if (!st0 || (st0.status !== 'ok' && st0.status !== 'missing' && st0.status !== 'broken')) {
+    setStatus('归档中止：标注还在读取（等文档打开完再试，避免覆盖已保存的批注）');
+    toast('标注还没读完，先让它读一会儿再归档。', 5000);
+    return { ok: false, error: 'anno-not-ready' };
+  }
+
+  // 再看标注读盘结果，要不要 flush：
+  // 读不出来时内存里的「空」不是磁盘上的真相，这一 flush 会把还能人工修复的原文件换成一份合法空数据（R6-01）
+  const whyBroken = annoBrokenReason();
+  if (whyBroken) {
+    const name = (App.state.annoState.annoPath || '标注文件').split(/[\\/]/).pop();
+    setStatus('归档失败：标注文件已损坏，未生成归档（原文件已保留）');
+    toast(name + ' 读不出来（' + whyBroken + '），已中止归档。原文件仍在原处，可先备份 / 修复后重试。', 7000);
+    return { ok: false, broken: true, error: 'anno-broken', annoPath: App.state.annoState.annoPath || '' };
+  }
+
+  setStatus('正在保存批注…');
+  const flushed = await App.flushAnnos();
+  if (flushed === false) {
+    setStatus('归档失败：批注没有保存成功，已中止（避免导出不完整的归档）');
+    toast('批注保存失败，归档已中止；先解决保存问题再试', 5000);
+    return { ok: false, error: 'anno-save-failed' };
+  }
+  if (!sameDoc()) { setStatus('文档已切换，已取消归档'); return { ok: false, error: 'doc-changed' }; }
+
+  setStatus('正在打包…');
+  let res = null;
+  try { res = await window.pdfBridge.exportAnnoArchive({ path: path0, outPath: outPath || '' }); } catch (err) { res = { ok: false, error: String((err && err.message) || err) }; }
+  // 打包期间可能切走了：结果属于原来那份文档，不要写进新文档的状态栏
+  if (!sameDoc()) return { ok: false, error: 'doc-changed' };
+  if (res && res.ok) {
+    setStatus('已导出归档：' + res.path);
+    toast('已打包 ' + res.annotations + ' 条批注（' + Math.max(1, Math.round(res.bytes / 1024)) + ' KB）');
+  } else if (res && res.canceled) setStatus('已取消导出归档');
+  else if (res && res.broken) {
+    setStatus('归档失败：标注文件读不出来，未生成归档');
+    toast('标注文件读到问题，归档已中止（原文件保留在原处）', 6000);
+  } else setStatus('归档失败：' + ((res && res.error) || '未知错误'));
+  return res;   // 探针/命令面板拿得到结果；界面只用 status 与 toast
+}
+// 探针入口：与界面按钮同一条路径（含 flush 与代际检查），只是能指定落盘位置、不弹对话框
+App.exportArchive = doExportArchive;
 
 async function doSave() {
   if (App.state.mode === 'rich') { toast('当前格式不支持导出标注副本'); return; }
@@ -3537,7 +4306,7 @@ function bind() {
     speak: $('btn-speak'), speakStop: $('btn-speak-stop'), print: $('btn-print'),
     rotateLeft: $('btn-rotate-left'), rotateRight: $('btn-rotate-right'), split: $('btn-split'),
     refPane: $('ref-pane'), refPrev: $('ref-prev'), refNext: $('ref-next'), refPage: $('ref-page'),
-    refFollow: $('ref-follow'), refClose: $('ref-close'),
+    refFollow: $('ref-follow'), refClose: $('ref-close'), refPick: $('ref-pick'), refName: $('ref-name'),
   };
 
   // v9：朗读 / 停止 / 打印
@@ -3555,8 +4324,40 @@ function bind() {
   if (E.refPage) E.refPage.addEventListener('change', () => { ref.follow = false; if (E.refFollow) E.refFollow.checked = false; refSetPage(parseInt(E.refPage.value, 10) || 1); });
   if (E.refFollow) E.refFollow.addEventListener('change', () => {
     ref.follow = !!E.refFollow.checked;
-    if (ref.follow) refSetPage(Math.min(App.state.numPages || 1, (App.state.currentPage || 1) + 1));
+    if (ref.follow) refSetPage(Math.min(refTotal() || 1, (App.state.currentPage || 1) + 1));
   });
+  // 跨文档对照：选另一篇文献挂到参考视图
+  if (E.refPick) E.refPick.addEventListener('click', () => openRefPicker());
+  {
+    const modal = $('ref-picker');
+    const x = $('ref-picker-x'), c = $('ref-picker-close'), same = $('ref-picker-same');
+    const q = $('ref-picker-q'), list = $('ref-picker-list');
+    if (x) x.addEventListener('click', closeRefPicker);
+    if (c) c.addEventListener('click', closeRefPicker);
+    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeRefPicker(); });
+    if (same) same.addEventListener('click', () => {
+      closeRefPicker();
+      clearRefDoc();
+      toast('已退回同一份文档的另一页');
+    });
+    if (q) q.addEventListener('input', renderRefPickerItems);
+    if (list) list.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-ref-retry]')) { await loadRefPickerItems(); return; }
+      const btn = e.target.closest('[data-ref-path]');
+      if (!btn) return;
+      const path = btn.getAttribute('data-ref-path') || '';
+      const title = btn.getAttribute('data-ref-title') || '';
+      closeRefPicker();
+      if (path === App.state.filePath) {
+        clearRefDoc();
+        toast('已切换为同一份文档的另一页');
+        return;
+      }
+      if (!App.state.split) App.setSplitView(true);
+      const ok = await loadRefDoc(path, title, { page: 1 });
+      if (ok) toast('对照文献：' + (title || '已载入'));
+    });
+  }
 
   // 弹系统对话框选 PDF（工具栏「打开」、标签栏「＋」、Ctrl+O 都走这里）
   async function openViaDialog() {
@@ -3591,6 +4392,9 @@ function bind() {
             if (!payload || !payload.ok || !payload.filePath) continue;
             payload.rotation = normRot(t.rotation || 0);   // v34：恢复视图旋转与参考页
             payload.refPage = Math.max(1, Math.floor(+t.refPage || t.page || 1));
+            // 2026-10-29：对照文献也随标签恢复；文件不在了会在分屏打开时提示并退回同文档
+            payload.refPath = t.refPath || '';
+            payload.refName = t.refName || '';
             const tab = makeTab(payload);
             App.tabs.push(tab);
             opened++;
@@ -3649,7 +4453,7 @@ function bind() {
       const pages = new Set(s.rendered.keys());
       if (s.mode === 'rich') for (let n = 1; n <= s.numPages; n++) pages.add(n);
       for (const n of pages) { try { Anno.renderPage(n); } catch (_) {} }
-      restoreAnnos(p);
+      startAnnoRestore(p);
       toast('标注已更新');
     });
   }
@@ -3742,6 +4546,24 @@ function bind() {
       Anno.undo(); e.preventDefault(); return;
     }
     if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { doSave(); e.preventDefault(); return; }
+    // 命令面板：Ctrl+K（也认 Ctrl+Shift+P，跟编辑器习惯一致）
+    if (e.ctrlKey && !e.altKey && ((e.key === 'k' || e.key === 'K') || (e.shiftKey && (e.key === 'p' || e.key === 'P')))) {
+      if (cmd.open) closeCmd(); else openCmd();
+      e.preventDefault(); return;
+    }
+    // 阅读标尺：Ctrl+Shift+L 开/关；开着时 Alt+↑/↓ 调横带高度
+    if (e.ctrlKey && e.shiftKey && (e.key === 'l' || e.key === 'L')) {
+      setRuler(!ruler.on); e.preventDefault(); return;
+    }
+    if (ruler.on && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      ruler.h = Math.max(18, Math.min(90, ruler.h + (e.key === 'ArrowUp' ? -6 : 6)));
+      rulerApply(); e.preventDefault(); return;
+    }
+    // 重排阅读：Ctrl+Shift+R 开/关（Ctrl+R 单独留给之后的刷新语义，不占）
+    if (e.ctrlKey && e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+      if (reflow.open) closeReflow(); else openReflow();
+      e.preventDefault(); return;
+    }
     // v26：菜单栏去掉后，原来挂在菜单上的快捷键改到这里
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
       const k = e.key.toLowerCase();
@@ -3769,6 +4591,9 @@ function bind() {
       e.preventDefault();
       return;
     }
+    if (e.key === 'Escape' && cmd.open) { closeCmd(); e.preventDefault(); return; }
+    if (e.key === 'Escape' && refi.open) { closeRefImport(); e.preventDefault(); return; }
+    if (e.key === 'Escape' && reflow.open) { closeReflow(); e.preventDefault(); return; }
     if (e.key === 'Escape' && zoomMode.on) { setZoomMode(false); e.preventDefault(); return; }
     // 工具快捷键：v 看图 / p 画笔 / h 荧光 / l 直线 / r 矩形 / a 箭头 / t 文字 / n 便签 / e 橡皮
     if (!e.ctrlKey && !e.altKey && !e.metaKey && App.state.mode !== 'rich') {
@@ -4023,11 +4848,491 @@ function bind() {
     openDocument({ ok: true, kind: 'pdf', data: new Uint8Array(buf), fileName: file.name, filePath: realPath, startPage }, { newTab: true });
   });
 
+  // 命令面板
+  if ($('cmd-input')) {
+    $('cmd-input').addEventListener('input', () => { cmd.idx = 0; cmdRender(); });
+    $('cmd-input').addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { cmd.idx++; cmdRender(); e.preventDefault(); return; }
+      if (e.key === 'ArrowUp') { cmd.idx--; cmdRender(); e.preventDefault(); return; }
+      if (e.key === 'Enter') { cmdRun(cmd.idx); e.preventDefault(); return; }
+      if (e.key === 'Escape') { closeCmd(); e.preventDefault(); }
+    });
+  }
+  if ($('cmd-list')) {
+    $('cmd-list').addEventListener('click', (e) => {
+      const row = e.target.closest('[data-cmd-i]');
+      if (row) cmdRun(Number(row.dataset.cmdI));
+    });
+  }
+  if ($('cmd-modal')) {
+    $('cmd-modal').addEventListener('click', (e) => { if (e.target === $('cmd-modal')) closeCmd(); });
+  }
+
+  if ($('btn-archive')) $('btn-archive').addEventListener('click', () => { doExportArchive(); });
+
+  portalLoadPref();
+  // 阅读标尺
+  rulerInit();
+  // 参考文献表批量入库
+  refiInit();
+
+  // 重排阅读
+  if ($('btn-reflow')) $('btn-reflow').addEventListener('click', () => { openReflow(); });
+  if ($('reflow-close')) $('reflow-close').addEventListener('click', () => closeReflow());
+  if ($('reflow-size')) $('reflow-size').addEventListener('input', (e) => {
+    reflow.size = Number(e.target.value) || 17; reflowApplyStyle(); reflowSavePrefs();
+  });
+  if ($('reflow-width')) $('reflow-width').addEventListener('input', (e) => {
+    reflow.width = Number(e.target.value) || 660; reflowApplyStyle(); reflowSavePrefs();
+  });
+  if ($('reflow-pages')) $('reflow-pages').addEventListener('dblclick', (e) => {
+    const sec = e.target.closest('.rf-page');
+    if (sec) reflowJumpTo(Number(sec.dataset.page));
+  });
+
   Anno.init();
   if (window.SelectionUI) window.SelectionUI.init();
   if (window.pdfBridge.onToggleFocusMode) window.pdfBridge.onToggleFocusMode(() => App.setFocusMode());
   if (window.pdfBridge.onExportPagePng) window.pdfBridge.onExportPagePng(() => exportCurrentPagePng());
   initHintBar();
+}
+
+// ---------- 命令面板（v36） ----------
+// 一个输入框 + 一张命令表：不用记快捷键也能用全功能，记得住的仍然用快捷键。
+// 命令表是现算的（每次打开时重建）：里面有几条依赖当前文档状态（有没有打开 PDF、
+// 在不在朗读），写死一份静态表会点出「无文档时导出」这种空操作。
+const cmd = { open: false, items: [], shown: [], idx: 0 };
+
+function cmdCommands() {
+  const s = App.state;
+  const hasPdf = !!s.pdfDoc && s.mode === 'pdf';
+  const list = [
+    { id: 'open', label: '打开文档…', keys: 'Ctrl+O', group: '文件', run: () => { if ($('btn-open')) $('btn-open').click(); } },
+    { id: 'library', label: '打开文献库', keys: '', group: '文件', run: () => { if ($('btn-library')) $('btn-library').click(); } },
+    { id: 'print', label: '打印当前文档', keys: 'Ctrl+P', group: '文件', run: () => App.printCurrent(), need: hasPdf },
+    { id: 'save', label: '导出标注副本（PDF）', keys: '', group: '文件', run: () => { doSave(); }, need: hasPdf },
+    { id: 'png', label: '导出当前页为图片', keys: 'Ctrl+Shift+P', group: '文件', run: () => { if (typeof exportCurrentPagePng === 'function') exportCurrentPagePng(); }, need: hasPdf },
+    { id: 'archive', label: '导出批注归档（zip：文档 + 标注 + 清单）', keys: '', group: '文件', run: () => { doExportArchive(); }, need: hasPdf },
+    // 只在标注文件真的坏掉时出现：主进程会先把原文件另存为 *.broken-<时间戳>.json，再写新的
+    { id: 'rebuild-anno', label: '重建标注文件（损坏时用；原文件另存一份）', keys: '', group: '文件', run: () => { App.rebuildAnnosFile(); }, need: hasPdf && !!annoBrokenReason() },
+    { id: 'refimport', label: '参考文献表批量入库…', keys: '', group: '文献库', run: () => { openRefImport(); }, need: hasPdf },
+
+    { id: 'search', label: '文档内搜索', keys: 'Ctrl+F', group: '浏览', run: () => { const b = $('search-box'); if (b) { b.focus(); b.select(); } } },
+    { id: 'goto', label: '跳到指定页…', keys: '', group: '浏览', run: () => {
+      const n = window.prompt('跳到第几页？（共 ' + (s.numPages || 0) + ' 页）', String(s.currentPage || 1));
+      if (n == null) return;
+      const page = parseInt(n, 10);
+      if (!page || page < 1 || page > (s.numPages || 1)) { toast('页码超出范围'); return; }
+      scrollToPage(page, false, true);
+    }, need: hasPdf },
+    { id: 'prev', label: '上一页', keys: 'PgUp', group: '浏览', run: () => { if ($('btn-prev')) $('btn-prev').click(); }, need: hasPdf },
+    { id: 'next', label: '下一页', keys: 'PgDn', group: '浏览', run: () => { if ($('btn-next')) $('btn-next').click(); }, need: hasPdf },
+    { id: 'scroll', label: '视图：连续滚动', keys: '', group: '浏览', run: () => { App.setViewMode('scroll'); } },
+    { id: 'page', label: '视图：单页翻页', keys: '', group: '浏览', run: () => { App.setViewMode('page'); } },
+    { id: 'spread', label: '视图：双页对开', keys: 'Ctrl+Shift+D', group: '浏览', run: () => { App.setViewMode('spread'); } },
+    { id: 'sidebar', label: '侧栏（目录 / 缩略图 / 批注）', keys: '', group: '浏览', run: () => { if ($('btn-sidebar')) $('btn-sidebar').click(); } },
+    { id: 'zoomin', label: '放大', keys: 'Ctrl+=', group: '浏览', run: () => { if ($('btn-zoom-in')) $('btn-zoom-in').click(); } },
+    { id: 'zoomout', label: '缩小', keys: 'Ctrl+-', group: '浏览', run: () => { if ($('btn-zoom-out')) $('btn-zoom-out').click(); } },
+    { id: 'rotl', label: '逆时针旋转 90°', keys: 'Ctrl+[', group: '浏览', run: () => App.rotateView(-90), need: hasPdf },
+    { id: 'rotr', label: '顺时针旋转 90°', keys: 'Ctrl+]', group: '浏览', run: () => App.rotateView(90), need: hasPdf },
+
+    { id: 'reflow', label: '重排阅读（可调字号栏宽）', keys: 'Ctrl+Shift+R', group: '阅读', run: () => { openReflow(); }, need: hasPdf },
+    { id: 'ruler', label: (ruler.on ? '关闭阅读标尺' : '打开阅读标尺'), keys: 'Ctrl+Shift+L', group: '阅读', run: () => { setRuler(!ruler.on); } },
+    { id: 'focus', label: '专注阅读模式', keys: 'F11', group: '阅读', run: () => App.setFocusMode() },
+    { id: 'speak', label: '朗读当前页', keys: '', group: '阅读', run: () => App.speakToggle(), need: hasPdf },
+    { id: 'speakstop', label: '停止朗读', keys: '', group: '阅读', run: () => App.speakStop(), need: hasPdf },
+    { id: 'split', label: '分屏参考视图', keys: '', group: '阅读', run: () => { if ($('btn-split')) $('btn-split').click(); }, need: hasPdf },
+    { id: 'portal', label: (portalEnabled() ? '关闭引用跟随（Portal）' : '打开引用跟随（Portal）'), keys: '', group: '阅读', run: () => {
+      portal.off = portalEnabled();
+      if (window.pdfBridge && window.pdfBridge.setSettings) window.pdfBridge.setSettings({ portal: !portal.off });
+      toast(portal.off ? '引用跟随已关闭' : '引用跟随已打开');
+    } },
+
+    { id: 'tool-select', label: '工具：选择 / 浏览', keys: 'Esc', group: '标注', run: () => Anno.setTool('select'), need: hasPdf },
+    { id: 'tool-pen', label: '工具：画笔', keys: 'P', group: '标注', run: () => Anno.setTool('pen'), need: hasPdf },
+    { id: 'tool-hl', label: '工具：荧光笔', keys: 'H', group: '标注', run: () => Anno.setTool('highlight'), need: hasPdf },
+    { id: 'tool-text', label: '工具：文字', keys: 'T', group: '标注', run: () => Anno.setTool('text'), need: hasPdf },
+    { id: 'tool-note', label: '工具：便签', keys: 'N', group: '标注', run: () => Anno.setTool('note'), need: hasPdf },
+    { id: 'tool-stamp', label: '工具：印章', keys: 'S', group: '标注', run: () => Anno.setTool('stamp'), need: hasPdf },
+    { id: 'undo', label: '撤销', keys: 'Ctrl+Z', group: '标注', run: () => Anno.undo(), need: hasPdf },
+    { id: 'clear', label: '清除本页标注', keys: '', group: '标注', run: () => { if ($('btn-clear-page')) $('btn-clear-page').click(); }, need: hasPdf },
+    { id: 'bookmark', label: '本页加 / 删书签', keys: 'B', group: '标注', run: () => { if (typeof bookmarkToggle === 'function') bookmarkToggle(App.state.currentPage); }, need: hasPdf },
+
+    { id: 'theme', label: '切换深色 / 浅色', keys: '', group: '外观', run: () => {
+      const dark = document.body.classList.contains('theme-dark');
+      const next = dark ? 'light' : 'dark';
+      applyTheme(next);
+      if (window.pdfBridge && window.pdfBridge.setSettings) window.pdfBridge.setSettings({ theme: next });
+      toast('已切换到' + (next === 'dark' ? '深色' : '浅色') + '主题');
+    } },
+  ];
+  return list.filter((c) => c.need !== false);
+}
+
+function cmdScore(q, text) {
+  const s = String(text || '').toLowerCase();
+  const needle = String(q || '').toLowerCase();
+  if (!needle) return 1;
+  if (s.indexOf(needle) >= 0) return 100 - s.indexOf(needle) * 0.1;
+  // 子序列匹配：允许「导副」命中「导出标注副本」，避免拼音/跳字就打不着
+  let si = 0, gap = 0, hit = 0;
+  for (const ch of needle) {
+    const at = s.indexOf(ch, si);
+    if (at < 0) return 0;
+    gap += at - si;
+    si = at + 1;
+    hit++;
+  }
+  return Math.max(1, 40 - gap * 0.6 - (s.length - hit) * 0.05);
+}
+
+function cmdRender() {
+  const box = $('cmd-list');
+  const inp = $('cmd-input');
+  if (!box || !inp) return;
+  const q = inp.value.trim();
+  const scored = cmd.items.map((c) => ({ c, sc: Math.max(cmdScore(q, c.label), cmdScore(q, c.group + ' ' + c.label) * 0.6) }))
+    .filter((x) => x.sc > 0)
+    .sort((a, b) => b.sc - a.sc);
+  cmd.shown = scored.slice(0, 14).map((x) => x.c);
+  if (!cmd.shown.length) {
+    box.innerHTML = '<div class="cmd-empty">没有匹配的命令。试试「重排」「标尺」「导出」「标注」。</div>';
+    return;
+  }
+  if (cmd.idx >= cmd.shown.length) cmd.idx = 0;
+  if (cmd.idx < 0) cmd.idx = cmd.shown.length - 1;
+  box.innerHTML = cmd.shown.map((c, i) => (
+    '<button class="cmd-row' + (i === cmd.idx ? ' active' : '') + '" data-cmd-i="' + i + '">' +
+      '<span class="cmd-group">' + escHtml(c.group || '') + '</span>' +
+      '<span class="cmd-label">' + escHtml(c.label) + '</span>' +
+      '<span class="cmd-keys">' + escHtml(c.keys || '') + '</span>' +
+    '</button>'
+  )).join('');
+}
+
+function openCmd() {
+  if (cmd.open) return;
+  const box = $('cmd-modal');
+  const inp = $('cmd-input');
+  if (!box || !inp) return;
+  cmd.open = true;
+  cmd.items = cmdCommands();
+  cmd.idx = 0;
+  inp.value = '';
+  box.hidden = false;
+  cmdRender();
+  setTimeout(() => inp.focus(), 10);
+}
+
+function closeCmd() {
+  const box = $('cmd-modal');
+  if (!box) return;
+  cmd.open = false;
+  box.hidden = true;
+}
+
+function cmdRun(i) {
+  const c = cmd.shown[i];
+  if (!c) return;
+  closeCmd();
+  // 先关面板再执行：命令里可能有 prompt / 对话框，面板压在上面会让人以为没反应
+  setTimeout(() => {
+    try { c.run(); } catch (err) { toast('命令执行失败：' + String((err && err.message) || err)); }
+  }, 0);
+}
+
+// ---------- 阅读标尺（v36） ----------
+// 一条跟随鼠标的半透明横带：看长段落时眼睛有个「轨道」，不容易串到下一行。
+// 实现刻意不画在页面 canvas 上（那会跟着缩放、旋转、重绘一起重算），
+// 而是 fixed 定位的一条 DOM，坐标用 clientY —— 屏幕坐标，和缩放无关。
+const ruler = { on: false, h: 38, el: null, dragging: false };
+
+function rulerEnsure() {
+  if (ruler.el) return ruler.el;
+  const d = document.createElement('div');
+  d.id = 'read-ruler';
+  d.hidden = true;
+  // 标尺本身挡鼠标会让「点击页面」失效，所以永远 pointer-events:none，
+  // 高度调节换成快捷键（Alt+↑/↓）。
+  document.body.appendChild(d);
+  ruler.el = d;
+  return d;
+}
+
+function rulerApply() {
+  const el = rulerEnsure();
+  el.style.height = ruler.h + 'px';
+  el.hidden = !ruler.on;
+  document.body.classList.toggle('ruler-on', ruler.on);
+  const btn = $('btn-ruler');
+  if (btn) btn.classList.toggle('active', ruler.on);
+}
+
+function rulerMove(clientY) {
+  if (!ruler.on) return;
+  const el = rulerEnsure();
+  // 横带中心略低于指针：指针通常在「正在读的那一行」上，带子压住它和下一行
+  const top = clientY - ruler.h * 0.38;
+  el.style.transform = 'translateY(' + Math.round(top) + 'px)';
+}
+
+function setRuler(on, opts) {
+  ruler.on = !!on;
+  rulerApply();
+  if (!ruler.on) {
+    const el = rulerEnsure();
+    el.style.transform = 'translateY(-999px)';
+  }
+  if (!(opts && opts.silent) && window.pdfBridge && window.pdfBridge.setSettings) {
+    try { window.pdfBridge.setSettings({ ruler: ruler.on }); } catch (_) {}
+  }
+}
+
+function rulerInit() {
+  if (!document.getElementById('viewer')) return;
+  document.addEventListener('mousemove', (e) => {
+    if (!ruler.on) return;
+    // 只在正文区显示：工具栏、侧栏、弹窗上都不该出现一条横带
+    const t = e.target;
+    const inside = t && t.closest && t.closest('#viewer, #reflow-body');
+    const el = rulerEnsure();
+    if (!inside) { el.style.opacity = '0'; return; }
+    el.style.opacity = '';
+    rulerMove(e.clientY);
+  }, { passive: true });
+  document.addEventListener('mouseleave', () => {
+    if (ruler.el) ruler.el.style.opacity = '0';
+  });
+  // 窗口滚动时横带要跟着内容走：不重算位置的话它会停在屏幕原处，看起来像「标尺没跟上」
+  document.addEventListener('scroll', () => {
+    if (ruler.on && ruler.el) ruler.el.style.opacity = '0';
+  }, { passive: true, capture: true });
+
+  if ($('btn-ruler')) $('btn-ruler').addEventListener('click', () => {
+    setRuler(!ruler.on);
+    if (ruler.on) toast('阅读标尺已开：Alt+↑/↓ 调高度');
+  });
+
+  // 启动时按设置恢复（设置读不到就当没开，不要因为一个装饰性功能挡住启动）
+  try {
+    const p = window.pdfBridge && window.pdfBridge.getSettings ? window.pdfBridge.getSettings() : null;
+    Promise.resolve(p).then((st) => {
+      if (st && st.ruler) { ruler.on = true; rulerApply(); }
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+// ---------- 参考文献表批量入库（v36）的事件绑定 ----------
+function refiInit() {
+  const btn = $('btn-refimport');
+  if (btn) btn.addEventListener('click', () => openRefImport());
+  const x = $('refi-x');
+  if (x) x.addEventListener('click', closeRefImport);
+  const cancel = $('refi-cancel');
+  if (cancel) cancel.addEventListener('click', closeRefImport);
+  const go = $('refi-go');
+  if (go) go.addEventListener('click', () => { refiGo(); });
+  const all = $('refi-all');
+  if (all) all.addEventListener('click', () => {
+    // 「全选」只勾「认得出」的：切错的残句进来只会污染库，用户真要也可以单条勾
+    for (const e of refi.entries) if (e.confidence !== 'weak') refi.picked.add(e.no);
+    refiRender();
+  });
+  const none = $('refi-none');
+  if (none) none.addEventListener('click', () => { refi.picked.clear(); refiRender(); });
+  const list = $('refi-list');
+  if (list) {
+    // 只绑 change：点行本身也落在 label 上，浏览器会把点击转给 checkbox，不必再绑 click
+    list.addEventListener('change', (e) => {
+      const cb = e.target.closest && e.target.closest('[data-refi-pick]');
+      if (!cb) return;
+      const no = Number(cb.getAttribute('data-refi-pick'));
+      if (cb.checked) refi.picked.add(no); else refi.picked.delete(no);
+      refiRender();
+    });
+  }
+  // 联网补全的进度：只改状态行，不重绘列表（重绘会把用户正在看的滚动位置打回顶部）
+  try {
+    if (window.pdfBridge && window.pdfBridge.onRefImportProgress) {
+      window.pdfBridge.onRefImportProgress((msg) => {
+        if (!refi.open || !msg) return;
+        refiSetStatus('正在补全题录 ' + msg.done + '/' + msg.total + '：' + (msg.title || ''));
+      });
+    }
+  } catch (_) {}
+}
+
+// ---------- 重排阅读（v36） ----------
+// 纯文本层的段落实现在 src/reflow.js；这里只做三件事：按页取文本项、拼 DOM、记住字号栏宽。
+// 取文本项直接用 state.pdfDoc.getPage，不依赖页面是否已渲染（没滚到的页也能重排）。
+const reflow = { open: false, size: 17, width: 660, busy: false, pages: 0, scrollAt: 0, token: 0 };
+
+function reflowLoadPrefs() {
+  try {
+    const o = JSON.parse(localStorage.getItem('trove.reflow') || '{}');
+    if (Number(o.size) >= 13 && Number(o.size) <= 24) reflow.size = Number(o.size);
+    if (Number(o.width) >= 420 && Number(o.width) <= 900) reflow.width = Number(o.width);
+  } catch (_) {}
+}
+function reflowSavePrefs() {
+  try { localStorage.setItem('trove.reflow', JSON.stringify({ size: reflow.size, width: reflow.width })); } catch (_) {}
+}
+
+// 取哪份文档由调用方给死：不能每页都从 App.state.pdfDoc 现取——
+// 重排是长任务，中途切文档后全局早已换成新文档，旧任务会按旧页数读新页。
+async function reflowPageData(doc, n) {
+  const page = await doc.getPage(n);
+  const vp = page.getViewport({ scale: 1 });
+  const tc = await page.getTextContent();
+  const items = [];
+  for (const item of (tc && tc.items) || []) {
+    if (!item || !item.str) continue;
+    const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
+    const fh = Math.hypot(tx[2], tx[3]);
+    if (!fh || !isFinite(fh)) continue;
+    items.push({ str: item.str, x: tx[4], y: tx[5], w: Math.max(2, item.width || item.str.length * fh * 0.5), fh });
+  }
+  return { page: n, width: vp.width, items };
+}
+
+function reflowBlocksHtml(blocks) {
+  const out = [];
+  let listOpen = false;
+  for (const b of blocks) {
+    if (b.type === 'li') {
+      if (!listOpen) { out.push('<ul class="rf-list">'); listOpen = true; }
+      out.push('<li>' + escHtml(b.text) + '</li>');
+      continue;
+    }
+    if (listOpen) { out.push('</ul>'); listOpen = false; }
+    if (b.type === 'h2' || b.type === 'h3') out.push('<' + b.type + '>' + escHtml(b.text) + '</' + b.type + '>');
+    else out.push('<p>' + escHtml(b.text) + '</p>');
+  }
+  if (listOpen) out.push('</ul>');
+  return out.join('');
+}
+
+function reflowApplyStyle() {
+  const body = $('reflow-body');
+  const pages = $('reflow-pages');
+  if (!body || !pages) return;
+  body.style.setProperty('--rf-size', reflow.size + 'px');
+  body.style.setProperty('--rf-width', reflow.width + 'px');
+  if ($('reflow-size')) $('reflow-size').value = String(reflow.size);
+  if ($('reflow-width')) $('reflow-width').value = String(reflow.width);
+  if ($('reflow-size-val')) $('reflow-size-val').textContent = String(reflow.size);
+  if ($('reflow-width-val')) $('reflow-width-val').textContent = String(reflow.width);
+}
+
+// 重排是长任务（最多 400 页），必须绑死「打开时那份文档」：
+// 只看 reflow.open 不够——关掉再打开、切到别的 PDF，旧循环都还以为什么都没变，
+// 于是按 A 的页数去读 B 的页（B 的第 1 页干脆没人读），标题还挂着 A。
+// 凭据 = token（每次打开/关闭都换）+ 文档对象 + 文件路径 + 加载代际，四样全对上才算活着。
+function reflowAlive(token, doc, gen, path0) {
+  return reflow.open && reflow.token === token &&
+    loadSeq === gen && App.state.pdfDoc === doc && App.state.filePath === path0;
+}
+
+// 文档切换 / 关闭时调用：作废在跑的循环并收起覆盖层。
+// 不动 scrollAt——新文档要按自己的位置重新定位，不该跳回上一篇的滚动位置。
+function reflowCancel() {
+  reflow.token++;
+  reflow.busy = false;
+  reflow.open = false;
+  const box = $('reflow-view');
+  if (box) box.hidden = true;
+  if ($('reflow-pages')) $('reflow-pages').innerHTML = '';
+}
+
+async function openReflow() {
+  const s = App.state;
+  if (!s.pdfDoc || s.mode !== 'pdf') {
+    toast(s.mode === 'rich' ? '重排阅读只适用于 PDF（当前是转换后的文档）' : '先打开一份 PDF');
+    return;
+  }
+  if (reflow.busy) return;
+  // 打开那一刻就把凭据固定下来，之后所有 await 回来都对照它
+  const doc0 = s.pdfDoc;
+  const path0 = s.filePath;
+  const gen0 = loadSeq;
+  const token = ++reflow.token;
+  const alive = () => reflowAlive(token, doc0, gen0, path0);
+
+  reflowLoadPrefs();
+  reflow.open = true;
+  reflow.busy = true;
+  reflow.scrollAt = window.scrollY || 0;
+  const box = $('reflow-view');
+  const pagesBox = $('reflow-pages');
+  const empty = $('reflow-empty');
+  box.hidden = false;
+  pagesBox.innerHTML = '';
+  empty.hidden = true;
+  reflowApplyStyle();
+  if ($('reflow-title')) $('reflow-title').textContent = '重排阅读 · ' + (s.fileName || '未命名');
+  const note = $('reflow-note');
+  const cap = Math.min(s.numPages || 0, 400);
+  if (!cap) { note.textContent = '这份文档没有可读页'; reflow.busy = false; return; }
+
+  const collected = [];
+  try {
+    for (let n = 1; n <= cap; n++) {
+      if (!alive()) return;   // 中途关了 / 换了文档：后面的页不读，也不许再写 DOM
+      if (note) note.textContent = '正在读文字 ' + n + ' / ' + cap + '…';
+      let data = null;
+      try { data = await reflowPageData(doc0, n); } catch (_) { data = null; }
+      if (!alive()) return;   // await 期间切走了：这页属于旧文档，丢掉
+      if (data && data.items.length) collected.push(data);
+      // 每 8 页让出一次主线程，滚动条和关闭按钮才不算卡死
+      if (n % 8 === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    if (!alive()) return;
+    if (note) note.textContent = '正在排版…';
+    const doc = Reflow.reflowDoc(collected, {});
+    if (!doc.length) {
+      empty.hidden = false;
+      empty.textContent = '这些页面里没有可提取的文字（可能是扫描件）。扫描件要靠 OCR，本工具不做。';
+    } else {
+      pagesBox.innerHTML = doc.map((pg) => (
+        '<section class="rf-page" data-page="' + pg.page + '" title="双击回到 PDF 第 ' + pg.page + ' 页">' +
+        reflowBlocksHtml(pg.blocks) +
+        '<div class="rf-pagemark">第 ' + pg.page + ' 页</div>' +
+        '</section>'
+      )).join('');
+    }
+    if (note) {
+      const blocks = doc.reduce((n, p) => n + p.blocks.length, 0);
+      note.textContent = doc.length + ' 页 · ' + blocks + ' 段';
+      if (cap < (s.numPages || 0)) note.textContent += '（只重排了前 ' + cap + ' 页）';
+    }
+  } catch (err) {
+    if (alive() && note) note.textContent = '重排出错：' + String((err && err.message) || err);
+  } finally {
+    // 只有自己仍是当前任务才收尾：否则会把新任务的 busy 抹掉、或把旧文档的页码滚给新文档
+    if (alive()) {
+      reflow.busy = false;
+      reflow.pages = collected.length;
+      // 回到打开时所在的页，省得再从第 1 页找
+      const cur = String(s.currentPage || 1);
+      const hit = pagesBox.querySelector('.rf-page[data-page="' + cur + '"]');
+      if (hit && hit.scrollIntoView) hit.scrollIntoView({ block: 'start' });
+      else if ($('reflow-body')) $('reflow-body').scrollTop = 0;
+    }
+  }
+}
+
+function closeReflow() {
+  const box = $('reflow-view');
+  if (!box) return;
+  // 关掉同时作废在跑的循环；busy 一并清掉，否则下次打开会被旧任务一直挡着
+  reflowCancel();
+  try { window.scrollTo(0, reflow.scrollAt || 0); } catch (_) {}
+}
+
+function reflowJumpTo(page) {
+  const n = Math.max(1, Math.min(App.state.numPages || 1, page | 0));
+  closeReflow();
+  scrollToPage(n, false, true);
 }
 
 // 首次上手提示：只出现一次（记在 settings.json）

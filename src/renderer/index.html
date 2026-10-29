@@ -79,6 +79,15 @@
     <button id="btn-split" class="tbtn compact" title="分屏参考视图：右侧只读显示另一页">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M12 5v14"/></svg>
     </button>
+    <button id="btn-reflow" class="tbtn compact" title="重排阅读：把 PDF 的文字重新排成可调宽度/字号的连续文本 (Ctrl+Shift+R)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 11h12"/><path d="M4 16h16"/><path d="M4 21h9"/></svg>
+    </button>
+    <button id="btn-ruler" class="tbtn compact" title="阅读标尺：跟随鼠标的一条横带，长段落不串行 (Ctrl+Shift+L)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9h18v6H3z"/><path d="M7 9v3M11 9v3M15 9v3M19 9v3"/></svg>
+    </button>
+    <button id="btn-refimport" class="tbtn compact" title="参考文献表批量入库：把本文末尾的参考文献解析成库条目（命令面板里叫「参考文献表批量入库」）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 10h11"/><path d="M4 15h8"/><path d="M17 12v6"/><path d="M14.5 15.5 17 18l2.5-2.5"/></svg>
+    </button>
     <span class="grow"></span>
     <button id="file-name" class="filename" title="点击切换文档（当前标签 / 最近打开 / 文献库）">未打开文档</button>
   </div>
@@ -126,12 +135,23 @@
           <button class="ntool tbtn" data-tool="arrow" title="箭头 (A)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M12 5h7v7"/></svg>
           </button>
+          <button class="ntool tbtn" data-tool="stamp" title="印章 (S)：点页面盖一个「已阅 / 存疑 / ★ / ✓ / 待办」">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l-1 6h3l1 4H6l1-4h3z"/><path d="M4 17h16v3H4z"/></svg>
+          </button>
           <button class="ntool tbtn" data-tool="eraser" title="橡皮擦 (E)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5l7-7 6 6-4.5 4.5H8z"/><path d="M4 20.5h16"/></svg>
           </button>
         </div>
       </div>
     </div>
+    <span id="stamp-bar" class="stamp-bar" hidden>
+      <span class="stamp-lbl">印章</span>
+      <button class="stamp-pick active" data-stamp="ok">已阅</button>
+      <button class="stamp-pick" data-stamp="no">存疑</button>
+      <button class="stamp-pick" data-stamp="star">★</button>
+      <button class="stamp-pick" data-stamp="done">✓</button>
+      <button class="stamp-pick" data-stamp="todo">待办</button>
+    </span>
     <span class="nsep"></span>
     <label class="nlbl" title="标注颜色"><input id="note-color" type="color" value="#e53935" /></label>
     <label class="nlbl">粗细
@@ -150,6 +170,9 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M6.5 7l1 12h9l1-12"/></svg>
     </button>
     <span class="grow"></span>
+    <button id="btn-archive" class="tbtn" title="批注归档：把原文档 + 标注数据 + 可读清单打成一个 zip（可以整个带走）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l8-4 8 4v10l-8 4-8-4z"/><path d="M4 7l8 4 8-4"/><path d="M12 11v10"/></svg>
+    </button>
     <button id="btn-save" class="tbtn accent" title="把标注导出为一个新的 PDF 副本">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>
       <span>导出副本</span>
@@ -188,6 +211,7 @@
   <aside id="ref-pane" hidden aria-label="参考视图">
     <header id="ref-head">
       <span class="ref-title">参考</span>
+      <span id="ref-name" class="ref-name" hidden></span>
       <button id="ref-prev" class="ref-btn" title="上一页">‹</button>
       <input id="ref-page" type="number" min="1" value="1" title="参考视图页码" />
       <span id="ref-count">/ 0</span>
@@ -196,6 +220,7 @@
         <input id="ref-follow" type="checkbox" /> 跟随
       </label>
       <span class="grow"></span>
+      <button id="ref-pick" class="ref-btn" title="选择另一篇文献作为对照（跨文档）">⇄</button>
       <button id="ref-close" class="ref-btn" title="关闭分屏">✕</button>
     </header>
     <div id="ref-body">
@@ -221,6 +246,7 @@
       <div id="lib-search-wrap">
         <input id="lib-search" type="search" placeholder="搜索标题 / 作者 / 全文…" />
         <button id="lib-query-btn" class="tbtn" title="可视化条件构建器：字段 / 排除 / 多条件 AND">☰ 条件</button>
+        <button id="lib-adv-btn" class="tbtn" title="条件检索：字段 + 运算符（包含 / 为空 / 大于）+ 全部或任一，可按标注属性筛选">🎯 条件检索</button>
         <div id="lib-query-panel" class="qb-panel" hidden>
           <div id="qb-notice" class="qb-notice" hidden></div>
           <div id="qb-rows"></div>
@@ -271,11 +297,13 @@
           <button id="lib-import-refs" class="tbtn" title="导入 BibTeX / RIS 题录（不含 PDF）">导入题录</button>
           <button id="lib-export-refs" class="tbtn" title="导出 BibTeX / RIS">导出文献</button>
           <button id="lib-bib" class="tbtn" title="按当前筛选 / 选中条目生成参考文献表">参考文献</button>
+          <button id="lib-review" class="tbtn" title="把批注汇总成按主题分组的综述草稿（Markdown，带文内引注与参考文献表）">综述草稿</button>
           <button id="lib-new-note" class="tbtn" title="新建一条独立笔记（不挂在某篇文献上）">＋ 笔记</button>
           <button id="lib-import" class="tbtn accent" title="添加 PDF / Word / PPT / Excel / Markdown 等文件">添加文档</button>
           <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
           <span class="sep"></span>
           <button id="lib-feeds" class="tbtn" title="RSS 期刊订阅：添加订阅源，把新文章收进文献库">📡 订阅</button>
+          <button id="lib-recall" class="tbtn" title="回顾：把标注按间隔重复推回来复习（忘了 / 模糊 / 记得 / 太简单）">🎴 回顾</button>
           <button id="lib-stats" class="tbtn" title="库统计：类型 / 年份 / 标签分布">📊 统计</button>
           <button id="lib-settings" class="tbtn" title="设置 / 备份 / 全文索引">⚙ 设置</button>
         </div>
@@ -286,17 +314,21 @@
         <button id="lib-bulk-bib" class="tbtn">参考文献表</button>
         <button id="lib-bulk-rename" class="tbtn" title="按「作者 - 年份 - 标题」重命名选中的附件文件">重命名文件</button>
         <button id="lib-bulk-fetch" class="tbtn" title="给选中的条目批量抓取开放获取 PDF（arXiv / Unpaywall / 直链）">抓 PDF</button>
+        <button id="lib-bulk-todo" class="tbtn" title="把选中的条目标为待读，排进左侧阅读队列">标为待读</button>
+        <button id="lib-bulk-done" class="tbtn" title="把选中的条目标为已读">标为已读</button>
         <button id="lib-bulk-trash" class="tbtn danger">移入回收站</button>
         <span id="lib-anno-tools" hidden>
           <input id="lib-anno-tag-input" type="text" placeholder="给选中的标注加标签" />
           <button id="lib-anno-tag-add" class="tbtn">加标签</button>
           <button id="lib-anno-note" class="tbtn" title="把选中的标注（带页面截图）生成一条阅读笔记">生成笔记</button>
           <button id="lib-anno-export" class="tbtn">导出标注</button>
+          <button id="lib-anno-recall" class="tbtn" title="把选中的标注加入回顾，按间隔重复推回来复习">加入回顾</button>
         </span>
         <button id="lib-bulk-clear" class="tbtn">取消选择</button>
       </div>
       <!-- v33：标注视图的筛选条（按类型 / 颜色），只在该视图显示 -->
       <div id="lib-anno-filter" class="lib-anno-filter" hidden></div>
+      <div id="lib-adv-bar" class="lib-adv-bar" hidden></div>
       <div class="lib-columns" role="row">
         <button type="button" class="lib-sort-h" data-sort="title" title="按标题排序">标题<span class="sort-ind"></span></button>
         <button type="button" class="lib-sort-h" data-sort="creator" title="按第一作者排序">作者 · 年份 · 来源<span class="sort-ind"></span></button>
@@ -397,6 +429,15 @@
           </div>
         </div>
 
+        <div class="ld-sec" data-ld-sec="similar">
+          <div class="ld-sec-title">相似文献 <span class="ld-hint">按全文内容算，不联网</span></div>
+          <div id="ld-similar" class="ld-similar"></div>
+          <div class="ld-inline">
+            <button id="ld-similar-btn" class="ld-mini">按内容找相似</button>
+            <span id="ld-similar-status" class="ld-hint"></span>
+          </div>
+        </div>
+
         <div class="ld-sec">
           <div class="ld-sec-title">标签</div>
           <div id="ld-tags" class="ld-tags"></div>
@@ -409,6 +450,11 @@
         <div class="ld-sec">
           <div class="ld-sec-title">收藏集 <span class="ld-hint">可同时属于多个</span></div>
           <div id="ld-colls" class="ld-colls"></div>
+        </div>
+
+        <div class="ld-sec" data-ld-sec="readstatus">
+          <div class="ld-sec-title">阅读状态 <span class="ld-hint">待读 / 在读会出现在左侧「阅读队列」</span></div>
+          <div id="ld-readstatus" class="ld-readstatus"></div>
         </div>
 
         <div class="ld-sec">
@@ -452,6 +498,7 @@
         <option value="">导出…</option>
         <option value="html">HTML（含图片）</option>
         <option value="md">Markdown（含图片目录）</option>
+        <option value="doc">Word 文档（.doc，含图片）</option>
       </select>
       <button id="nv-preview-toggle" class="tbtn" title="显示 / 隐藏实时预览" aria-pressed="true">预览</button>
       <button id="nv-save" class="tbtn" title="保存（Ctrl+S）">保存</button>
@@ -562,6 +609,17 @@
       <footer class="modal-foot"><button id="feeds-close2" class="ld-btn">关闭</button></footer>
     </div>
   </div>
+  <div id="recall-modal" class="modal" hidden>
+    <div class="modal-card rv-card">
+      <header class="modal-head">
+        <span>回顾</span>
+        <span class="grow"></span>
+        <span id="recall-progress" class="rv-progress"></span>
+        <button id="recall-close" class="ld-x" title="关闭（Esc）">✕</button>
+      </header>
+      <div class="modal-body" id="recall-body"></div>
+    </div>
+  </div>
   <div id="stats-modal" class="modal" hidden>
     <div class="modal-card">
       <header class="modal-head">
@@ -614,6 +672,24 @@
         </label>
 
         <div class="set-sec">
+          <div class="set-title">引用键模板 <span class="ld-hint">详情面板与「导出参考文献」里的 [@key]</span></div>
+          <input id="set-citekey" class="set-input" type="text" spellcheck="false"
+                 placeholder="[auth:lower][year][veryshorttitle:lower]" />
+          <div class="set-actions" id="set-citekey-presets">
+            <button class="ld-mini" data-citekey-preset="[auth:lower][year][veryshorttitle:lower]">作者+年份+首词</button>
+            <button class="ld-mini" data-citekey-preset="[auth:lower][year]">作者+年份</button>
+            <button class="ld-mini" data-citekey-preset="[auth:upper][shortyear][shorttitle:abbr]">JabRef 紧凑</button>
+            <button class="ld-mini" data-citekey-preset="[auth][year][firstpage]">含起始页</button>
+          </div>
+          <div id="set-citekey-preview" class="ld-hint"></div>
+          <div class="ld-hint">可用字段：<code>auth</code> <code>authEtAl</code> <code>authIni</code> <code>authN</code> <code>authors</code>
+            <code>year</code> <code>shortyear</code> <code>title</code> <code>shorttitle</code> <code>veryshorttitle</code>
+            <code>journal</code> <code>journalabbr</code> <code>volume</code> <code>pages</code> <code>firstpage</code>
+            <code>doi</code> <code>itemtype</code>；修饰符 <code>:lower</code> <code>:upper</code> <code>:capitalize</code>
+            <code>:abbr</code> <code>:数字</code>（截断）。重名自动加 <code>-2</code> 后缀；留空用默认模板。</div>
+        </div>
+
+        <div class="set-sec">
           <div class="set-title">存储位置 <span class="ld-hint">library.json 与全文索引所在目录</span></div>
           <code id="set-data-dir" class="set-path"></code>
           <div class="set-actions">
@@ -654,6 +730,51 @@
         <span class="grow"></span>
         <button id="set-save" class="ld-btn primary">保存设置</button>
         <button id="set-close" class="ld-btn">关闭</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 条件检索（Zotero 高级检索）：字段 + 运算符 + 值，全部 / 任一 -->
+  <div id="adv-modal" class="modal" hidden>
+    <div class="modal-card wide adv-card">
+      <header class="modal-head">
+        <span>条件检索</span>
+        <span class="grow"></span>
+        <button id="adv-close" class="ld-x" title="关闭（Esc）">✕</button>
+      </header>
+      <div class="modal-body">
+        <div class="adv-match">
+          <span class="ld-lbl">匹配</span>
+          <select id="adv-match">
+            <option value="all">全部条件（且）</option>
+            <option value="any">任一条件（或）</option>
+          </select>
+          <span class="grow"></span>
+          <span id="adv-count" class="ld-hint"></span>
+        </div>
+        <div id="adv-rows"></div>
+        <div class="set-actions">
+          <button id="adv-add" class="ld-mini">＋ 加条件</button>
+          <button id="adv-add-group" class="ld-mini" title="加一个条件组：组内可以「且」也可以「或」，还能再嵌组">＋ 条件组</button>
+          <button id="adv-clear" class="ld-mini">清空条件</button>
+          <span class="grow"></span>
+          <button id="adv-help" class="ld-mini">字段说明</button>
+        </div>
+        <div id="adv-help-box" class="ld-hint" hidden>
+          <code>标注数</code> / <code>有标注</code> / <code>标注类型</code> / <code>标注颜色</code> / <code>标注带批注</code>
+          都是按「这篇文献上的标注」算的，可以用来找「有红色批注的文章」「标注数大于 5 的文章」。
+          「为空 / 不为空」不需要填值，用来找缺 DOI、缺年份、没附件的条目。条件为空时不参与过滤。
+          <br />「匹配正则」不区分大小写，例如 <code>^deep|attention</code>；写坏了不会报错，只是这条不命中。
+          「加入日期 / 修改日期」按天数算：<code>距今不超过 7</code> 是最近一周，<code>距今超过 365</code> 是一年以上。
+          <br />条件组可以再嵌组（最深 4 层）：外面「且」、里面「或」，就能表达「(标题含 A 或 摘要含 A) 且 有红色标注」。
+        </div>
+        <div id="adv-preview" class="adv-preview"></div>
+      </div>
+      <footer class="modal-foot">
+        <button id="adv-save" class="ld-btn">存为智能收藏集</button>
+        <span class="grow"></span>
+        <button id="adv-cancel" class="ld-btn">取消</button>
+        <button id="adv-apply" class="ld-btn primary">检索</button>
       </footer>
     </div>
   </div>
@@ -743,6 +864,48 @@
     </div>
   </div>
 
+  <!-- 综述草稿（批注 → 按主题分组的 Markdown） -->
+  <div id="review-modal" class="modal" hidden>
+    <div class="modal-card wide">
+      <header class="modal-head"><span>综述草稿</span><span class="grow"></span>
+        <button id="review-close" class="ld-x" title="关闭">✕</button></header>
+      <div class="modal-body">
+        <div class="set-grid2">
+          <label class="ld-row"><span class="ld-lbl">范围</span><select id="review-scope">
+            <option value="list">当前列表</option>
+            <option value="selected">已选条目</option>
+            <option value="all">整库（未删除）</option>
+          </select></label>
+          <label class="ld-row"><span class="ld-lbl">分组</span><select id="review-group">
+            <option value="tag">按标签（主题）</option>
+            <option value="item">按文献</option>
+            <option value="none">不分组</option>
+          </select></label>
+        </div>
+        <div class="set-grid2">
+          <label class="ld-row"><span class="ld-lbl">引用样式</span><select id="review-style"></select></label>
+          <label class="ld-row"><span class="ld-lbl">标题</span><input id="review-title" type="text" placeholder="留空自动生成" /></label>
+        </div>
+        <label class="set-check"><input id="review-quotes" type="checkbox" checked /> 含引文原文</label>
+        <label class="set-check"><input id="review-comments" type="checkbox" checked /> 含我的评论</label>
+        <div class="bib-head">
+          <span id="review-count" class="ld-hint"></span>
+          <span class="grow"></span>
+          <button id="review-refresh" class="ld-mini">生成 / 刷新</button>
+          <button id="review-copy" class="ld-mini">复制</button>
+          <button id="review-save" class="ld-mini">保存为 .md…</button>
+        </div>
+        <textarea id="review-preview" class="bib-preview" readonly spellcheck="false"></textarea>
+        <div id="review-status" class="set-status"></div>
+      </div>
+      <footer class="modal-foot">
+        <span class="ld-hint">按主题聚合批注，自动配文内引注与参考文献表；多标签批注按第一个标签归类。</span>
+        <span class="grow"></span>
+        <button id="review-close2" class="ld-btn">关闭</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- 高亮评论编辑 -->
   <div id="comment-modal" class="modal" hidden>
     <div class="modal-card small">
@@ -789,8 +952,11 @@
   <script src="pdfjs/pdf.min.js"></script>
   <script src="../creators.js"></script>
   <script src="../query.js"></script>
+  <script src="../advsearch.js"></script>
   <script src="katex/katex.min.js"></script>
   <script src="../smartjump.js"></script>
+  <script src="../reflow.js"></script>
+  <script src="../portal.js"></script>
   <script src="../libstats.js"></script>
   <script src="../feedparse.js"></script>
   <script src="../readingstats.js"></script>
@@ -810,5 +976,103 @@
   <script src="modeswitch.js"></script>
   <script src="library-ui.js"></script>
   <script src="renderer.js"></script>
+  <!-- 对照文献选择（跨文档分屏） -->
+  <div id="ref-picker" class="modal" hidden>
+    <div class="modal-card">
+      <header class="modal-head"><span>选择对照文献</span><span class="grow"></span>
+        <button id="ref-picker-x" class="ld-x" title="关闭">✕</button></header>
+      <div class="modal-body">
+        <input id="ref-picker-q" type="text" placeholder="按标题 / 作者筛选…" />
+        <div id="ref-picker-list" class="ref-picker-list"></div>
+      </div>
+      <footer class="modal-foot">
+        <button id="ref-picker-same" class="ld-mini" title="退回同一份文档的另一页">用当前文档的另一页</button>
+        <span class="grow"></span>
+        <button id="ref-picker-close" class="ld-btn">关闭</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 表格编辑器（v36）：光标在已有表格里就编辑它，否则插到光标处 -->
+  <div id="tbl-modal" class="modal" hidden>
+    <div class="modal-card wide tbl-card">
+      <header class="modal-head"><span>编辑表格</span><span class="grow"></span>
+        <button id="tbl-close" class="ld-x" title="关闭（Esc）">✕</button></header>
+      <div class="modal-body">
+        <div class="tbl-tools">
+          <button id="tbl-add-row" class="ld-mini">＋ 行</button>
+          <button id="tbl-del-row" class="ld-mini">− 行</button>
+          <button id="tbl-add-col" class="ld-mini">＋ 列</button>
+          <button id="tbl-del-col" class="ld-mini">− 列</button>
+          <span id="tbl-info" class="ld-hint"></span>
+          <span class="grow"></span>
+          <span class="ld-hint">第一行是表头 · ↑↓ 换行 · Tab 换代 · Ctrl+Enter 确定</span>
+        </div>
+        <div id="tbl-grid" class="tbl-grid"></div>
+      </div>
+      <footer class="modal-foot">
+        <button id="tbl-cancel" class="ld-btn">取消</button>
+        <button id="tbl-ok" class="ld-btn primary">插入 / 更新</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 命令面板（v36）：Ctrl+K 打开，不用记快捷键也能用全功能 -->
+  <div id="cmd-modal" class="modal cmd-modal" hidden>
+    <div class="modal-card cmd-card">
+      <div class="cmd-input-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input id="cmd-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入命令：重排 / 标尺 / 导出 / 标注 / 主题…" />
+      </div>
+      <div id="cmd-list" class="cmd-list"></div>
+      <div class="cmd-foot">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
+    </div>
+  </div>
+
+  <!-- 参考文献表批量入库（v36）：解析本文末尾的参考文献 → 逐条过目 → 按勾选入库 -->
+  <div id="refi-modal" class="modal" hidden>
+    <div class="modal-card refi-card">
+      <header class="modal-head"><span>参考文献表批量入库</span><span class="grow"></span>
+        <button id="refi-x" class="ld-x" title="关闭">✕</button></header>
+      <div class="refi-tools">
+        <label class="refi-opt"><input id="refi-fetch" type="checkbox" checked /> 按 DOI / arXiv 联网补全题录</label>
+        <span class="refi-count" id="refi-count"></span>
+        <span class="grow"></span>
+        <button id="refi-all" class="tbtn refi-mini">全选</button>
+        <button id="refi-none" class="tbtn refi-mini">清空</button>
+      </div>
+      <div id="refi-status" class="refi-status"></div>
+      <div id="refi-list" class="refi-list"></div>
+      <footer class="modal-foot">
+        <span class="ld-hint">默认只勾「库里没有、且认得出」的条目；认错的可以取消勾选。</span>
+        <span class="grow"></span>
+        <button id="refi-cancel" class="tbtn">关闭</button>
+        <button id="refi-go" class="tbtn accent">导入选中</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 重排阅读（v36）：把 PDF 的文字还原成段落再重新排版，不引入排版引擎 -->
+  <div id="reflow-view" hidden>
+    <div id="reflow-bar">
+      <span class="rf-title" id="reflow-title">重排阅读</span>
+      <span class="rf-note" id="reflow-note"></span>
+      <span class="grow"></span>
+      <label class="rf-ctl" title="正文字号">字号
+        <input id="reflow-size" type="range" min="13" max="24" step="1" value="17" />
+        <span id="reflow-size-val">17</span>
+      </label>
+      <label class="rf-ctl" title="正文栏宽">栏宽
+        <input id="reflow-width" type="range" min="420" max="900" step="20" value="660" />
+        <span id="reflow-width-val">660</span>
+      </label>
+      <button id="reflow-close" class="ld-btn" title="回到 PDF（Esc）">关闭</button>
+    </div>
+    <div id="reflow-body" tabindex="0">
+      <div id="reflow-pages"></div>
+      <div id="reflow-empty" class="ld-hint" hidden></div>
+    </div>
+  </div>
+
 </body>
 </html>

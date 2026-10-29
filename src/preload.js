@@ -26,18 +26,44 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   reportSmoke: (data) => ipcRenderer.send('smoke-result', data),
   // 导出带标注的 PDF 副本（payload: { fileName, data, pages, outPath? }）
   exportPdf: (payload) => ipcRenderer.invoke('export-pdf', payload),
+  // 批注归档：原文档 + 标注 JSON + 可读清单，打成一个 zip
+  exportAnnoArchive: (info) => ipcRenderer.invoke('export-anno-archive', info),
   // 更新窗口标题
   setTitle: (t) => ipcRenderer.send('set-title', t),
   // 标注自动保存 / 恢复（按文件路径）
-  saveAnnos: (path, pages) => ipcRenderer.invoke('anno-save', { path, pages }),
+  // opts.force 只在用户确认「重建标注文件」时传：主进程会先备份损坏的原文件再写
+  saveAnnos: (path, pages, opts) => ipcRenderer.invoke('anno-save', { path, pages, force: !!(opts && opts.force) }),
   onSaveError: (cb) => ipcRenderer.on('save-error', (_e, message) => cb(message)),
-  loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path }),
+  // 只要标注数组（老调用方 / 探针的用法）；读失败也给空数组，但不带状态
+  loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path })
+    .then((r) => (Array.isArray(r) ? r : (r && Array.isArray(r.pages) ? r.pages : []))),
+  // 带状态的读法：{ ok, status: 'ok' | 'missing' | 'broken', pages, annoPath, error }
+  // 渲染层必须用这个——「没有标注」和「读不出来」要分开，否则一次自动保存就把原文件覆盖了
+  loadAnnosState: (path) => ipcRenderer.invoke('anno-load', { path }),
   // 标注条目化 —— 汇总所有文档的标注 + 给标注打标签
   listAnnotations: () => ipcRenderer.invoke('anno-list'),
+  // 回顾（间隔重复）：卡片状态在 userData/recall.json，标注正文仍走 listAnnotations
+  recall: {
+    state: (limit) => ipcRenderer.invoke('recall-state', { limit }),
+    add: (ids) => ipcRenderer.invoke('recall-add', { ids }),
+    rate: (id, rating) => ipcRenderer.invoke('recall-rate', { id, rating }),
+    remove: (id) => ipcRenderer.invoke('recall-remove', { id }),
+  },
   feedFetch: (url) => ipcRenderer.invoke('feed-fetch', { url }),
   feedAdd: (url) => ipcRenderer.invoke('feed-add', { url }),
   feedRemove: (id) => ipcRenderer.invoke('feed-remove', { id }),
   addItem: (fields) => ipcRenderer.invoke('lib-add-item', fields),
+  // 相似文献：按全文索引的词袋算（主进程只读索引，不联网）
+  similarDocs: (info) => ipcRenderer.invoke('similar-docs', info),
+  // 跨文档 Portal：参考文献条目 → 库里那一篇 + 起始页
+  portalTarget: (info) => ipcRenderer.invoke('portal-target', info),
+  // 参考文献表批量入库：先 dryRun 预览（不联网），再按勾选导入
+  importReferences: (info) => ipcRenderer.invoke('import-references', info),
+  onRefImportProgress: (fn) => {
+    const h = (_e, msg) => { try { fn(msg); } catch (_) {} };
+    ipcRenderer.on('refi-progress', h);
+    return () => ipcRenderer.removeListener('refi-progress', h);
+  },
   bookmarksLoad: (path) => ipcRenderer.invoke('bookmarks-load', { path }),
   bookmarksSave: (path, bookmarks) => ipcRenderer.invoke('bookmarks-save', { path, bookmarks }),
   readingStatsLoad: () => ipcRenderer.invoke('reading-stats-load'),
@@ -131,12 +157,32 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     onFilesRenamed: (cb) => { ipcRenderer.on('files-renamed', (_e, info) => cb(info)); },
     revealItem: (key) => ipcRenderer.invoke('lib-reveal-item', { key }),
     relinkItem: (key) => ipcRenderer.invoke('lib-relink-item', { key }),
+    // 2026-10-29：按指纹扫描文件夹，批量找回被移动/改名的附件
+    relinkScan: (dir) => ipcRenderer.invoke('lib-relink-scan', { dir }),
+    // 2026-10-29：从 PDF 首页识别 DOI / arXiv 并补全题录（只填空字段）
+    identifyItem: (key, timeout) => ipcRenderer.invoke('lib-identify-item', { key, timeout }),
+    // 2026-10-29：批注 → 跨条目综述草稿（Markdown）
+    reviewDraft: (opts) => ipcRenderer.invoke('lib-review-draft', opts || {}),
+    // 2026-10-29：对照视图的候选文献（有现存 PDF 的条目）
+    pdfList: () => ipcRenderer.invoke('lib-pdf-list'),
     // v11：库级全文检索 / 备份 / 数据目录
     // v33：opts.offset / opts.limit 翻页；返回带 total 与各类命中数 counts
     searchFull: (query, opts) => ipcRenderer.invoke('lib-search-full', Object.assign({ query }, opts || {})),
     ftStatus: () => ipcRenderer.invoke('lib-ft-status'),
     indexAll: (force) => ipcRenderer.invoke('lib-ft-index', { force: !!force }),
     ftClear: () => ipcRenderer.invoke('lib-ft-clear'),
+    // 增量索引广播：worker 建好一个文件发一次 change，整批结束发一次 idle。
+    // 返回取消订阅函数，面板关掉时可以解绑。
+    onFtIndexChanged: (cb) => {
+      const h = (_e, info) => { try { cb(info); } catch (_) {} };
+      ipcRenderer.on('ft-index-changed', h);
+      return () => ipcRenderer.removeListener('ft-index-changed', h);
+    },
+    onFtIndexIdle: (cb) => {
+      const h = (_e, info) => { try { cb(info); } catch (_) {} };
+      ipcRenderer.on('ft-index-idle', h);
+      return () => ipcRenderer.removeListener('ft-index-idle', h);
+    },
     backup: (outPath) => ipcRenderer.invoke('lib-backup', { outPath }),
     restore: (filePath) => ipcRenderer.invoke('lib-restore', { path: filePath }),
     chooseDataDir: (path, mode) => ipcRenderer.invoke('lib-choose-data-dir', { path, mode }),
@@ -170,7 +216,7 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     mergeItems: (keepKey, otherKeys) => ipcRenderer.invoke('lib-merge-items', { keepKey, otherKeys }),
     bulkUpdate: (keys, patch) => ipcRenderer.invoke('lib-bulk-update', { keys, patch }),
     trashItems: (keys) => ipcRenderer.invoke('lib-trash-items', { keys }),
-    addSearch: (name, query) => ipcRenderer.invoke('lib-add-search', { name, query }),
+    addSearch: (name, query, spec) => ipcRenderer.invoke('lib-add-search', { name, query, spec }),
     removeSearch: (id) => ipcRenderer.invoke('lib-remove-search', { id }),
   },
 });

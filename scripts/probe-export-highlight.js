@@ -38,7 +38,11 @@ module.exports = `(async () => {
 
   const res = await pdfBridge.exportPdf(payload);
   push('导出副本成功', res && res.ok && !!res.path, JSON.stringify(res));
-  push('中文文字标注被跳过而不是整单失败', res && res.skipped === 1, 'skipped=' + (res && res.skipped));
+  // v36：有系统 CJK 字体时中文用子集嵌入导出（不再被跳过）；没有字体时退回跳过并计数
+  const hasCjk = !!(res && res.cjk);
+  push(hasCjk ? '中文标注用系统 CJK 字体子集导出' : '没有 CJK 字体时中文标注被跳过并计数',
+    hasCjk ? (res.skipped === 0 && typeof res.missingGlyphs === 'number') : res.skipped === 1,
+    JSON.stringify({ skipped: res && res.skipped, cjk: res && res.cjk, font: res && res.cjkFont, missing: res && res.missingGlyphs }));
 
-  return { checks, outPath: res && res.path, color: mark.color, rect, markText: mark.text };
+  return { checks, outPath: res && res.path, color: mark.color, rect, markText: mark.text, cjk: !!(res && res.cjk), cjkFont: res && res.cjkFont };
 })()`;

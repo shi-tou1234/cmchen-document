@@ -5,3 +5,7 @@ src/renderer/pdfjs/
 src/renderer/katex/
 *.log
 assets/sample-annotated.pdf
+
+# 测试临时产物（打包布局回归会把 asar 建在这里）
+.workbuddy/
+.tmp-wpack-*/

@@ -33,6 +33,10 @@ const { atomicWrite } = require('./atomic-file');
 const VERSION = 8;
 const BACKUP_KEEP = 10;
 
+// 阅读状态：''（未标记）/ todo（待读）/ reading（在读）/ done（已读）
+// 与阅读进度（page / pageTotal）相互独立：进度是「读到哪」，状态是「打算怎么办」。
+const READ_STATUS = new Set(['todo', 'reading', 'done']);
+
 // v5：补齐 Zotero 常用的条目类型（30+），让导入 BibTeX/RIS/CSL-JSON 时不至于全被压成「文档」。
 // label 交给 UI 直接显示，避免两处各写一份映射。
 const ITEM_TYPES = [
@@ -106,7 +110,23 @@ function init(userDataDir) {
 function filePath() { return FILE || init(null); }
 
 function emptyStore() {
-  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {}, annoMeta: {}, feeds: [] };
+  return { version: VERSION, collections: [], searches: [], items: [], tagColors: {}, annoTags: {}, annoMeta: {}, feeds: [], noteAliases: {} };
+}
+
+// 笔记旧标题：{ "<笔记条目 key>": ["旧标题1", "旧标题2"] }。
+// [[标题]] 互链按标题匹配，笔记一改名链接就断；把改名前用过的标题留档，
+// 解析时先找现标题、再找旧标题，链接就不会因为改名失效。
+// 与 feeds 同一套做法：v8 的可选附加键，旧版本读到忽略，不升库格式版本。
+function normalizeNoteAliases(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const k of Object.keys(src)) {
+    const key = str(k);
+    if (!key) continue;
+    const list = strList(src[k]).filter((t) => t.length <= 200).slice(0, 12);
+    if (list.length) out[key] = list;
+  }
+  return out;
 }
 
 // 订阅源：{ id, url, title, addedAt }。v8 的可选附加键——旧版本读到会忽略，
@@ -200,6 +220,17 @@ function normalizeFields(raw) {
 // 相关条目只存 key（8 位类 Zotero key；测试数据可能更短，这里不做强格式校验）
 function normalizeRelations(raw) {
   return strList(raw).filter((k) => /^[A-Za-z0-9_-]{1,64}$/.test(k));
+}
+
+// 附件指纹：{ size, hash }。老库没有这个字段（null），不影响任何既有逻辑；
+// 拿到新指纹后可以按它把改名 / 移动过的文件认回来。
+function normalizeFingerprint(raw) {
+  const f = raw && typeof raw === 'object' ? raw : null;
+  if (!f) return null;
+  const size = Number.isFinite(+f.size) ? Math.max(0, Math.floor(+f.size)) : 0;
+  const hash = String(f.hash || '').trim().toLowerCase();
+  if (!size || !/^[0-9a-f]{16,64}$/.test(hash)) return null;
+  return { size, hash };
 }
 
 // 版本迁移前把原始文件复制到 <库目录>/backups/，只保留最近 BACKUP_KEEP 份。
@@ -304,6 +335,7 @@ function normalize(o) {
     s.annoTags = normalizeAnnoTags(o.annoTags);
     s.annoMeta = normalizeAnnoMeta(o.annoMeta);
     s.feeds = normalizeFeeds(o.feeds);
+    s.noteAliases = normalizeNoteAliases(o.noteAliases);
     if (Array.isArray(o.items)) s.items = o.items.filter((it) => it && it.key).map(migrateItem);
   }
   // v7→v8：标注标签搬进标注对象层（annoTags 只留着做兼容读，不再写）
@@ -360,7 +392,11 @@ function migrateItem(it) {
   delete x.collectionId;
 
   x.attachment = (src.attachment && src.attachment.path)
-    ? { path: String(src.attachment.path), name: String(src.attachment.name || path.basename(String(src.attachment.path))) }
+    ? {
+      path: String(src.attachment.path),
+      name: String(src.attachment.name || path.basename(String(src.attachment.path))),
+      fingerprint: normalizeFingerprint(src.attachment.fingerprint),
+    }
     : null;
   x.snapshot = (src.snapshot && src.snapshot.path)
     ? {
@@ -374,6 +410,8 @@ function migrateItem(it) {
   x.created = Number.isFinite(+src.created) ? +src.created : 0;
   x.updated = Number.isFinite(+src.updated) ? +src.updated : 0;
   x.deletedAt = Number.isFinite(+src.deletedAt) && +src.deletedAt > 0 ? +src.deletedAt : 0;
+  // 阅读状态是可选字段：老库没有就留空，不影响任何既有逻辑
+  x.readStatus = READ_STATUS.has(src.readStatus) ? src.readStatus : '';
   // v23：阅读笔记改成多条（notes[]）。v3 的单个 note 字段自动搬成第一条笔记。
   x.notes = normalizeNotes(src.notes, x.note, x.created, x.updated);
   // v8：条目 ↔ 标注双向关联的「条目这一侧」（标注那侧的 itemKey 在 annoMeta 里）
@@ -474,6 +512,8 @@ function addItem(fields) {
 }
 
 // 拖入/导入一个 PDF → 建条目（附件引用该路径）
+// opts 可以带完整题录（识别 / 抓取的结果）：除标题作者外，卷期页、DOI、摘要、标签一并落库，
+// 这样「导入即补全」不需要建完再调一次 updateItem。
 function addPdf(filePathArg, opts) {
   const abs = path.resolve(filePathArg);
   const o = opts || {};
@@ -483,14 +523,52 @@ function addPdf(filePathArg, opts) {
     creators: Array.isArray(o.creators) ? o.creators : [],
     year: o.year || '',
     publication: o.publication || '',
+    volume: o.volume || '',
+    issue: o.issue || '',
+    pages: o.pages || '',
+    doi: o.doi || '',
+    url: o.url || '',
+    abstract: o.abstract || '',
+    language: o.language || '',
+    tags: Array.isArray(o.tags) ? o.tags : [],
+    fields: o.fields || {},
+    readStatus: o.readStatus || '',
     collectionIds: o.collectionIds || (o.collectionId ? [o.collectionId] : []),
-    attachment: { path: abs, name: path.basename(abs) },
+    attachment: { path: abs, name: path.basename(abs), fingerprint: o.fingerprint || null },
   });
 }
 
+/*
+ * 「导入即去重」的原子版本：查重与建条目在同一段同步代码里完成。
+ *
+ * 为什么需要它：主进程导入要先读元数据、再联网识别，中间有 await。
+ * 如果只在 await 之前查一次重，同一路径的两个并发导入会都通过检查，最后建两条记录。
+ * 把检查挪到这里，第二次调用一定能看到第一次刚写进去的条目——JS 单线程，
+ * 这个函数里没有 await，不会被别的导入插进来。
+ *
+ * 返回 { item, deduped, restored }：
+ *   deduped  已存在（本次没有新建）
+ *   restored 已存在但在回收站，本次顺手还原
+ * 只有 opts.dedupe 为真时才去重；否则保持「每次建一条新记录」的老语义。
+ */
+function ensurePdf(filePathArg, opts) {
+  const o = opts || {};
+  if (!o.dedupe) return { item: addPdf(filePathArg, o), deduped: false, restored: false };
+  const abs = path.resolve(filePathArg);
+  const exist = findItemByPath(abs);
+  if (exist) {
+    let restored = false;
+    if (exist.deletedAt) { restoreItem(exist.key); restored = true; }
+    return { item: findItem(exist.key) || exist, deduped: true, restored };
+  }
+  return { item: addPdf(abs, o), deduped: false, restored: false };
+}
+
 function updateItem(key, patch) {
-  const it = findItem(key);
+  const s = load();
+  const it = s.items.find((x) => x.key === key);
   if (!it) return null;
+  const beforeTitle = it.title;
   // 只允许改这些字段；attachment/回收站状态走专门接口，防止误覆盖
   // （v23 起 note 不再直接写：阅读笔记走 notes[]，旧 note 字段只作迁移来源）
   const textFields = ['title', 'year', 'publication', 'volume', 'issue', 'pages', 'doi', 'url', 'abstract', 'language'];
@@ -503,7 +581,17 @@ function updateItem(key, patch) {
   if ('relations' in patch) it.relations = normalizeRelations(patch.relations).filter((k) => k !== it.key);
   if ('collectionIds' in patch) it.collectionIds = validCollectionIds(patch.collectionIds);
   if ('page' in patch && Number.isFinite(+patch.page)) it.page = Math.max(0, Math.floor(+patch.page));
+  if ('readStatus' in patch) it.readStatus = READ_STATUS.has(patch.readStatus) ? patch.readStatus : '';
   it.updated = now();
+  // 笔记改名：把旧标题记进别名，[[旧标题]] 的链接不会断。
+  // 改回某个旧标题时，把它从别名里摘掉，避免「现标题」与「旧标题」重复。
+  if (it.itemType === 'note' && beforeTitle && it.title !== beforeTitle) {
+    const list = Array.isArray(s.noteAliases[it.key]) ? s.noteAliases[it.key].slice() : [];
+    const dup = list.indexOf(it.title);
+    if (dup >= 0) list.splice(dup, 1);
+    if (!list.includes(beforeTitle)) list.unshift(beforeTitle);
+    s.noteAliases[it.key] = list.slice(0, 12);
+  }
   save();
   return it;
 }
@@ -532,7 +620,11 @@ function deleteItemForever(key) {
   const before = s.items.length;
   s.items = s.items.filter((x) => x.key !== key);
   const removed = s.items.length !== before;
-  if (removed) save();
+  if (removed) {
+    // 笔记永久删掉后，旧标题别名也没有意义了，一起清掉
+    if (s.noteAliases && s.noteAliases[key]) delete s.noteAliases[key];
+    save();
+  }
   return removed;
 }
 function emptyTrash() {
@@ -765,12 +857,32 @@ function moveItem(key, collectionId) {
   return setCollections(key, collectionId ? [collectionId] : []);
 }
 
-// 附件移动后重新定位：只改索引里的路径，不复制/移动用户文件
-function setAttachment(key, filePathArg) {
+// 附件移动后重新定位：只改索引里的路径，不复制/移动用户文件。
+// fingerprint 传了就换成新文件的指纹；不传则清空（旧指纹对新路径没有意义）。
+function setAttachment(key, filePathArg, fingerprint) {
   const it = findItem(key); if (!it || !filePathArg) return null;
   const abs = path.resolve(filePathArg);
-  it.attachment = { path: abs, name: path.basename(abs) };
+  it.attachment = {
+    path: abs,
+    name: path.basename(abs),
+    fingerprint: normalizeFingerprint(fingerprint),
+  };
   it.updated = now(); save(); return it;
+}
+
+// 补记指纹：文件成功打开 / 重新定位后调用。不推进 updated，避免每次打开都改「修改时间」。
+function setAttachmentFingerprint(key, fingerprint) {
+  const it = findItem(key); if (!it || !it.attachment) return null;
+  const fp = normalizeFingerprint(fingerprint);
+  if (!fp) return it;
+  if (sameFp(it.attachment.fingerprint, fp)) return it;
+  it.attachment.fingerprint = fp;
+  save();
+  return it;
+}
+
+function sameFp(a, b) {
+  return !!(a && b && a.size === b.size && a.hash === b.hash);
 }
 
 // 网页快照：{ path, png, url, at }。文件本体在 dataDir/snapshots，索引里只存引用。
@@ -843,6 +955,9 @@ function publicItem(it, collIds) {
     collectionIds: it.collectionIds.filter((id) => collIds.has(id)),
     page: it.page || 0, pageTotal: +it.pageTotal || 0, created: it.created || 0, updated: it.updated || 0,
     deletedAt: it.deletedAt || 0,
+    // 阅读状态与笔记旧标题：都是可选字段，老库读出空值
+    readStatus: it.readStatus || '',
+    aliases: ((load().noteAliases || {})[it.key] || []).slice(),
     hasFile: !!(it.attachment && fs.existsSync(it.attachment.path)),
     attachment: it.attachment,
     snapshot: it.snapshot && it.snapshot.path ? {
@@ -935,6 +1050,15 @@ function combineStores(base, obj) {
   // 保留导入库的标注对象与标签，现有库同 id 的值优先。
   cur.annoMeta = Object.assign({}, inc.annoMeta, cur.annoMeta);
   cur.annoTags = Object.assign({}, inc.annoTags, cur.annoTags);
+  // 笔记旧标题别名跟着条目走：只在「条目确实并入且当前库没有别名」时采用导入库的值，
+  // 避免恢复旧备份把现在能解析的旧标题覆盖掉。
+  if (!cur.noteAliases) cur.noteAliases = {};
+  for (const [k, list] of Object.entries(inc.noteAliases || {})) {
+    if (cur.noteAliases[k]) continue;
+    if (!cur.items.some((x) => x.key === k)) continue;
+    const merged = strList(list).filter((t) => t.length <= 200).slice(0, 12);
+    if (merged.length) cur.noteAliases[k] = merged;
+  }
   return cur;
 }
 
@@ -947,11 +1071,59 @@ function backupNow(label) {
 }
 
 // ---------- 智能收藏集（保存的搜索） ----------
-function addSearch(name, query) {
+// 保存的检索有两种形态：
+//   串式 —— 搜索框里的那条串（老形态，query 非空）
+//   条件式 —— 条件检索的条件数组（v35，conditions 非空；query 可以为空）
+// 两种都保存在同一个 searches 数组里，互相兼容：老版本读到带 conditions 的条目
+// 只是当空查询处理，不会坏库。
+const ADV_FIELDS = new Set(['any', 'title', 'author', 'publication', 'abstract', 'tag', 'doi', 'year',
+  'dateAdded', 'dateModified',
+  'itemType', 'readStatus', 'hasAttachment', 'attachmentPath', 'annoCount', 'hasAnnotation',
+  'annoKind', 'annoColor', 'annoText', 'annoHasComment']);
+const ADV_OPS = new Set(['contains', 'notContains', 'is', 'isNot', 'beginsWith', 'endsWith', 'isEmpty',
+  'isNotEmpty', 'eq', 'gt', 'lt', 'gte', 'lte', 'has', 'hasNot',
+  'regex', 'notRegex', 'withinDays', 'olderThanDays']);
+
+// 条件组（v36）：叶子对象之外还允许 { match, conditions:[叶子|组] }。
+// 深度与总数都封顶：保存的检索来自用户输入，不能让它成为一个可以无限嵌套的结构。
+const ADV_MAX_DEPTH = 4;
+const ADV_MAX_CONDITIONS = 20;
+
+function cleanConditions(raw, depth, budget) {
+  const list = Array.isArray(raw) ? raw : [];
+  const d = depth || 0;
+  const left = budget && typeof budget.left === 'number' ? budget : { left: ADV_MAX_CONDITIONS };
+  const out = [];
+  for (const c of list) {
+    if (!c || typeof c !== 'object') continue;
+    if (left.left <= 0) break;
+    if (Array.isArray(c.conditions)) {
+      if (d + 1 >= ADV_MAX_DEPTH) continue;
+      const inner = cleanConditions(c.conditions, d + 1, left);
+      if (!inner.length) continue;                 // 空组不落盘：它对结果没有任何约束
+      out.push({ match: c.match === 'any' ? 'any' : 'all', conditions: inner });
+      continue;
+    }
+    const field = String(c.field || '');
+    const op = String(c.op || '');
+    if (!ADV_FIELDS.has(field) || !ADV_OPS.has(op)) continue;
+    const value = String(c.value == null ? '' : c.value).slice(0, 200);
+    out.push({ field, op, value });
+    left.left--;
+  }
+  return out;
+}
+
+function addSearch(name, query, spec) {
   const q = str(query);
-  if (!q) return null;
+  const conditions = cleanConditions(spec && spec.conditions);
+  if (!q && !conditions.length) return null;
   const s = load();
-  const x = { id: genKey(), name: str(name) || q, query: q };
+  const x = { id: genKey(), name: str(name) || q || ('条件检索 ' + conditions.length + ' 项'), query: q };
+  if (conditions.length) {
+    x.match = (spec && spec.match === 'any') ? 'any' : 'all';
+    x.conditions = conditions;
+  }
   s.searches.push(x);
   save();
   return x;
@@ -986,6 +1158,7 @@ function bulkUpdate(keys, patch) {
     }
     if (Array.isArray(p.removeCollectionIds)) it.collectionIds = it.collectionIds.filter((id) => !p.removeCollectionIds.includes(id));
     if ('collectionIds' in p) it.collectionIds = validCollectionIds(p.collectionIds);
+    if ('readStatus' in p) it.readStatus = READ_STATUS.has(p.readStatus) ? p.readStatus : '';
     it.updated = now();
     n++;
   }
@@ -1387,13 +1560,13 @@ function enableUndo(names) {
 
 module.exports = {
   init, filePath, load, save, summary,
-  addPdf, addItem, updateItem, removeItem,
+  addPdf, addItem, updateItem, removeItem, ensurePdf,
   trashItem, restoreItem, deleteItemForever, emptyTrash,
   findItem, findItemByPath, setPageByKey, addFeed, removeFeed,
   addTag, removeTag, renameTag, removeTagEverywhere, mergeTags, setTagColor,
   addRelation, removeRelation,
   addNote, updateNote, removeNote,
-  addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment, setSnapshot,
+  addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment, setAttachmentFingerprint, setSnapshot,
   addSearch, removeSearch,
   setAnnoTags, addAnnoTags, removeAnnoTag,
   annoMetaOf, annoTagsOf, updateAnno, linkAnnoToItem, unlinkAnno, remapAnnoTags,
@@ -1408,6 +1581,10 @@ module.exports = {
 // 哪些操作可以撤销（描述会显示在提示里）。笔记的逐字编辑不进撤销栈，否则打字就把栈填满了。
 enableUndo({
   addPdf: '添加文档',
+  // 导入链路已经改走 ensurePdf（查重与建条目要在同一段同步代码里完成）。
+  // 它内部调的是本地 addPdf 函数、不是 module.exports.addPdf，所以外面的包装绕不过去——
+  // 不把 ensurePdf 也列进来，「导入后按 Ctrl+Z」就没有任何反应（撤销点是空的）。
+  ensurePdf: '添加文档',
   trashItem: '移入回收站',
   restoreItem: '从回收站还原',
   deleteItemForever: '永久删除条目',

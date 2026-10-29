@@ -71,7 +71,22 @@ module.exports = `(async () => {
     const tableBtn = $('#nv-toolbar [data-action="table"]');
     md.setSelectionRange(md.value.length, md.value.length);
     if (tableBtn) { tableBtn.click(); await sleep(300); }
-    push('表格按钮插入表格语法', md.value.indexOf('| --- |') >= 0, md.value);
+    // v36：表格按钮不再直接插语法，先打开格子界面（光标不在表格里就从 3×3 起）
+    const tblModal = $('#tbl-modal');
+    push('表格按钮打开格子界面（默认 3×3）', !!tblModal && !tblModal.hidden && tblModal.querySelectorAll('.tbl-cell').length === 9,
+      tblModal ? (tblModal.hidden ? 'hidden' : String(tblModal.querySelectorAll('.tbl-cell').length)) : 'no modal');
+    const tblInfo = $('#tbl-info');
+    push('格子界面写明行列数', !!tblInfo && /3 行 × 3 列/.test(tblInfo.textContent), tblInfo && tblInfo.textContent);
+    const addColBtn = $('#tbl-add-col');
+    if (addColBtn) { addColBtn.click(); await sleep(150); }
+    push('「＋ 列」把表格加宽到 4 列', !!tblInfo && /4 列/.test(tblInfo.textContent) && tblModal.querySelectorAll('.tbl-cell').length === 12,
+      tblInfo && tblInfo.textContent);
+    const delColBtn = $('#tbl-del-col');
+    if (delColBtn) { delColBtn.click(); await sleep(150); }
+    push('「− 列」再退回 3 列', !!tblInfo && /3 列/.test(tblInfo.textContent), tblInfo && tblInfo.textContent);
+    const tblOk = $('#tbl-ok');
+    if (tblOk) { tblOk.click(); await sleep(300); }
+    push('格子界面确认后插入 Markdown 表格', md.value.indexOf('| --- |') >= 0 && /列 1/.test(md.value), md.value);
     const ghBtn = $('#nv-toolbar [data-action="github-card"]');
     md.setSelectionRange(md.value.length, md.value.length);
     if (ghBtn) { ghBtn.click(); await sleep(300); }

@@ -1,6 +1,6 @@
 # 开发、测试与打包
 
-本文面向维护者。用户操作见 [README](../README.md)，数据与异步约定见 [architecture.md](architecture.md)，本轮验证见 [verification-2026-10-26-multi-collection.md](verification-2026-10-26-multi-collection.md)。
+本文面向维护者。用户操作见 [README](../README.md)，数据与异步约定见 [architecture.md](architecture.md)。
 
 ## 环境与启动
 
@@ -17,7 +17,7 @@ PDF.js 的浏览器构建输出到 src/renderer/pdfjs/，该目录受 .gitignore
 
 ## 源码测试
 
-当前有 **96 个 test-*.js 脚本**：92 个用 Node 驱动，3 个直接运行 Electron，1 个验证打包产物。不要将 92 个 Node 驱动脚本全部称为纯 Node 单元测试，其中多数会启动真实 Electron。
+项目提供多组 **test-*.js 回归脚本**：绝大多数用 Node 驱动（其中不少会拉起真实 Electron 做端到端），少数是纯 Node 单元测试（`test-citekey`、`test-advsearch`、`test-recall`、`test-query`、`test-reflow`、`test-similar`、`test-portal`、`test-pdftext`、`test-refimport` 等），另有直接运行 Electron 的与验证打包产物的。不要把「用 Node 跑」当成「纯单元测试」。
 
 项目尚无 npm test 总入口。以下循环在单项失败后继续收集，最终以失败清单判定：
 
@@ -55,13 +55,30 @@ foreach ($name in $direct) {
 | 范围 | 脚本 |
 | --- | --- |
 | 数据、撤销与作者 | test-library、test-undo、test-creators |
+| 导入识别与附件找回 | test-identify-fields、test-doiscan、test-pdf-identify、test-fingerprint |
+| 阅读队列与笔记别名 | test-read-queue、test-library-meta |
+| 综述草稿 | test-review、test-review-ui |
+| 标注读取与备份扫描 | test-r7-anno-guard（读取完成前保护、损坏文件重建、备份隔离） |
+| 保存失败后的文档切换 | test-anno-save-navigation（真实只读文件失败、保留未保存标注、恢复写入后切换） |
 | 保存失败 | test-save-failures、test-reliability-ui、test-n01-note-export-save |
 | 迁移与备份 | test-datadir、test-data-resources、test-resource-roundtrip、test-backup-restore |
 | 搜索与列表 | test-search、test-search-boundaries、test-search-paging、test-large-library |
+| 检索 worker 与增量索引 | test-search-worker（worker / 进程内两条路结果一致、导入后自动补建并广播、查询期间主进程仍响应）、test-search-restart（换数据目录后旧队列不得写进新索引）、test-worker-pack（打包布局：从 app.asar 内起 worker 并建索引） |
+| 回顾（间隔重复） | test-recall（调度序列 / 边界 / 落盘容错 / 写盘失败回滚 / prune / 导入导出，纯 Node）、test-recall-ui（空态 → 纳入 → 模糊与禁用 → 空格显示 → 评分写回 → 汇总 → 备份恢复往返）、test-recall-scan（标注文件读失败时不得清理复习进度） |
+| 条件检索 | test-advsearch（引擎语义 / 布尔与数量 / 批注属性 / 坏条件 / 条件组嵌套与深度上限 / 存储白名单，纯 Node）、test-adv-ui（字段联动、且或切换、条件组增删与嵌套、组内且或、应用与横幅、存为智能收藏集、标注回复树、Word 导出、引用键模板） |
+| 重排阅读 | test-reflow（拼行补空格 / 断词连字符 / 聚行与切栏 / 缩进与列表断段 / 跨页合并，纯 Node）、test-v36-reading-ui（重排层字号栏宽、目录跳页，真实 Electron） |
+| 阅读标尺与命令面板 | test-v36-reading-ui（标尺跟随与高度夹取、不拦选区、开关持久化；命令面板过滤与执行、无文档时按 need 过滤；重排出块与关闭） |
+| 相似文献 | test-similar（分词口径 / 亚线性 tf / 语料 idf / 余弦 / 共享词，纯 Node）、test-v36-reading-ui（详情列表与点击打开） |
+| 跨文档 Portal | test-portal（DOI 与标题词判定、候选过滤、起始页三级回退、跨行拼条，纯 Node）、test-v36-reading-ui（参考栏打开且本文位置不变） |
+| 印章与批注归档 | test-v36-anno-ui（一次点击落章 / 撤销 / 导出位置与中文、归档前先 flush 且中途切文档放弃、sidecar 损坏中止而空标注仍出包、归档 zip 四个成员、重排跨文档切换不串页、表格可视化编辑） |
+| 中文标注字体子集 | test-pdftext（候选字体 / 子集体积 / 字形覆盖 / 无字体降级，纯 Node）、test-export-highlight（按 cjk 分流断言）、test-reliability-ui |
+| 参考文献表批量入库 | test-refimport（切条 / 字段抽取 / 标题四级识别 / 查重 / 置信度 / 上限，纯 Node）、test-refimport-ui（预览 → 取消一条 → 导入 → 就地变「已有」） |
+| 引用键模板 | test-citekey（与旧算法逐字符对拍、混合作者守第一作者语义、字段与修饰符、兜底与上限、重名后缀与顺序无关、设置项规范化，纯 Node） |
 | 原生批注归属 | test-native-annos、test-r01-anno-race |
 | 笔记保真与链接 | test-note-templates-export、test-review-r02-r05、test-n02-n04-note-content、test-m01-legacy-md-note |
 | 会话与历史 | test-session、test-session-restore、test-tabs、test-nav-history |
-| 旋转与分屏 | test-reader-rotate-split（含会话二次启动恢复） |
+| 旋转与分屏 | test-reader-rotate-split（含会话二次启动恢复）、test-ref-doc（跨文档对照） |
+| 加载代际与竞态 | test-main-race（主文档加载撞旧对照销毁）、test-r01-anno-race（标注跨文档串写） |
 | 朗读 | test-reader-speech（跨页 / 句级高亮 / 暂停恢复 / 跨启动位置记忆） |
 | 收藏集并集 | test-library-multi-collection（Ctrl 多选 / 去重 / 取消 / 删除收窄） |
 | 笔记公式 | test-math（占位标记 / KaTeX 渲染 / 无 katex 降级 / 导出携带字体） |
@@ -109,7 +126,7 @@ scripts/ 中的 probe 脚本是正式测试辅助文件，不因文件名含 pro
 
 ## 打包与产物验证
 
-打包会生成 build/；本轮文档验收没有自动重新打包。现有 exe 不能作为当前提交的验收对象。
+打包会生成 build/。验证发布产物时，必须确认它由当前待发布源码构建。
 
 ```powershell
 npm run copy-pdfjs
@@ -121,7 +138,7 @@ npx electron-builder --win dir
 ```powershell
 npx electron-builder --win portable --prepackaged "build/win-unpacked"
 npx electron-builder --win nsis --prepackaged "build/win-unpacked"
-node scripts/test-packaged.js "build/Trove-1.4.0-portable.exe"
+node scripts/test-packaged.js "build/Trove-1.5.0-portable.exe"
 ```
 
 不要对最终 portable 或安装包运行 rcedit：它们包含自解压附加数据，改 PE 资源可能破坏整个包，即使工具退出码为 0。
@@ -129,6 +146,18 @@ node scripts/test-packaged.js "build/Trove-1.4.0-portable.exe"
 build.files 必须携带主进程需要的 pdfjs-dist build、cmaps、standard_fonts，以及渲染器 PDF.js 构建。--prepackaged 必须明确传目录。图标源与生成脚本在 assets/、scripts/make-icon.js、scripts/make-ico.js。
 
 发布前分别检查源码回归、当前提交构建、打包冒烟、隔离安装/启动/卸载及快捷方式。记录安装包字节数、构建提交与日期；卸载默认保留用户数据。签名、版本升级、发布、提交和推送按用户明确要求执行，测试通过本身不意味着授权发布。
+
+## 文档维护
+
+文档索引见 [docs/README.md](README.md)。功能与使用方法更新根 README，架构和开发约定更新对应长期文档，版本变化汇总到 CHANGELOG。README 保持面向使用者，不收录逐项 bug 修复过程。不要新增逐轮审核、验收、修复计划或开发流水记录；测试场景保留在正式回归脚本中。
+
+移动、改名或删文档后跑一遍链接检查（扫全仓 md 的相对链接，外链与纯锚点跳过，围栏代码块与行内代码里的 `[x](y)` 视为举例不算）：
+
+```bash
+node scripts/check-doc-links.js
+```
+
+退出码 0 表示 0 死链；有死链时逐条打印 `文件:行号 -> 目标` 并以 1 退出。这不是 `test-*.js`，不会进上面的全量循环。
 
 ## 修改约定
 
@@ -156,4 +185,4 @@ build.files 必须携带主进程需要的 pdfjs-dist build、cmaps、standard_f
 | 导出来源链接消失 | HTML/Markdown 转换是否保留 data-md-link |
 | 恢复后台页码变成 1 | 加载完成时序、标签归属及 syncActiveTab |
 
-正常保留 node_modules/、build/、src/renderer/pdfjs/，以及历史评审证据。assets/sample-annotated.pdf 是 test-export.js 的可再生输出；确认无用途后可删除。清理仅针对明确归属的临时数据，不删除正式回归脚本、用户文档或未知运行时目录。
+正常保留 node_modules/、build/、src/renderer/pdfjs/。assets/sample-annotated.pdf 是 test-export.js 的可再生输出；确认无用途后可删除。清理仅针对明确归属的临时数据，不删除正式回归脚本、用户文档或未知运行时目录。

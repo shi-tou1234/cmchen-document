@@ -243,6 +243,28 @@
     return items.map((it) => clones.get(it) || it);
   }
 
+  // 给外部（综述草稿）用：返回 Map<item.key, 消歧后的完整年份>（如 '2024a' / '2024a-10'）。
+  // 返回完整年份而不是后缀：年份字段可能带月份 / 日期，后缀是插在四位年之后的，
+  // 用「截掉原长度」推算后缀会截错（2024-10 → 2024a-10，末尾是 0 不是 a）。
+  function disambiguatedYears(items, style, opts) {
+    const o = opts || {};
+    const s = normalizeStyle(style);
+    if (isNumeric(s)) return new Map();
+    const order = (o.order === 'entry' || o.order === 'author') ? o.order : defaultOrder(s);
+    const auto = o.order !== 'entry' && o.order !== 'author';
+    let list = uniqueByKey(Array.isArray(items) ? items : [])
+      .filter((it) => str(it.title) && !(Number(it.deletedAt) > 0));
+    list = sortItems(list, s, order, auto);
+    const suffixed = withYearSuffixes(list, s);
+    const map = new Map();
+    list.forEach((it, i) => {
+      const orig = str(it.year);
+      const next = str(suffixed[i] && suffixed[i].year);
+      if (orig && next && next !== orig) map.set(it.key, next);
+    });
+    return map;
+  }
+
   /*
    * 生成参考文献表。
    * opts:
@@ -324,7 +346,7 @@
   }
 
   return {
-    build, sortItems, isNumeric, defaultOrder, toHtml, wrapHtmlDoc, toRtf, rtfEscape,
+    build, sortItems, isNumeric, defaultOrder, toHtml, wrapHtmlDoc, toRtf, rtfEscape, disambiguatedYears,
     STYLES: Cite.STYLES,
   };
 });

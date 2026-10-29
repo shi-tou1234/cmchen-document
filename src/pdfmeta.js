@@ -33,22 +33,27 @@ function withTimeout(promise, ms) {
   });
 }
 
+// 打开一份 PDF（主进程里没有 DOM，pdf.js 走 fake worker）。调用方负责 destroy。
+async function openDoc(filePath) {
+  const p = lib();
+  const data = new Uint8Array(fs.readFileSync(filePath));
+  const task = p.getDocument({
+    data,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    disableFontFace: true,
+    useSystemFonts: false,
+    verbosity: 0,
+  });
+  return withTimeout(task.promise, 8000);
+}
+
 // 读一份 PDF 的元数据；任何异常都吞掉，返回 {}
 async function readMeta(filePath) {
   let doc = null;
   try {
     if (!filePath || !fs.existsSync(filePath)) return {};
-    const p = lib();
-    const data = new Uint8Array(fs.readFileSync(filePath));
-    const task = p.getDocument({
-      data,
-      useWorkerFetch: false,
-      isEvalSupported: false,
-      disableFontFace: true,
-      useSystemFonts: false,
-      verbosity: 0,
-    });
-    doc = await withTimeout(task.promise, 8000);
+    doc = await openDoc(filePath);
     if (!doc) return {};
     const meta = await withTimeout(doc.getMetadata(), 4000);
     const info = (meta && meta.info) || {};
@@ -61,6 +66,44 @@ async function readMeta(filePath) {
     return out;
   } catch (_) {
     return {};
+  } finally {
+    try { if (doc) await doc.destroy(); } catch (_) {}
+  }
+}
+
+/*
+ * 读前几页的纯文本，用来找 DOI / arXiv 编号。
+ * 只取文本项、不渲染，成本远低于整篇抽取；默认 2 页、最多 8000 字符，
+ * 足够覆盖标题页与页脚的 DOI，又不会在几百页的书中浪费时间。
+ * 任何异常都吞掉，返回空串（扫描件、加密文件、坏文件都走这条路）。
+ */
+async function readFirstPageText(filePath, maxPages, maxChars) {
+  let doc = null;
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return '';
+    doc = await openDoc(filePath);
+    if (!doc) return '';
+    const pages = Math.max(1, Math.min(5, Math.floor(maxPages || 2)));
+    const cap = Math.max(500, Math.min(50000, Math.floor(maxChars || 8000)));
+    let out = '';
+    for (let i = 1; i <= Math.min(pages, doc.numPages); i++) {
+      if (out.length >= cap) break;
+      const page = await withTimeout(doc.getPage(i), 4000);
+      if (!page) continue;
+      const content = await withTimeout(page.getTextContent(), 5000);
+      if (!content || !Array.isArray(content.items)) continue;
+      for (const item of content.items) {
+        const t = item && item.str ? String(item.str) : '';
+        if (!t) continue;
+        out += t;
+        if (item.hasEOL) out += '\n';
+        if (out.length >= cap) break;
+      }
+      out += '\n';
+    }
+    return out.slice(0, cap);
+  } catch (_) {
+    return '';
   } finally {
     try { if (doc) await doc.destroy(); } catch (_) {}
   }
@@ -86,4 +129,4 @@ function usableAuthor(a) {
   return s;
 }
 
-module.exports = { readMeta, usableTitle, usableAuthor, basename: path.basename };
+module.exports = { readMeta, readFirstPageText, usableTitle, usableAuthor, basename: path.basename };

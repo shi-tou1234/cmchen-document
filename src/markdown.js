@@ -410,6 +410,29 @@
     s = s.replace(/<h[56][^>]*>([\s\S]*?)<\/h[56]>/gi, '\n\n##### $1\n\n');
     s = s.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi,
       (_, c) => '\n\n' + stripTags(c).split('\n').map((l) => '> ' + l.trim()).filter((l) => l.trim() !== '>').join('\n') + '\n\n');
+    // 表格要整块转成 Markdown 表格，否则下面的 </tr> → 换行会把整张表拍成几行文字
+    // （Word / HTML / Markdown 三种导出都吃这一份 fromHtml，所以这里一改三处都对）
+    s = s.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_, body) => {
+      const rows = [];
+      const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      let rm;
+      while ((rm = rowRe.exec(body))) {
+        const cells = [];
+        const cellRe = /<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi;
+        let cm;
+        while ((cm = cellRe.exec(rm[1]))) {
+          cells.push(stripTags(cm[2]).replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|'));
+        }
+        if (cells.length) rows.push(cells);
+      }
+      if (!rows.length) return '\n\n';
+      const width = rows.reduce((n, r) => Math.max(n, r.length), 0);
+      const pad = (r) => { const c = r.slice(); while (c.length < width) c.push(''); return c; };
+      const head = pad(rows[0]);
+      const lines = ['| ' + head.join(' | ') + ' |', '| ' + head.map(() => '---').join(' | ') + ' |'];
+      for (const r of rows.slice(1)) lines.push('| ' + pad(r).join(' | ') + ' |');
+      return '\n\n' + lines.join('\n') + '\n\n';
+    });
     s = s.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
     s = s.replace(/<\/(p|div|h[1-6]|ul|ol|li|blockquote|pre|table|tr)>/gi, '\n');
     s = s.replace(/<br\s*\/?>/gi, '\n');

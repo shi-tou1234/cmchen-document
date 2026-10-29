@@ -84,6 +84,9 @@ function hexToRgb(hex) {
     }
   }
 
+  if (probeRes && probeRes.cjk) {
+    ok('导出结果带上实际用的字体名（便于排查缺字）', typeof probeRes.cjkFont === 'string' && probeRes.cjkFont.length > 0, probeRes.cjkFont);
+  }
   console.log('[export-highlight] ' + (fail ? 'FAIL (' + fail + '/' + (pass + fail) + ')' : 'PASS (' + pass + ')'));
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
   process.exit(fail ? 2 : 0);

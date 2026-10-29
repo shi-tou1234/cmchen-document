@@ -296,6 +296,9 @@ function clear() {
 
 module.exports = {
   init, dirPath, fileFor, indexFile, indexOne, indexAll, search, stats,
-  removeForPath, clear, isFresh,
+  removeForPath, clear, isFresh, readIndex, textOfEntry: (p) => {
+    const e = readIndex(p);
+    return e && Array.isArray(e.pages) ? e.pages.map((x) => String((x && x.text) || '')).join('\n') : '';
+  },
   _extractPages: extractPages,
 };

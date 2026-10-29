@@ -485,9 +485,39 @@
 
   // ---------- 引用键（citekey） ----------
   // 目标：同一篇条目每次都得到同一个键，方便在 Markdown / Obsidian / Pandoc 里写 [@key]。
-  // 规则接近 Better BibTeX 的默认值：第一作者姓 + 年份 + 标题首个实词，全小写 ASCII。
-  // 中文作者没有拼音库时无法可靠转写，退化为 item+条目 key 前缀（仍然确定性、可读性差一点）。
+  // v35：从「固定规则」改成可配置模板（JabRef / Better BibTeX 的做法）。
+  // 默认模板与旧算法逐字符等价，所以老用户已经贴进文稿的键不会变。
+  //
+  // 模板语法：[字段] 或 [字段:修饰符:修饰符]，其余字符按字面量拼进键里。
+  //   字段（不区分大小写）
+  //     auth            第一作者的姓
+  //     authEtAl        第一作者姓 + EtAl（多于一位作者时）
+  //     authIni         全部作者的姓首字母（Vaswani, Shazeer → VS）
+  //     authN           前 N 位作者的姓（N=1..9，如 [auth3]）
+  //     authors         全部作者的姓
+  //     authorsN        前 N 位
+  //     year            四位年份（缺失时为 nd）
+  //     shortyear       年份后两位
+  //     title           标题全部实词，驼峰拼接
+  //     shorttitle      前 3 个实词
+  //     veryshorttitle  第 1 个实词
+  //     fulltitle       标题原文（只去标点）
+  //     journal         期刊 / 会议名
+  //     journalabbr     期刊缩写（没有缩写字段时退回全名）
+  //     volume / pages / firstpage / lastpage / doi / itemtype / key
+  //   修饰符
+  //     lower / upper / capitalize  大小写
+  //     abbr                        每个词取首字母（期刊类优先用缩写字段）
+  //     数字                        截断到 N 个字符（如 [auth:3]）
+  // 未识别的字段展开为空；整个模板展开为空时退回 item+条目 key 前缀，
+  // 保证键永远非空、且同一篇每次一致。
+  //
+  // 中文作者没有拼音库时无法可靠转写：第一作者是 CJK 时 [auth] 展开成 item+条目 key 前缀
+  // （与旧 citekey() 一致，绝不改用第二作者）；后面位置的作者转写不出就在该位留空，
+  // 不让后来者往前挤——「谁排第一谁就是第一作者」是兼容性的一部分，不是排版细节。
   const TITLE_STOP = new Set(['the', 'a', 'an', 'on', 'of', 'for', 'and', 'to', 'in', 'with', 'from', 'by', 'at', 'as']);
+  const DEFAULT_KEY_TEMPLATE = '[auth:lower][year][veryshorttitle:lower]';
+  const KEY_TOKEN = /\[([^\]]*)\]/g;
 
   function slug(s, max) {
     return String(s == null ? '' : s)
@@ -498,30 +528,192 @@
       .slice(0, max || 28);
   }
 
-  function titleWord(title) {
-    const words = String(title || '').match(/[A-Za-z][A-Za-z0-9]{2,}/g) || [];
-    for (const w of words) {
-      if (!TITLE_STOP.has(w.toLowerCase())) return slug(w, 12);
-    }
-    return '';
+  // 键里允许出现的字符：字母数字 + _ : . + -（Pandoc / BibTeX 都认这套）
+  function keyClean(s) {
+    return String(s == null ? '' : s)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9_:.+-]+/g, '')
+      .slice(0, 64);
   }
 
-  function citekey(it) {
-    if (!it) return '';
+  // 作者字段的清洗比通用 keyClean 更严：只留字母数字。
+  // 旧算法用 slug() 生成作者段（"Smith-Jones" → "smithjones"），如果这里保留连字符，
+  // 默认模板就会算出 "smith-jones2024study"，与用户文稿里已有的 [@smithjones2024study] 对不上。
+  // 大小写不在这里动：那是 :lower / :upper 的活。
+  function authClean(s) {
+    return String(s == null ? '' : s)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9]+/g, '')
+      .slice(0, 28);
+  }
+
+  // 作者系字段：auth / authN / authors / authorsN / authEtAl / authIni
+  const AUTH_FIELD = /^(auth|authors|authetal|authini|authors\d|auth\d)$/;
+  // veryshorttitle 的旧口径是「首个实词的前 12 个字符」（slug(w, 12)）
+  const VERY_SHORT_TITLE_MAX = 12;
+
+  // 标题取词：默认按「至少 3 个字符 + 跳过虚词」取实词，与旧算法取词口径一致，
+  // 这样默认模板产出的键不会变；[title] 要完整标题，所以给它 minLen=1 且不跳虚词。
+  function titleWords(title, opts) {
+    const o = opts || {};
+    const min = o.minLen == null ? 3 : o.minLen;
+    const words = String(title || '').match(/[A-Za-z][A-Za-z0-9]*/g) || [];
+    const out = [];
+    for (const w of words) {
+      if (w.length < min) continue;
+      if (o.skipStop !== false && TITLE_STOP.has(w.toLowerCase())) continue;
+      out.push(w);
+      if (o.limit && out.length >= o.limit) break;
+    }
+    return out;
+  }
+
+  function titleWord(title) {
+    const w = titleWords(title, { limit: 1 })[0];
+    return w ? slug(w, 12) : '';
+  }
+
+  function yearOf(it) {
+    return (String((it && it.year) || '').match(/\d{4}/) || [''])[0] || '';
+  }
+
+  function lastNameOf(c) {
+    if (!c) return '';
+    const last = str(c.lastName) || str(c.firstName);
+    // CJK 姓不做转写（没有拼音库），留给兜底，别产出乱码键
+    if (!last || CJK.test(last)) return '';
+    return last;
+  }
+
+  const ITEMTYPE_KEY = {
+    journalArticle: 'article', magazineArticle: 'article', newspaperArticle: 'article',
+    book: 'book', bookSection: 'incollection', conferencePaper: 'inproceedings',
+    thesis: 'phdthesis', report: 'techreport', manuscript: 'unpublished', webpage: 'misc',
+  };
+
+  // 单个字段展开。返回**保留词间空格**的原始值（修饰符要靠空格认词边界，
+  // 例如 :abbr 取每词首字母）；最终由 expandKeyTemplate 统一 keyClean 去掉分隔符。
+  function keyField(name, it) {
+    const low = String(name || '').toLowerCase();
     const authors = authorsOf(it);
-    const first = authors[0] || null;
-    // 结构化之后直接取姓，不用再从 "Brown, John" 里猜
-    let who = slug(first ? (first.lastName || first.firstName) : '');
-    const year = (String(it.year || '').match(/\d{4}/) || [''])[0] || 'nd';
-    if (!who) who = 'item' + slug(it.key || '', 4);
-    const base = (who + year + titleWord(it.title)).slice(0, 40);
-    return base || ('item' + year);
+    // 旧 citekey() 的语义是「**只看第一作者**」：姓能转写就用，不能转写（中文 / 空）
+    // 就退回 `item + 条目 key 前缀`，**不会改用第二作者**。
+    // 所以这里不能 `map(lastNameOf).filter(Boolean)` 之后再取 [0]——那等于把中文第一作者
+    // 从队伍里删掉、让第二作者顶上来，于是「中文第一作者 + 英文合作者」的条目在升级后
+    // 换了键（R5-04）。正确做法：位置数组保留空位，只把第 1 位换成兜底写法。
+    const fallback = 'item' + slug(it && it.key, 4);
+    const who = authors.map(lastNameOf);
+    if (!who.length) who.push(fallback);
+    else if (!who[0]) who[0] = fallback;
+    const named = who.filter(Boolean);   // 能转写的作者（含第一作者位的兜底项）
+    const m = low.match(/^(auth|authors)(\d)$/);
+    if (m) {
+      const n = Math.max(1, Math.min(9, Number(m[2]) || 1));
+      // 前 n 个作者，按位置取；某位不可转写就跳过，不让后面的人往前挤
+      return who.slice(0, n).filter(Boolean).join(' ');
+    }
+    switch (low) {
+      case 'auth': return who[0];
+      case 'authetal': return who.length > 1 ? (who[0] + ' EtAl') : who[0];
+      case 'authini': return named.map((x) => x.charAt(0)).join('').toUpperCase();
+      case 'authors': return named.join(' ');
+      case 'year': return yearOf(it) || 'nd';
+      case 'shortyear': {
+        const y = yearOf(it);
+        return y ? y.slice(2) : 'nd';
+      }
+      case 'title': return titleWords(it && it.title, { minLen: 1, skipStop: false }).join(' ');
+      case 'shorttitle': return titleWords(it && it.title, { limit: 3 }).join(' ');
+      case 'veryshorttitle': return titleWords(it && it.title, { limit: 1 }).join(' ');
+      case 'fulltitle': return str(it && it.title);
+      case 'journal': return str(it && (it.publication || it.journal || it.bookTitle));
+      case 'journalabbr': return str(it && (it.journalAbbreviation || it.publication || it.journal));
+      case 'volume': return str(it && it.volume);
+      case 'issue': return str(it && it.issue);
+      case 'pages': return str(it && it.pages);
+      case 'firstpage': return String((it && it.pages) || '').split(/[-,–]/)[0];
+      case 'lastpage': {
+        const parts = String((it && it.pages) || '').split(/[-,–]/);
+        return parts.length > 1 ? parts[parts.length - 1] : '';
+      }
+      case 'doi': return str(it && it.doi);
+      case 'itemtype': {
+        const t = str(it && it.itemType);
+        return ITEMTYPE_KEY[t] || t;
+      }
+      case 'key': return str(it && it.key).slice(0, 8);
+      default: return '';
+    }
+  }
+
+  function initialsOf(val) {
+    // abbr：把每个词的首字母拼起来（"Attention All You" → "AAY"）
+    return String(val).split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w.charAt(0)).join('').toUpperCase();
+  }
+
+  // 修饰符：大小写 / 缩写 / 截断。未知修饰符忽略（模板可以写注释般的修饰而不炸）。
+  function keyModifier(val, mod, field) {
+    const m = String(mod || '').trim().toLowerCase();
+    if (!m) return val;
+    if (m === 'lower') return val.toLowerCase();
+    if (m === 'upper') return val.toUpperCase();
+    if (m === 'capitalize' || m === 'cap') return val.charAt(0).toUpperCase() + val.slice(1).toLowerCase();
+    if (m === 'abbr') return initialsOf(val);
+    if (/^\d+$/.test(m)) return val.slice(0, Number(m));
+    void field;
+    return val;
+  }
+
+  // 模板规范化：空 / 没有 [ 的模板视为无效，退回默认值（避免把整串字面量当键）。
+  function normalizeKeyTemplate(tpl) {
+    const t = String(tpl == null ? '' : tpl).trim();
+    if (!t || t.length > 200 || !/\[[^\]]*\]/.test(t)) return DEFAULT_KEY_TEMPLATE;
+    return t;
+  }
+
+  function expandKeyTemplate(it, template) {
+    if (!it) return '';
+    const tpl = normalizeKeyTemplate(template);
+    let out = '';
+    let last = 0;
+    let m;
+    KEY_TOKEN.lastIndex = 0;
+    while ((m = KEY_TOKEN.exec(tpl))) {
+      out += keyClean(tpl.slice(last, m.index));
+      last = m.index + m[0].length;
+      const parts = String(m[1]).split(':').map((x) => x.trim()).filter((x) => x !== '');
+      if (!parts.length) continue;
+      const field = parts[0].toLowerCase();
+      let val = keyField(parts[0], it);
+      for (let i = 1; i < parts.length; i++) val = keyModifier(val, parts[i], parts[0]);
+      // 字段各按旧算法的清洗与截断口径收尾，默认模板才能与改造前逐字符一致：
+      // 作者段只留字母数字（slug），veryshorttitle 截 12 字符（旧 titleWord 的 slug(w, 12)）。
+      if (AUTH_FIELD.test(field)) out += authClean(val);
+      else if (field === 'veryshorttitle') out += keyClean(val).slice(0, VERY_SHORT_TITLE_MAX);
+      else out += keyClean(val);
+    }
+    out += keyClean(tpl.slice(last));
+    return out;
+  }
+
+  function citekey(it, opts) {
+    if (!it) return '';
+    const o = typeof opts === 'string' ? { template: opts } : (opts || {});
+    const year = yearOf(it) || 'nd';
+    // 40 字符上限沿用旧实现：老键不因为这次改造被截成别的样子
+    const base = expandKeyTemplate(it, o.template).slice(0, 40);
+    // 模板里的字段全空（比如写了个不存在的字段）：退到确定性的可读兜底。
+    // 注意：只有「完全为空」才兜底——只写 [year] 得到 '2017' 是合法的，不该被改写。
+    if (base) return base;
+    return ('item' + slug(it.key || '', 4) + year).slice(0, 40) || ('item' + year);
   }
 
   // 一批条目统一分配引用键：先按条目 key 排序再消重，结果与列表顺序无关。
   // 返回 Map<item.key, citekey>。
-  function citekeys(items) {
-    const rows = (Array.isArray(items) ? items : []).map((it) => ({ it, base: citekey(it) }))
+  function citekeys(items, opts) {
+    const rows = (Array.isArray(items) ? items : []).map((it) => ({ it, base: citekey(it, opts) }))
       .sort((a, b) => String(a.it && a.it.key).localeCompare(String(b.it && b.it.key)));
     const used = new Set();
     const nextSuffix = new Map();
@@ -553,7 +745,9 @@
     const style = str(o.style) || 'gbt7714';
     const locator = str(o.locator).replace(/^\s*,\s*/, '');
     const list = authorsOf(it).filter((c) => c.creatorType !== 'editor');
-    const year = str(it && it.year) || 'n.d.';
+    // year：调用方可以传「消歧后的完整年份」（如 2024a / 2024a-10），
+    // 与参考文献表共用同一套结果；不传就用条目自己的年份。
+    const year = str(o.year) || str(it && it.year) || 'n.d.';
     const num = Math.max(1, Math.floor(+o.num || 1));
     if (isNumericStyle(style) || (Csl && Csl.isCslStyle(style) && style.numeric)) {
       // 编号制：定位符进方括号 —— [12, p. 5]

@@ -19,6 +19,9 @@ const DEFAULTS = {
   viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
   splitView: false,      // v34：打开 PDF 时默认显示只读分屏参考视图
   fetchEmail: '',        // v9：抓 PDF 全文时给 Unpaywall 的联系邮箱（留空则跳过 Unpaywall）
+  citeKeyTemplate: '',   // v35：引用键模板；空 = 用 Cite 的默认模板（与旧算法等价）
+  ruler: false,          // v36：阅读标尺（跟随鼠标的一条半透明横带，防串行）
+  portal: true,          // v36：引用跟随（点 [12] 时把库里对应的那篇开到对开栏）
 };
 
 const SORTS = new Set(['added', 'modified', 'title', 'year']);
@@ -55,6 +58,13 @@ function sanitize(raw) {
   if (typeof src.invertPages === 'boolean') out.invertPages = src.invertPages;
   if (src.viewMode === 'page' || src.viewMode === 'scroll' || src.viewMode === 'spread') out.viewMode = src.viewMode;
   if (typeof src.splitView === 'boolean') out.splitView = src.splitView;
+  if (typeof src.ruler === 'boolean') out.ruler = src.ruler;
+  if (typeof src.portal === 'boolean') out.portal = src.portal;
+  if (typeof src.citeKeyTemplate === 'string') {
+    // 模板最多 200 字；含 [字段] 才有意义，否则按「用默认」处理（空串）
+    const t = src.citeKeyTemplate.trim();
+    out.citeKeyTemplate = (/\[[^\]]*\]/.test(t) && t.length <= 200) ? t : '';
+  }
   if (typeof src.fetchEmail === 'string') {
     const e = src.fetchEmail.trim();
     // 只要像邮箱就行，别把奇怪的东西存进去
