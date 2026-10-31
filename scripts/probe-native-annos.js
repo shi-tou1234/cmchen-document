@@ -70,8 +70,14 @@ module.exports = `(async () => {
   const outShapes = (payload.pages || []).flatMap((p) => p.shapes || []);
   const outUl = outShapes.find((s) => s.kind === 'underline');
   push('导出 payload 带 kind', !!outUl, outShapes.filter((s) => s.kind).length);
+  // v1.6：给「扁平化后可恢复」的那份原始数据
+  push('导出 payload 带可恢复数据', !!(payload.recover && payload.recover.pages && payload.recover.pages.length),
+    payload.recover && payload.recover.pages && payload.recover.pages.length);
+  const recShapes = ((payload.recover || {}).pages || []).flatMap((p) => p.shapes || []);
+  push('可恢复数据保留稳定 id', recShapes.every((s) => !!s.id), recShapes.length);
   payload.outPath = OUT;
   const res = await pdfBridge.exportPdf(payload);
+  push('导出结果标记了「已内嵌批注数据」', !!(res && res.embedded), JSON.stringify(res && { ok: res.ok, embedded: res.embedded }));
 
   document.querySelector('#btn-sidebar').click();
   await sleep(250);

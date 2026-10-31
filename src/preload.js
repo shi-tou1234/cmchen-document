@@ -43,11 +43,18 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   // 标注条目化 —— 汇总所有文档的标注 + 给标注打标签
   listAnnotations: () => ipcRenderer.invoke('anno-list'),
   // 回顾（间隔重复）：卡片状态在 userData/recall.json，标注正文仍走 listAnnotations
+  // v1.6d：关窗握手——主进程拦下 close 后通知渲染层先把没落盘的改动存完
+  onWillClose: (cb) => {
+    ipcRenderer.on('app-will-close', () => { try { cb(); } catch (_) {} });
+  },
+  closeReady: (info) => ipcRenderer.send('app-close-ready', info || {}),
   recall: {
     state: (limit) => ipcRenderer.invoke('recall-state', { limit }),
     add: (ids) => ipcRenderer.invoke('recall-add', { ids }),
     rate: (id, rating) => ipcRenderer.invoke('recall-rate', { id, rating }),
     remove: (id) => ipcRenderer.invoke('recall-remove', { id }),
+    outline: () => ipcRenderer.invoke('recall-outline'),
+    setDepth: (id, depth) => ipcRenderer.invoke('recall-depth', { id, depth }),
   },
   feedFetch: (url) => ipcRenderer.invoke('feed-fetch', { url }),
   feedAdd: (url) => ipcRenderer.invoke('feed-add', { url }),
@@ -57,6 +64,9 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   similarDocs: (info) => ipcRenderer.invoke('similar-docs', info),
   // 跨文档 Portal：参考文献条目 → 库里那一篇 + 起始页
   portalTarget: (info) => ipcRenderer.invoke('portal-target', info),
+  // Overview：机器没把握时把候选列出来，由用户挑；portal-pick 是挑完之后补起始页
+  portalCandidates: (info) => ipcRenderer.invoke('portal-candidates', info),
+  portalPick: (info) => ipcRenderer.invoke('portal-pick', info),
   // 参考文献表批量入库：先 dryRun 预览（不联网），再按勾选导入
   importReferences: (info) => ipcRenderer.invoke('import-references', info),
   onRefImportProgress: (fn) => {
@@ -191,6 +201,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     fetchMetadata: (identifier) => ipcRenderer.invoke('lib-fetch-metadata', { identifier }),
     // v9：抓 PDF 全文
     fetchPdf: (key, url, doi) => ipcRenderer.invoke('lib-fetch-pdf', { key, url, doi }),
+    // v1.6：把题录写进 PDF 副本（默认另存，不动原文件）
+    writePdfMeta: (key, outPath) => ipcRenderer.invoke('lib-write-pdf-meta', { key, outPath }),
     // v31：批量抓取 + 进度订阅 + 网页快照
     fetchPdfBatch: (keys, opts) => ipcRenderer.invoke('lib-fetch-pdf-batch',
       Object.assign({ keys: Array.isArray(keys) ? keys : [] }, opts || {})),
@@ -206,8 +218,8 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     // 无参调用表示“弹系统文件对话框”，由主进程判断。
     importRefs: (text, name) => ipcRenderer.invoke('lib-import-refs',
       (text && typeof text === 'object') ? text : { text, name }),
-    exportRefs: (outPath) => ipcRenderer.invoke('lib-export-refs',
-      (outPath && typeof outPath === 'object') ? outPath : { outPath }),
+    exportRefs: (outPath, format) => ipcRenderer.invoke('lib-export-refs',
+      (outPath && typeof outPath === 'object') ? outPath : { outPath, format }),
     // v32：CSL 样式（<数据目录>/styles/*.csl）
     cslStyles: () => ipcRenderer.invoke('csl-styles'),
     cslImport: () => ipcRenderer.invoke('csl-import'),

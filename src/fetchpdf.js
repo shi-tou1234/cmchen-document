@@ -1,12 +1,12 @@
 'use strict';
 /*
- * 抓取 PDF 全文（v9）。报告里差距最大的一项：之前只有 DOI / arXiv 的元数据，
- * 拿不到正文。这里不加依赖，就用 Node 的 http/https 做三件事：
+ * 抓取 PDF 全文（v9；v1.6 补多源聚合与机构代理）。不加依赖，就用 Node 的 http/https：
  *
- *   1. arXiv  → https://arxiv.org/pdf/<id>（最稳，无需任何配置）
- *   2. DOI    → Unpaywall 查开放获取链接（需要设置里填一个联系邮箱，
- *                Unpaywall 的礼貌要求；没填就跳过这一步）
- *   3. 直接 URL / doi.org 兜底 → 下载后按魔数校验，不是真 PDF 就报错
+ *   1. arXiv   → https://arxiv.org/pdf/<id>（最稳，无需任何配置）
+ *   2. 开放获取 → Unpaywall（需联系邮箱）/ OpenAlex / Semantic Scholar / Europe PMC
+ *                四路并行查，谁先给出 PDF 直链就用谁的
+ *   3. DOI / 直链 → doi.org 或条目自己的 url；配了机构代理时再试代理版
+ *   4. OpenURL → 配了链接解析器（SFX / Alma / 360Link）时作为最后一站
  *
  * 安全与稳健：只走 http/https；重定向最多 5 次；超时 40s；最大 80MB；
  * 先写 .part 再改名，中途失败不留半截文件；校验前 5 个字节必须是 %PDF-。
@@ -29,7 +29,63 @@ const ENDPOINTS = {
   arxivPdf: (id) => 'https://arxiv.org/pdf/' + String(id || '').replace(/^\/+/, ''),
   unpaywall: (doi, email) => 'https://api.unpaywall.org/v2/' + encodeURIComponent(doi) + '?email=' + encodeURIComponent(email),
   doiResolver: (doi) => 'https://doi.org/' + String(doi || ''),
+  openalex: (doi) => 'https://api.openalex.org/works/doi:' + encodeURIComponent(doi),
+  semanticscholar: (doi) => 'https://api.semanticscholar.org/graph/v1/paper/DOI:'
+    + encodeURIComponent(doi) + '?fields=openAccessPdf,title,externalIds',
+  europepmc: (doi) => 'https://www.ebi.ac.uk/europepmc/webservices/rest/search?query='
+    + encodeURIComponent('DOI:"' + doi + '"') + '&format=json&resultType=core',
 };
+
+/*
+ * 机构代理（EZproxy 一类）。只支持两种真实存在的写法，其余当没配置：
+ *   1) 前缀式：https://www-proxy.univ.edu/login?url=   → 前缀 + encodeURIComponent(目标)
+ *   2) 域名式：doi-org.proxy.univ.edu                  → doi.org/10.x 变成 doi-org.proxy.univ.edu/10.x
+ * 域名式把主机名里的 . 换成 -，这是 EZproxy 的既定规则；不要「聪明」地保留点号，
+ * 那样拼出来的域名根本不存在。
+ */
+function applyProxy(url, prefix) {
+  const target = String(url || '');
+  const p = String(prefix || '').trim();
+  if (!p || !/^https?:\/\//i.test(target)) return '';
+  let u;
+  try { u = new URL(target); } catch (_) { return ''; }
+  if (/^https?:\/\//i.test(p)) {
+    if (/[?&](url|qurl)=$/i.test(p)) return p + encodeURIComponent(target);
+    return p + (p.indexOf('?') >= 0 ? '&' : '?') + 'url=' + encodeURIComponent(target);
+  }
+  const suffix = p.replace(/^\.+/, '');
+  if (!/^[a-z0-9.-]+$/i.test(suffix)) return '';
+  const host = u.host.replace(/:/g, '-').replace(/\./g, '-');
+  return u.protocol + '//' + host + '.' + suffix + u.pathname + u.search + u.hash;
+}
+
+// OpenURL 0.1 的 ContextObject：机构链接解析器（SFX / Alma / 360Link）靠它找到全文。
+// 拼不全没关系，缺的字段不写；写错的字段会让解析器返回空结果，所以只放有把握的几个。
+function openUrlFor(base, info) {
+  const b = String(base || '').trim();
+  if (!/^https?:\/\//i.test(b)) return '';
+  const i = info || {};
+  const kv = [
+    ['ctx_ver', 'Z39.88-2004'],
+    ['rfr_id', 'info:sid/trove'],
+    ['rft_val_fmt', 'info:ofi/fmt:kev:mtx:journal'],
+  ];
+  const add = (k, v) => { const s = String(v == null ? '' : v).trim(); if (s) kv.push([k, s]); };
+  add('rft.genre', 'article');
+  add('rft.atitle', i.title);
+  add('rft.jtitle', i.publication);
+  add('rft.date', (String(i.year || '').match(/\d{4}/) || [''])[0]);
+  add('rft.volume', i.volume);
+  add('rft.issue', i.issue);
+  const pages = String(i.pages || '');
+  add('rft.pages', pages);
+  const sp = /^\s*([A-Za-z]?\d+)\s*[-–—]/.exec(pages);
+  if (sp) add('rft.spage', sp[1]);
+  const doi = String(i.doi || '').trim();
+  if (doi) add('rft_id', 'info:doi/' + doi);
+  const qs = kv.map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+  return b + (b.indexOf('?') >= 0 ? '&' : '?') + qs;
+}
 
 // 一次 GET，手动跟重定向。resolveWithFullResponse 的极简版
 function request(urlStr, opts) {
@@ -126,37 +182,100 @@ async function downloadPdf(urlStr, destPath, opts) {
   return { ok: true, path: destPath, bytes: res.body.length, finalUrl: res.finalUrl };
 }
 
+// 从各路开放获取索引里挑一个 PDF 直链。全部失败就返回空数组，不抛。
+// 四路并行（Unpaywall / OpenAlex / Semantic Scholar / Europe PMC）：
+// 串行的话最坏要等四个超时，用户会以为卡死；并行只等最慢的那一路。
+async function oaCandidates(info, ep) {
+  const i = info || {};
+  const doi = String(i.doi || '').trim();
+  if (!doi) return [];
+  const email = String(i.email || '').trim();
+  const tasks = [];
+
+  const pick = (source, fn) => tasks.push((async () => {
+    try {
+      const r = await request(fn(), { timeout: 12000 });
+      const j = JSON.parse(r.body.toString('utf8'));
+      return { source, url: pickPdfUrl(source, j) };
+    } catch (_) { return { source, url: '' }; }
+  })());
+
+  if (email) {
+    tasks.push((async () => {
+      try {
+        const r = await request(ep.unpaywall(doi, email), { timeout: 12000 });
+        const j = JSON.parse(r.body.toString('utf8'));
+        const list = [j && j.best_oa_location].concat(Array.isArray(j && j.oa_locations) ? j.oa_locations : []);
+        for (const loc of list) {
+          if (!loc) continue;
+          const u = loc.url_for_pdf || loc.url;
+          if (u) return { source: 'unpaywall', url: u, note: loc.host_type || '' };
+        }
+      } catch (_) { /* 查不到不算错误 */ }
+      return { source: 'unpaywall', url: '' };
+    })());
+  }
+  pick('openalex', () => ep.openalex(doi));
+  pick('semanticscholar', () => ep.semanticscholar(doi));
+  pick('europepmc', () => ep.europepmc(doi));
+
+  const rows = await Promise.all(tasks);
+  // 顺序固定：Unpaywall 的 best_oa_location 最准，其后是 OpenAlex / S2 / Europe PMC。
+  // 注意不能用 `rank[x] || 9`——unpaywall 的序号就是 0，会被 0 当成「没有」而排到最后。
+  const rank = { unpaywall: 0, openalex: 1, semanticscholar: 2, europepmc: 3 };
+  const at = (src) => (Object.prototype.hasOwnProperty.call(rank, src) ? rank[src] : 9);
+  return rows.filter((r) => r && r.url).sort((a, b) => at(a.source) - at(b.source));
+}
+
+function pickPdfUrl(source, j) {
+  if (!j) return '';
+  if (source === 'openalex') {
+    const loc = j.best_oa_location
+      || (Array.isArray(j.locations) ? j.locations.find((x) => x && x.pdf_url) : null);
+    return (loc && (loc.pdf_url || loc.landing_page_url)) || '';
+  }
+  if (source === 'semanticscholar') {
+    return (j.openAccessPdf && j.openAccessPdf.url) || '';
+  }
+  if (source === 'europepmc') {
+    const list = (((j.resultList || {}).result || [])[0] || {}).fullTextUrlList;
+    const urls = (list && list.fullTextUrl) || [];
+    const pdf = urls.find((x) => x && /pdf/i.test(x.documentStyle || '') && x.url);
+    const any = pdf || urls.find((x) => x && x.url && /^(OA|F)$/i.test(x.availabilityCode || ''));
+    return (any && any.url) || '';
+  }
+  return '';
+}
+
 // 解析出「该去哪个 URL 拿 PDF」。返回 { candidates: [{url, source, note}] }
-// info: { doi, arxivId, url, email }
+// info: { doi, arxivId, url, email, title, publication, year, volume, issue, pages,
+//         proxy（机构代理前缀）, openurl（链接解析器基址） }
 async function resolveCandidates(info, endpoints) {
   const ep = Object.assign({}, ENDPOINTS, endpoints || {});
   const i = info || {};
   const out = [];
+  const seen = new Set();
+  const push = (url, source, note) => {
+    const u = String(url || '').trim();
+    if (!u || seen.has(u)) return;
+    seen.add(u);
+    out.push({ url: u, source, note: note || '' });
+  };
+
   const arxivId = i.arxivId || arxivIdFromUrl(i.url);
-  if (arxivId) out.push({ url: ep.arxivPdf(arxivId), source: 'arxiv' });
+  if (arxivId) push(ep.arxivPdf(arxivId), 'arxiv');
 
-  const email = String(i.email || '').trim();
-  if (i.doi && email) {
-    // Unpaywall：查开放获取副本。查不到不算错误，继续往下试
-    try {
-      const r = await request(ep.unpaywall(i.doi, email), { timeout: 15000 });
-      const j = JSON.parse(r.body.toString('utf8'));
-      const best = j && j.best_oa_location;
-      const list = [best].concat(Array.isArray(j && j.oa_locations) ? j.oa_locations : []);
-      const seen = new Set();
-      for (const loc of list) {
-        if (!loc) continue;
-        const u = loc.url_for_pdf || loc.url;
-        if (!u || seen.has(u)) continue;
-        seen.add(u);
-        out.push({ url: u, source: 'unpaywall', note: loc.host_type || '' });
-        break;
-      }
-    } catch (_) { /* 网络问题就跳过，不让整个流程失败 */ }
+  for (const c of await oaCandidates(i, ep)) push(c.url, c.source, c.note);
+
+  if (i.url && /^https?:\/\//i.test(i.url)) push(i.url, 'direct');
+  if (i.doi) push(ep.doiResolver(i.doi), 'doi');
+  // 代理版排在最后：开放获取能直连就先直连，别让代理白跑一趟；
+  // 反过来（代理优先）会让本来能下的 PDF 绕一圈登录页。
+  if (i.proxy) {
+    if (i.doi) push(applyProxy(ep.doiResolver(i.doi), i.proxy), 'proxy');
+    if (i.url) push(applyProxy(i.url, i.proxy), 'proxy');
   }
-
-  if (i.url && /^https?:\/\//i.test(i.url)) out.push({ url: i.url, source: 'direct' });
-  if (i.doi) out.push({ url: ep.doiResolver(i.doi), source: 'doi' });
+  if (i.openurl) push(openUrlFor(i.openurl, i), 'openurl');
   return out;
 }
 
@@ -174,15 +293,50 @@ function arxivIdFromUrl(u) {
   return m4 ? m4[1] : '';
 }
 
+/*
+ * 只把「看着就是 PDF」的链接当成可优先直连的地址。
+ * 条目里的 url 经常是文章落地页（HTML），慢的时候要几十秒才返回；把它当直链
+ * 会让 OA 已经拿到的 PDF 干等（R-v1.6b-03）。落地页仍然会试，只是排在 OA 之后。
+ */
+function looksLikePdf(url) {
+  const u = String(url || '');
+  if (!/^https?:\/\//i.test(u)) return false;
+  try {
+    const p = new URL(u).pathname;
+    if (/\.pdf$/i.test(p)) return true;
+    if (/\/(pdf|download|fulltext|full-text|bitstream)\//i.test(p)) return true;
+  } catch (_) { return false; }
+  return /arxiv\.org\/pdf\//i.test(u);
+}
+
 // 依次尝试候选链接，第一个成功的就是它。返回 { ok, path, source, bytes, tried }
+//
+// v1.6：已知的直链（arXiv / 条目自己的 URL）先跑，开放获取查询在后台同时进行。
+// 以前要等四路 OA 全部返回才开始下载，最坏白等 12 秒——而 arXiv 和直链根本不需要等。
+// 顺序仍是「越可能成功的越靠前」：arXiv 最稳，其次条目自己的链接，最后才是
+// 后台查出来的 OA 副本与 DOI / 代理 / 解析器。
 async function fetchToFile(info, destPath, opts) {
   const o = opts || {};
-  const candidates = await resolveCandidates(info, o.endpoints);
-  if (!candidates.length) {
+  const ep = Object.assign({}, ENDPOINTS, o.endpoints || {});
+  const i = info || {};
+  const arxivId = i.arxivId || arxivIdFromUrl(i.url);
+
+  const known = [];
+  if (arxivId) known.push({ url: ep.arxivPdf(arxivId), source: 'arxiv' });
+  const directUrl = (i.url && /^https?:\/\//i.test(i.url)) ? i.url : '';
+  // 只有「看着就是 PDF」的才抢先跑；落地页留给 OA 之后的正常顺序
+  if (directUrl && looksLikePdf(directUrl)) known.push({ url: directUrl, source: 'direct' });
+
+  if (!known.length && !directUrl && !i.doi && !i.openurl) {
     return { ok: false, error: '这条文献没有 DOI / arXiv / 链接，先在详情里补上其中一个', tried: [] };
   }
+
+  // 先发出去，别 await：没有 DOI 时它会立刻返回空数组，有 DOI 时这几秒正好用来下载
+  const oaPromise = oaCandidates(i, ep).catch(() => []);
   const tried = [];
-  for (const c of candidates) {
+  const triedUrls = new Set();
+  const attempt = async (c) => {
+    triedUrls.add(c.url);
     try {
       const r = await downloadPdf(c.url, destPath, { timeout: o.timeout });
       if (r.ok) return { ok: true, path: r.path, source: c.source, bytes: r.bytes, tried };
@@ -190,7 +344,31 @@ async function fetchToFile(info, destPath, opts) {
     } catch (err) {
       tried.push({ source: c.source, url: c.url, error: String(err && err.message ? err.message : err) });
     }
+    return null;
+  };
+
+  for (const c of known) {
+    const hit = await attempt(c);
+    if (hit) return hit;
   }
+
+  // 已知直链都不行，再收 OA 的结果（这时它多半已经查完了）
+  const rest = [];
+  for (const c of await oaPromise) rest.push(c);
+  if (directUrl) rest.push({ url: directUrl, source: 'direct' });
+  if (i.doi) rest.push({ url: ep.doiResolver(i.doi), source: 'doi' });
+  if (i.proxy) {
+    if (i.doi) rest.push({ url: applyProxy(ep.doiResolver(i.doi), i.proxy), source: 'proxy' });
+    if (i.url) rest.push({ url: applyProxy(i.url, i.proxy), source: 'proxy' });
+  }
+  if (i.openurl) rest.push({ url: openUrlFor(i.openurl, i), source: 'openurl' });
+
+  for (const c of rest) {
+    if (!c || !c.url || triedUrls.has(c.url)) continue;
+    const hit = await attempt(c);
+    if (hit) return hit;
+  }
+
   const first = tried[0] || {};
   return {
     ok: false,
@@ -201,5 +379,6 @@ async function fetchToFile(info, destPath, opts) {
 
 module.exports = {
   request, downloadPdf, resolveCandidates, fetchToFile, arxivIdFromUrl, isPdfBuffer,
+  applyProxy, openUrlFor, pickPdfUrl, oaCandidates, looksLikePdf,
   ENDPOINTS, MAX_BYTES,
 };

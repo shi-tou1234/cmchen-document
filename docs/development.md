@@ -78,6 +78,8 @@ foreach ($name in $direct) {
 | 笔记保真与链接 | test-note-templates-export、test-review-r02-r05、test-n02-n04-note-content、test-m01-legacy-md-note |
 | 会话与历史 | test-session、test-session-restore、test-tabs、test-nav-history |
 | 旋转与分屏 | test-reader-rotate-split（含会话二次启动恢复）、test-ref-doc（跨文档对照） |
+| 使用指南 | check-help（结构 / 相关链接 / action 与 ui 存在性 / 每个控件都有归属节 / 名字出现在正文里，纯 Node）、test-help（六个入口、76 节逐节渲染、搜索与回车、Esc 与 F1、定位闪烁、直达条件检索、命令面板条目，真实 Electron） |
+| 引用候选与笔记图片 | test-overview（候选排序跨 IPC、排除当前文档、全库搜索、Esc、portal-pick 补起始页）、test-note-image（拖把手写回源码、渲染读回、双击还原、截图宽度跨存储层）；两者的纯逻辑部分在 test-portal 与 test-markdown 里 |
 | 加载代际与竞态 | test-main-race（主文档加载撞旧对照销毁）、test-r01-anno-race（标注跨文档串写） |
 | 朗读 | test-reader-speech（跨页 / 句级高亮 / 暂停恢复 / 跨启动位置记忆） |
 | 收藏集并集 | test-library-multi-collection（Ctrl 多选 / 去重 / 取消 / 删除收窄） |
@@ -96,6 +98,13 @@ foreach ($name in $direct) {
 | 用户书签 | test-bookmarks（B 键 / 侧栏跳页 / sidecar 共存 / 跨启动） |
 | 审核 B01–B12 + 复查 R01–R04 | test-audit-fixes（书签串行队列与失败回滚 / 合并订阅 / EndNote 样式与混合 CDATA / 条件构建器往返 / 组行下标 / Atom 引号 / 年份口径） |
 | 引用与格式 | test-csl、test-csl-ui、test-bib、test-formats |
+| 引用补齐（同上 / 前引 / 消歧 / COinS） | test-cite-note（纯 Node：消歧边界、四种文献类型的脚注体、三种 collapse、坏输入、COinS 编码）、test-atc-citation（引注体下拉） |
+| 题录格式（RDF / MARCXML / EndNote 附件） | test-refio-formats（纯 Node：RDF 往返与 DC 简版、MARCXML 往返、`.xml` 三种格式分辨、附件候选路径）、test-enw-xml |
+| 抓取聚合与机构代理 | test-fetchpdf（四路 OA 聚合、代理两种写法、OpenURL 拼装与排序）、test-fetch-pdf-ui |
+| 笔记元数据与标题样式 | test-note-meta（规范化 / 落库 / `publicItem` 字段完整性；面板、字数、跨存储层往返、倍率真的改到预览字号、卡片自动链接） |
+| 回顾大纲 | test-recall（depth 上下限 / 落盘 / 写盘失败回滚）、test-recall-ui（页签切换、Tab / Shift+Tab 缩进与落库） |
+| 扁平化副本恢复 | test-native-annos（导出内嵌 `trove-annotations.json` → 打开副本恢复 11 条，含颜色 / 评论 / 子类型 / 稳定 id） |
+| 题录写回 PDF | test-pdf-meta（原文件字节不变、Info 与 XMP 都能读回、缺字段不写空值、默认不覆盖、坏输入不抛、特殊字符转义） |
 | 懒渲染与缩放 | test-lazy-render、test-zoom-mode，以及相关 reader/v 系列 |
 
 scripts/ 中的 probe 脚本是正式测试辅助文件，不因文件名含 probe 或 test 就删除。
@@ -167,6 +176,8 @@ node scripts/check-doc-links.js
 - PDF.js 使用字节副本，避免 ArrayBuffer 转移后导出失败。
 - 模板追加与光标插入是不同语义；不能复用替换选区的函数。
 - 富文本 html 是正文，text 是检索内容；链接转换同时兼容标准 href 和内部 data-md-link，并保留协议校验。
+- 新增条目 / 笔记字段时，`migrateItem`、写入函数与 `publicItem` 三处要一起改：漏了 `publicItem` 就是「存得进、界面读不回」，纯 Node 单测发现不了。回归要**从 `summary()` 读回来**验，而不是只查内存对象。
+- 需要「写在设置里、算在导出里」的样式（例如笔记标题倍率），预览用 CSS 变量、导出算成绝对单位，两处必须读同一个设置值；CSS 变量**不要**在子容器里重复声明，局部声明会遮蔽 `:root`，表现是「滑杆动了、预览没动」。
 - 导出前必须确认保存成功，缺图和部分 PDF 导出必须明确提示。
 - 迁移和恢复先暂存，再提交；出错保留恢复证据。
 - 大列表单击保持节点与选择状态，避免重绘破坏双击；不要在 pointermove 中反复读取布局。

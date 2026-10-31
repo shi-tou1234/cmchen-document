@@ -187,6 +187,47 @@ try {
   // 文件路径可查（主进程日志 / 文档用）
   ok('存储路径在 userData 下', recall.filePath() === path.join(dir, 'recall.json'), recall.filePath());
 
+  // ---- v1.6：大纲层级 ----
+  recall.clear();
+  recall.add(['d1', 'd2', 'd3'], T0);
+  const ol0 = recall.outline(T0);
+  eq('大纲列出全部卡片', ol0.length, 3);
+  eq('新卡默认在顶层', ol0.every((c) => c.depth === 0), true);
+  eq('大纲按加入顺序', ol0.map((c) => c.id).join(','), 'd1,d2,d3');
+
+  const sd1 = recall.setDepth('d2', 1, T0);
+  eq('调层级成功', sd1.ok, true);
+  eq('层级写进卡片', recall.cardOf('d2').depth, 1);
+  eq('大纲读回层级', recall.outline(T0).find((c) => c.id === 'd2').depth, 1);
+
+  eq('层级上限 3', recall.setDepth('d2', 99, T0).depth, 3);
+  eq('层级下限 0', recall.setDepth('d2', -5, T0).depth, 0);
+  eq('层级取整', recall.setDepth('d2', 1.6, T0).depth, 2);
+  eq('不存在的卡片给失败', recall.setDepth('nope', 1, T0).ok, false);
+  eq('非法 id 不崩', recall.setDepth(null, 1, T0).ok, false);
+  const same = recall.setDepth('d3', 0, T0);
+  eq('层级没变时标记 unchanged', same.unchanged, true);
+
+  // 层级不影响调度：调完 depth 再评分，到期时间与不调时一致
+  recall.setDepth('d1', 2, T0);
+  const rA = recall.rate('d1', 3, T0);
+  eq('调层级后仍可评分', rA.ok, true);
+  eq('调层级不影响间隔', rA.card.interval, 1);
+
+  // 层级落盘：重新 init 后还在
+  recall.init(dir);
+  eq('重载后层级还在', recall.cardOf('d2').depth, 2);
+
+  // 写盘失败要回滚 depth
+  const depthDisk = fs.readFileSync(path.join(dir, 'recall.json'), 'utf8');
+  const realRename2 = fs.renameSync;
+  let depthBad;
+  fs.renameSync = () => { const e = new Error('injected'); e.code = 'EACCES'; throw e; };
+  try { depthBad = recall.setDepth('d1', 0, T0); } finally { fs.renameSync = realRename2; }
+  eq('层级写盘失败 → ok:false', depthBad.ok, false);
+  eq('层级失败后回滚', recall.cardOf('d1').depth, 2);
+  eq('层级失败后磁盘一字未改', fs.readFileSync(path.join(dir, 'recall.json'), 'utf8'), depthDisk);
+
   console.log('test-recall: ' + pass + ' checks passed');
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

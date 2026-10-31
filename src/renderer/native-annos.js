@@ -14,10 +14,15 @@
  *   Line                                       → line
  *
  * 刻意不做的：
- *   - 已经扁平化进页面内容的“批注”无法恢复，getAnnotations() 读不到；
+ *   - 已经扁平化进页面内容的“批注”无法从 /Annots 恢复，getAnnotations() 读不到；
  *   - 回复关系（/IRT）按 id 记成 shape.replyTo，列表里显示「↳ 回复」标记；
- *     不重排成嵌套树（扁平化批注依旧无法恢复）；
+ *     不重排成嵌套树；
  *   - Popup / Stamp / Polygon / Circle 等第一版跳过，计入 skipped 而不是静默丢弃。
+ *
+ * v1.6：扁平化那一半补上了。Trove 自己导出的「带标注副本」会把原始 shapes 作为
+ * 附件写进 PDF（trove-annotations.json），导入时先读这份附件——数据是我们写的，
+ * id / 颜色 / 评论 / 子类型都在，不需要从绘制结果里反推。外部工具扁平化的 PDF
+ * 仍然只能靠 /Annots，那部分确实无法恢复。
  *
  * 坐标：PDF 用户空间（左下原点）→ 页面单位坐标（左上原点），统一走
  * PageViewport.convertToViewportPoint / convertToViewportRectangle，页面旋转和
@@ -239,7 +244,15 @@ const NativeAnnos = window.NativeAnnos = (() => {
 
   function existingIds(annos) {
     const set = new Set();
-    for (const list of annos.values()) for (const sh of (list || [])) if (sh && sh.nativeId) set.add(sh.nativeId);
+    for (const list of annos.values()) {
+      for (const sh of (list || [])) {
+        if (!sh) continue;
+        if (sh.nativeId) set.add(sh.nativeId);
+        // 稳定 id 也要算：从「带内嵌数据的副本」恢复时，形状是我们自己写的，
+        // 未必有 nativeId；只按 nativeId 去重会让同一批批注导一次多一份。
+        if (sh.id) set.add('id:' + sh.id);
+      }
+    }
     return set;
   }
 
@@ -249,15 +262,52 @@ const NativeAnnos = window.NativeAnnos = (() => {
     for (const entry of (scanned.pages || [])) {
       const arr = annos.get(entry.page) || [];
       for (const sh of entry.shapes) {
-        const key = sh.nativeId || '';
-        if (key && seen.has(key)) { skipped++; continue; }
-        if (key) seen.add(key);
+        const keys = [];
+        if (sh.nativeId) keys.push(sh.nativeId);
+        if (sh.id) keys.push('id:' + sh.id);
+        if (keys.some((k) => seen.has(k))) { skipped++; continue; }
+        for (const k of keys) seen.add(k);
         arr.push(sh);
         added++;
       }
       if (arr.length) annos.set(entry.page, arr);
     }
     return { added, skipped };
+  }
+
+  // ---------- 扁平化批注的恢复 ----------
+  // 「带标注副本」导出时会把原始 shapes 作为附件塞进 PDF（trove-annotations.json）。
+  // 扁平化之后 /Annots 是空的，但那批数据还在文件里，所以副本是可恢复的——
+  // 这正是原生导入一直做不到的那一半。
+  const EMBED_NAME = 'trove-annotations.json';
+
+  async function readEmbedded(pdfDoc) {
+    if (!pdfDoc || typeof pdfDoc.getAttachments !== 'function') return null;
+    let files = null;
+    try { files = await pdfDoc.getAttachments(); } catch (_) { return null; }
+    if (!files) return null;
+    const hit = files[EMBED_NAME]
+      || Object.keys(files).map((k) => files[k]).find((f) => f && /^trove-annotations/.test(String(f.filename || '')));
+    if (!hit || !hit.content) return null;
+    try {
+      const text = typeof TextDecoder === 'function'
+        ? new TextDecoder('utf-8').decode(hit.content)
+        : Buffer.from(hit.content).toString('utf8');
+      const data = JSON.parse(text);
+      if (!data || !Array.isArray(data.pages)) return null;
+      const pages = [];
+      let total = 0;
+      for (const entry of data.pages) {
+        const n = Math.max(1, Math.round(Number(entry && entry.page) || 0));
+        const shapes = (Array.isArray(entry && entry.shapes) ? entry.shapes : [])
+          .filter((sh) => sh && typeof sh === 'object' && sh.tool);
+        if (!shapes.length) continue;
+        pages.push({ page: n, shapes });
+        total += shapes.length;
+      }
+      if (!total) return null;
+      return { pages, total, exportedAt: data.exportedAt || '', sourcePath: data.sourcePath || '' };
+    } catch (_) { return null; }
   }
 
   // 真正写进当前文档：扫描 → 合并 → 重绘 → 落盘。返回统计，供界面与回归断言使用。
@@ -272,11 +322,31 @@ const NativeAnnos = window.NativeAnnos = (() => {
     const ownerPath = s.filePath;
     const ownerAnnos = s.annos;
     const stale = () => s.pdfDoc !== ownerDoc || s.filePath !== ownerPath || s.annos !== ownerAnnos;
-    const scanned = await scan(s.pdfDoc, Object.assign({}, opts, { stale }));
+
+    // 先看是不是我们自己导出的副本：里面有完整的原始数据，比猜 /Annots 准得多
+    const embedded = await readEmbedded(ownerDoc);
     if (stale()) {
       return { ok: false, canceled: true, error: '导入期间文档已切换，已取消；请回到原文档重新导入' };
     }
-    if (!scanned.total) return { ok: true, added: 0, skipped: 0, total: 0, counts: scanned.counts, pages: 0 };
+
+    let scanned;
+    let source = 'native';
+    if (embedded) {
+      source = 'embedded';
+      scanned = {
+        pages: embedded.pages.map((p) => ({ page: Math.min(s.numPages, p.page), shapes: p.shapes })),
+        counts: {}, total: embedded.total, skipped: 0, pagesScanned: embedded.pages.length,
+      };
+      for (const entry of scanned.pages) {
+        for (const sh of entry.shapes) scanned.counts[sh.tool] = (scanned.counts[sh.tool] || 0) + 1;
+      }
+    } else {
+      scanned = await scan(s.pdfDoc, Object.assign({}, opts, { stale }));
+      if (stale()) {
+        return { ok: false, canceled: true, error: '导入期间文档已切换，已取消；请回到原文档重新导入' };
+      }
+    }
+    if (!scanned.total) return { ok: true, added: 0, skipped: 0, total: 0, counts: scanned.counts, pages: 0, source };
     const merged = merge(scanned, s.annos);
     if (merged.added) {
       for (const entry of scanned.pages) if (window.Anno && Anno.renderPage) Anno.renderPage(entry.page);
@@ -285,7 +355,7 @@ const NativeAnnos = window.NativeAnnos = (() => {
     }
     return {
       ok: true, added: merged.added, skipped: merged.skipped + scanned.skipped,
-      total: scanned.total, counts: scanned.counts, pages: scanned.pages.length,
+      total: scanned.total, counts: scanned.counts, pages: scanned.pages.length, source,
     };
   }
 
@@ -301,14 +371,23 @@ const NativeAnnos = window.NativeAnnos = (() => {
     const ownerDoc = s.pdfDoc;
     const ownerPath = s.filePath;
     const stale = () => s.pdfDoc !== ownerDoc || s.filePath !== ownerPath;
+    // 内嵌数据优先：这是 Trove 自己导出的副本，恢复能力比 /Annots 强
+    const embedded = await readEmbedded(ownerDoc);
+    if (stale()) return { ok: false };
+    if (embedded) {
+      if (window.App && App.toast) {
+        App.toast('这份副本内嵌了 ' + embedded.total + ' 条批注数据（导出时留下的），点「导入 PDF 批注」可完整恢复', 6000);
+      }
+      return { ok: true, total: embedded.total, source: 'embedded' };
+    }
     const scanned = await scan(s.pdfDoc, { maxPages: Math.min(30, s.numPages), stale });
     // 提示只属于原文档（R01）：扫描期间切走了就不 toast，别把 A 的批注提示盖到 B 上
     if (stale()) return { ok: false };
     if (!scanned.total) return { ok: true, total: 0 };
     const kinds = Object.keys(scanned.counts).map((k) => k + ' ' + scanned.counts[k]).join('、');
     if (window.App && App.toast) App.toast('这份 PDF 自带 ' + scanned.total + ' 条批注（' + kinds + '），可在「批注」面板点「导入 PDF 批注」', 6000);
-    return { ok: true, total: scanned.total, counts: scanned.counts };
+    return { ok: true, total: scanned.total, counts: scanned.counts, source: 'native' };
   }
 
-  return { scan, merge, import: run, hint, _convertOne: convertOne, _textUnder: textUnder };
+  return { scan, merge, import: run, hint, readEmbedded, _convertOne: convertOne, _textUnder: textUnder };
 })();

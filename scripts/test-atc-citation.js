@@ -50,7 +50,7 @@ let code = 0;
   fs.mkdirSync(ud);
   try {
     fs.writeFileSync(path.join(tmp, 'library.json'), JSON.stringify({ version: 8, items: [
-      { key: 'a', itemType: 'journalArticle', title: 'First Paper', year: '2024', created: 100, creators: [{ firstName: 'John', lastName: 'Smith', creatorType: 'author' }] },
+      { key: 'a', itemType: 'journalArticle', title: 'First Paper', year: '2024', publication: 'Nature', volume: '12', pages: '1-9', created: 100, creators: [{ firstName: 'John', lastName: 'Smith', creatorType: 'author' }] },
       { key: 'b', itemType: 'journalArticle', title: 'Second Paper', year: '2023', created: 200, creators: [{ firstName: 'Lei', lastName: 'Wang', creatorType: 'author' }] },
     ] }));
     const probe = `(async () => {
@@ -84,10 +84,70 @@ let code = 0;
   styleSel.dispatchEvent(new Event('change', { bubbles: true }));
   await sleep(150);
   push('APA 作者-年份+定位符', document.getElementById('ld-atc-preview').textContent === '(Smith, 2024, p. 12)', document.getElementById('ld-atc-preview').textContent);
+  // 引注体：脚注体（完整）与同上 / 前引（没有上次引用时退到完整）
+  const formSel = document.getElementById('ld-atc-form');
+  push('引注体下拉存在且默认文内', !!formSel && formSel.value === 'intext');
+  formSel.value = 'note';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(150);
+  const noteText = document.getElementById('ld-atc-preview').textContent;
+  push('脚注体预览含题名与斜体刊名',
+    noteText.indexOf('“First Paper.”') >= 0 && noteText.indexOf('*') >= 0, noteText);
+  formSel.value = 'ibid';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(150);
+  const ibidText = document.getElementById('ld-atc-preview').textContent;
+  push('没有上次引注时同上退到完整引注', ibidText === noteText, ibidText);
+  formSel.value = 'intext';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(150);
   // 复制（剪贴板在无头环境可能不可用：不强制断言成功，按钮可点即可）
   document.getElementById('ld-atc-copy').click();
   await sleep(200);
   push('复制按钮可点', !!document.getElementById('ld-atc-copy'));
+
+  // v1.6：前引要认「之前引过没有」，不能只记上一条（R-v1.6-06）
+  // 先把剪贴板换成可用的桩，复制链路才走得通
+  try {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
+  } catch (_) {}
+  formSel.value = 'ibid';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  const pv2 = () => document.getElementById('ld-atc-preview').textContent;
+  await sleep(120);
+  // A：历史为空 → 完整引注
+  push('A 首次是完整引注', /^Smith, John\\./.test(pv2()), pv2());
+  document.getElementById('ld-atc-copy').click();
+  await sleep(250);
+  // B：没引过 → 完整引注
+  LibraryUI.openDetail('b');
+  await waitFor(() => { const p = document.getElementById('ld-atc-preview'); return p && p.textContent.includes('Wang'); }, 8000);
+  formSel.value = 'ibid';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(200);
+  push('B 首次也是完整引注', /^Wang, Lei\\./.test(pv2()), pv2());
+  document.getElementById('ld-atc-copy').click();
+  await sleep(250);
+  // A 再来一次：A → B → A，应该是「前引」而不是完整引注
+  LibraryUI.openDetail('a');
+  await waitFor(() => { const p = document.getElementById('ld-atc-preview'); return p && p.textContent.includes('Smith'); }, 8000);
+  formSel.value = 'ibid';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(200);
+  const back = pv2();
+  push('A → B → A 出前引', back.indexOf('op. cit.') >= 0, back);
+  push('前引不是完整引注', back.indexOf('“First Paper.”') < 0, back);
+  document.getElementById('ld-atc-copy').click();
+  await sleep(250);
+  // 紧接同一条：同上
+  formSel.value = 'ibid';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(200);
+  push('紧接着再来一次是同上', pv2().indexOf('Ibid.') === 0, pv2());
+
+  formSel.value = 'intext';
+  formSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(150);
   // 换第二条：编号随列表位次变化（不管排序方向，两条的编号必须不同且一致）
   LibraryUI.openDetail('b');
   await waitFor(() => { const p = document.getElementById('ld-cite-preview'); return p && p.textContent.includes('Wang'); }, 8000);

@@ -102,6 +102,39 @@ try {
     await sleep(120);
     push('Esc 关闭面板',modal.hidden);
 
+    // 6.5) v1.6：大纲页签 + Tab 缩进
+    document.getElementById('lib-recall').click();
+    // 等重新渲染完成再切页签：面板只是隐藏，body 里还留着上一次的内容，
+    // 过早点击会被 openRecall 的后续 rvApply 覆盖回复习视图
+    await sleep(900);
+    await waitFor(()=>modal&&!modal.hidden&&body().querySelector('.rv-quote'),8000);
+    const tabBtn=document.getElementById('recall-tab-outline');
+    push('有「大纲」页签',!!tabBtn);
+    tabBtn.click();
+    const olReady=await waitFor(()=>body().querySelector('.rv-ol-row'),6000);
+    push('大纲列出卡片',olReady&&body().querySelectorAll('.rv-ol-row').length===3,
+      olReady?body().querySelectorAll('.rv-ol-row').length:0);
+    const row=body().querySelector('.rv-ol-row');
+    if(row){
+      push('大纲行可聚焦（Tab 缩进的前提）',row.getAttribute('tabindex')==='0');
+      row.focus();
+      const cardId=row.getAttribute('data-rv-card');
+      row.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+      await sleep(500);
+      const row2=body().querySelector('[data-rv-card="'+cardId+'"]');
+      push('Tab 缩进一层',row2&&row2.style.getPropertyValue('--d')==='1',(row2&&row2.style.getPropertyValue('--d')));
+      const stDepth=await pdfBridge.recall.outline();
+      const cardDepth=(stDepth.cards.find(c=>c.id===cardId)||{}).depth;
+      push('缩进落库',cardDepth===1,cardDepth);
+      row2.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
+      await sleep(500);
+      const row3=body().querySelector('[data-rv-card="'+cardId+'"]');
+      push('Shift+Tab 收回来',row3&&row3.style.getPropertyValue('--d')==='0',row3&&row3.style.getPropertyValue('--d'));
+    }
+    push('大纲里没有评分按钮（空格不会误触发）',!body().querySelector('[data-rv-rate]'));
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    await sleep(120);
+
     // 7) 备份要把复习进度带上，恢复要能换回来（复习进度是状态，不是条目）
     const bk = await pdfBridge.lib.backup(__BACKUP_PATH__);
     push('备份写出成功',!!(bk&&bk.ok),JSON.stringify(bk).slice(0,140));

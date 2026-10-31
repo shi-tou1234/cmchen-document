@@ -9,6 +9,8 @@
  *     GB/T 能出 "SMITH J"。
  *   - CSL 只渲染参考文献表布局，没有文内引注的定位符 / 同上 / 消歧；
  *     完整 CSL 能力仍需 citeproc-js + 官方样式库。
+ *     脚注体的同上 / 前引与同姓消歧由本文件的 citeSequence / authorLabels 提供，
+ *     只覆盖内置的 note 体写法，不参与 CSL 渲染。
  *   - 后缀（Jr. / III）没有单独字段，会并进名字里。
  *   - 出版地、机构、出版日期这些字段本项目的数据模型里没有，只能省略。
  *
@@ -736,15 +738,79 @@
     return k ? '[@' + k + ']' : '';
   }
 
+  // ---------- 作者消歧 ----------
+  // 文内引注只写姓，两位 Smith 撞在一起时读者分不清是谁。规则与 APA 一致：
+  // 姓氏撞车时给**所有**撞车的条目补名字首字母（J. Smith / R. Smith）。
+  // 只给其中一条补会让另一条看起来像「唯一的 Smith」，反而更乱。
+  function surnameKey(c) {
+    return (str(c.lastName) || str(c.firstName)).toLowerCase();
+  }
+
+  function givenInitial(c) {
+    const first = str(c.firstName);
+    // 中文名没有「首字母」这个概念，硬造一个只会产出无意义的拉丁字母
+    if (!first || CJK.test(first)) return '';
+    return Creators.initials(first, true);
+  }
+
+  // 返回 Map<item.key, Set<小写姓氏>>：这条目里哪些姓需要补首字母。
+  // items 传「同一篇文稿里可能被引用的全部条目」——消歧是集合性质，
+  // 只看单条永远判断不出「还有别人也姓 Smith」。
+  function authorLabels(items) {
+    const list = Array.isArray(items) ? items.filter(Boolean) : [];
+    const seen = new Map();   // 姓氏 -> Set(首字母)
+    for (const it of list) {
+      for (const c of authorsOf(it)) {
+        const sn = surnameKey(c);
+        if (!sn) continue;
+        if (!seen.has(sn)) seen.set(sn, new Set());
+        seen.get(sn).add(givenInitial(c));
+      }
+    }
+    const out = new Map();
+    for (const it of list) {
+      const hit = new Set();
+      for (const c of authorsOf(it)) {
+        const sn = surnameKey(c);
+        if (!sn) continue;
+        const set = seen.get(sn);
+        // 两个以上**不同**的首字母才算撞车；同一个人出现两次不算
+        if (set && Array.from(set).filter(Boolean).length > 1) hit.add(sn);
+      }
+      if (hit.size && it.key) out.set(it.key, hit);
+    }
+    return out;
+  }
+
+  // 文内引注里的作者部分（不含年份与定位符）。
+  // opts.ambiguous：authorLabels() 里对应本条的 Set；有值且命中的姓补首字母。
+  function inTextWho(it, opts) {
+    const o = opts || {};
+    const amb = o.ambiguous || null;
+    const list = authorsOf(it).filter((c) => c.creatorType !== 'editor');
+    const nameOf = (c) => {
+      const last = str(c.lastName) || str(c.firstName);
+      if (!last) return '';
+      if (!amb || !amb.has(surnameKey(c))) return last;
+      const ini = givenInitial(c);
+      return ini ? ini + ' ' + last : last;
+    };
+    // 1 位姓；2 位 A & B；3 位以上 A et al.（中文名 / 机构名按原文）
+    const names = list.map(nameOf).filter(Boolean);
+    if (!names.length) return str(it && it.title).slice(0, 40) || '佚名';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + ' & ' + names[1];
+    return names[0] + ' et al.';
+  }
+
   // ---------- 文内引注（in-text citation with locator） ----------
   // 差距报告里「文内引注定位符」的简化落地：编号制出 [n, p. X]，作者-年份制出
   // (Surname, 2020, p. X)。定位符由用户填（页码 / 章节 / 图号），可空。
-  // 不做同上 / 前引缩写与作者消歧（保持差距报告的边界声明）。
+  // opts.ambiguous 传 authorLabels() 的结果时，同姓作者会补上名字首字母。
   function citeInText(it, opts) {
     const o = opts || {};
     const style = str(o.style) || 'gbt7714';
     const locator = str(o.locator).replace(/^\s*,\s*/, '');
-    const list = authorsOf(it).filter((c) => c.creatorType !== 'editor');
     // year：调用方可以传「消歧后的完整年份」（如 2024a / 2024a-10），
     // 与参考文献表共用同一套结果；不传就用条目自己的年份。
     const year = str(o.year) || str(it && it.year) || 'n.d.';
@@ -754,18 +820,144 @@
       return '[' + num + (locator ? ', ' + locator : '') + ']';
     }
     const withLoc = (base) => base + (locator ? ', ' + locator : '');
-    // 作者-年份：1 位姓；2 位 A & B；3 位以上 A et al.（中文名 / 机构名按原文）
-    const surnames = list.map((c) => str(c.lastName) || str(c.firstName)).filter(Boolean);
-    let who;
-    if (!surnames.length) who = str(it && it.title).slice(0, 40) || '佚名';
-    else if (surnames.length === 1) who = surnames[0];
-    else if (surnames.length === 2) who = surnames[0] + ' & ' + surnames[1];
-    else who = surnames[0] + ' et al.';
+    const who = inTextWho(it, { ambiguous: o.ambiguous });
     if (style === 'mla') {
       // MLA 9：正文引注不带年份，页码紧跟姓，无逗号
       return '(' + who + (locator ? ' ' + locator : '') + ')';
     }
     return '(' + withLoc(who + ', ' + year) + ')';
+  }
+
+  // ---------- 脚注体引注与「同上 / 前引」 ----------
+  // 同上（ibid.）只在脚注体里有意义：作者-年份制重复引用必须重复写全，
+  // 编号制靠编号指回表里。所以这组函数独立存在，不去改 citeInText 的语义。
+  function shortTitle(t, n) {
+    const s = str(t);
+    if (!s) return '';
+    if (CJK.test(s)) return s.length > 14 ? s.slice(0, 14) + '…' : s;
+    const words = s.split(/\s+/).filter(Boolean);
+    const k = Math.max(2, n || 4);
+    return words.length <= k ? s : words.slice(0, k).join(' ') + '…';
+  }
+
+  // 完整脚注引注（Chicago 17 的 note 体，简化为纯文本 + Markdown 强调标记）：
+  //   期刊   Who. “题名.” *刊名* 卷, no. 期 (年): 页.
+  //   图书   Who. *书名*. 出版社, 年.
+  //   章节   Who. “题名.” In *书名*, 页. 年.
+  // 强调用 *…* 是因为它最终多半粘进 Markdown 笔记；纯文本里星号也读得懂。
+  function noteCite(it, opts) {
+    const o = opts || {};
+    const list = authorsOf(it).filter((c) => c.creatorType !== 'editor');
+    const names = list.map((c) => invertedName(c, true)).filter(Boolean);
+    let who = '';
+    if (names.length === 1) who = names[0];
+    else if (names.length === 2) who = names[0] + ', and ' + names[1];
+    else if (names.length > 2) who = names[0] + ', et al.';
+    const year = str(o.year) || yearOf(it);
+    const title = str(it && it.title);
+    const pub = str(it && it.publication);
+    const vol = str(it && it.volume);
+    const issue = str(it && it.issue);
+    const pages = str(it && it.pages);
+    const type = str(it && it.itemType) || 'document';
+    // 裸 DOI（doiTail 是给「 DOI:…」这种尾巴用的，这里要拼成可点的链接）
+    const doi = str(it && it.doi).replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').replace(/^DOI:\s*/i, '');
+    const url = str(it && it.url);
+    const loc = str(o.locator);
+    const quoted = ['journalArticle', 'magazineArticle', 'newspaperArticle', 'bookSection',
+      'conferencePaper', 'webpage', 'blogPost', 'thesis', 'report', 'preprint'].indexOf(type) >= 0;
+
+    const parts = [];
+    if (who) parts.push(/[.。!?]$/.test(who) ? who : who + '.');
+    if (title) parts.push(quoted ? '“' + title + '.”' : '*' + title + '*.');
+    if (type === 'journalArticle' || type === 'magazineArticle' || type === 'newspaperArticle') {
+      let tail = pub ? '*' + pub + '*' : '';
+      if (vol) tail += (tail ? ' ' : '') + vol;
+      if (issue) tail += (tail ? ', ' : '') + 'no. ' + issue;
+      if (year) tail += (tail ? ' ' : '') + '(' + year + ')';
+      if (pages) tail += (tail ? ': ' : '') + pages;
+      if (tail) parts.push(tail + '.');
+    } else if (type === 'bookSection' || type === 'conferencePaper') {
+      let tail = pub ? 'In *' + pub + '*' : '';
+      if (pages) tail += (tail ? ', ' : '') + pages;
+      if (tail) parts.push(tail + (year ? ', ' + year : '') + '.');
+      else if (year) parts.push(year + '.');
+    } else {
+      let tail = pub;
+      if (year) tail += (tail ? ', ' : '') + year;
+      if (tail) parts.push(tail + '.');
+    }
+    if (doi) parts.push('https://doi.org/' + doi);
+    else if (url) parts.push(url);
+    if (loc) parts.push(loc + '.');
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // 短引注（Chicago 17 的 short note）：姓 + 短题名 + 定位符。
+  // 无作者条目不重复写题名——inTextWho 的兜底本来就是标题，再拼一次会得到「X, X.」。
+  function shortNote(it, opts) {
+    const o = opts || {};
+    const hasAuthor = authorsOf(it).some((c) => c.creatorType !== 'editor');
+    const who = hasAuthor ? inTextWho(it, { ambiguous: o.ambiguous }) : '';
+    const t = shortTitle(it && it.title);
+    const loc = str(o.locator);
+    const head = [who, t].filter(Boolean).join(', ');
+    return head + (loc ? ', ' + loc : '') + '.';
+  }
+
+  // 前引（op. cit.）：只在已经完整引用过一次之后才成立，所以调用方必须传位置。
+  function opCit(it, opts) {
+    const o = opts || {};
+    const who = inTextWho(it, { ambiguous: o.ambiguous });
+    const loc = str(o.locator);
+    if (o.locale === 'zh') return who + '，前引' + (loc ? '，' + loc : '') + '。';
+    return who + ', op. cit.' + (loc ? ', ' + loc : '') + '.';
+  }
+
+  /*
+   * 给一串引注（按正文出现顺序）生成脚注体文本，并处理同上 / 前引。
+   * entries: [{ it, locator }]
+   * opts:
+   *   collapse  'ibid'（默认，连续用同上、非连续用短引注）
+   *             'opcit'（连续用同上、非连续用前引）
+   *             'none'（一律完整引注）
+   *   locale    'zh' | 'en'
+   *   ambiguous authorLabels() 的结果
+   * 返回 [{ text, form, key }]，form: 'full' | 'ibid' | 'short' | 'opcit'
+   */
+  function citeSequence(entries, opts) {
+    const o = opts || {};
+    const zh = o.locale === 'zh';
+    const collapse = ['ibid', 'opcit', 'none'].indexOf(o.collapse) >= 0 ? o.collapse : 'ibid';
+    const list = Array.isArray(entries) ? entries : [];
+    const out = [];
+    let prevKey = '';
+    for (const e of list) {
+      const it = e && e.it;
+      if (!it) { out.push({ text: '', form: 'full', key: '' }); continue; }
+      const key = str(it.key) || str(it.title);
+      const loc = str(e.locator);
+      // 之前出现过（不含本次）才谈得上「前引」
+      const seenBefore = out.some((x) => x.key && x.key === key);
+      const amb = o.ambiguous instanceof Map ? o.ambiguous.get(key) : null;
+      let text, form;
+      if (collapse !== 'none' && prevKey && prevKey === key) {
+        form = 'ibid';
+        text = zh ? ('同上' + (loc ? '，' + loc : '') + '。') : ('Ibid.' + (loc ? ', ' + loc : ''));
+      } else if (collapse === 'opcit' && seenBefore) {
+        form = 'opcit';
+        text = opCit(it, { ambiguous: amb, locator: loc, locale: o.locale });
+      } else if (collapse === 'ibid' && seenBefore) {
+        form = 'short';
+        text = shortNote(it, { ambiguous: amb, locator: loc });
+      } else {
+        form = 'full';
+        text = noteCite(it, { year: o.year instanceof Map ? o.year.get(key) : o.year, locator: loc });
+      }
+      out.push({ text, form, key });
+      prevKey = key;
+    }
+    return out;
   }
 
   // 统一入口：先看是不是 CSL 样式（csl: 前缀），否则走 5 种内置样式。
@@ -846,6 +1038,7 @@
   return {
     format, gbt, apa, chicago, ieee, mla, authorsOf, authorNames, styleLabel, typeLabel,
     citekey, citekeys, atCitation, citeInText,
+    authorLabels, inTextWho, noteCite, shortNote, opCit, citeSequence, shortTitle,
     styleList, isNumericStyle, isCslStyle, registerCslStyles, cslStyleInfo, cslSort,
     STYLES, TYPE_CODE, TYPE_NAME,
   };

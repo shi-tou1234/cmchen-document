@@ -8,6 +8,9 @@ const resources = require('./data-resources');
 const settings = require('./settings.js');
 const search = require('./search-service.js');
 const formats = require('./formats.js');
+const RefAttach = require('./refattach.js');
+const PdfWrite = require('./pdfwrite.js');
+const CloseDlg = require('./closedlg.js');
 const metadata = require('./metadata.js');
 const fetchpdf = require('./fetchpdf.js');
 const pdfmeta = require('./pdfmeta.js');
@@ -404,12 +407,19 @@ function createWindow(opts = {}) {
 
   win.on('closed', () => { win = null; });
   // 关闭时保存窗口边界，下次启动恢复
-  win.on('close', () => {
+  win.on('close', (e) => {
     if (!win.isMinimized() && !win.isMaximized()) {
       const b = win.getBounds();
       Object.assign(appState, { width: b.width, height: b.height, x: b.x, y: b.y });
     }
     saveWindowState(appState);
+    // v1.6d：关窗先让渲染层把没落盘的东西存完（标注 600ms 防抖、笔记 700ms 防抖）。
+    // 不拦这一下，用户改完标注立刻点 ✕ 就会丢掉最后那批改动（R-v1.6d-02）。
+    if (closeAllowed || !win.webContents) return;
+    e.preventDefault();
+    if (closing) return;
+    closing = true;
+    requestRendererFlush();
   });
 }
 
@@ -715,6 +725,12 @@ async function chooseDataDirViaDialog() {
   return switchDataDir(target, mode);
 }
 
+// EndNote XML 的附件是 internal-pdf://<库内目录>/<文件名>，本身不是可用路径；
+// 具体怎么试候选目录见 src/refattach.js（单独成模块是为了能在 Node 里回归）。
+function resolveRefAttachments(records, sourceFile) {
+  return RefAttach.resolve(records, sourceFile);
+}
+
 function importRefsFile(file) {
   try {
     // EndNote 导出的 XML 有时是 UTF-16（带 BOM），按 utf8 读会成乱码；这里按字节嗅探解码
@@ -724,22 +740,25 @@ function importRefsFile(file) {
     else if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) raw = require('iconv-lite').decode(buf, 'utf16be');
     else { raw = buf.toString('utf8'); if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); }
     const parsed = formats.parseRefs(raw, file);
+    const linked = resolveRefAttachments(parsed.records, file);
     const res = library.importItems(parsed.records);
     if (win) win.webContents.send('lib-changed');
-    return Object.assign({ ok: true, format: parsed.format, parsed: parsed.records.length }, res);
+    return Object.assign({ ok: true, format: parsed.format, parsed: parsed.records.length, linked }, res);
   } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
 }
 
 async function importRefsViaDialog() {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-    title: '导入题录（BibTeX / RIS / EndNote / RefWorks / CSL-JSON）',
+    title: '导入题录（BibTeX / RIS / EndNote / RefWorks / CSL-JSON / RDF / MARCXML）',
     filters: [
-      { name: '题录文件', extensions: ['bib', 'bibtex', 'ris', 'enw', 'refworks', 'json', 'xml', 'txt'] },
+      { name: '题录文件', extensions: ['bib', 'bibtex', 'ris', 'enw', 'refworks', 'json', 'xml', 'rdf', 'marcxml', 'txt'] },
       { name: 'BibTeX', extensions: ['bib', 'bibtex'] },
       { name: 'RIS', extensions: ['ris'] },
       { name: 'EndNote', extensions: ['enw'] },
       { name: 'EndNote XML', extensions: ['xml'] },
       { name: 'RefWorks', extensions: ['refworks', 'txt'] },
+      { name: 'RDF（Zotero RDF / Dublin Core）', extensions: ['rdf'] },
+      { name: 'MARCXML', extensions: ['marcxml', 'xml'] },
     ],
     properties: ['openFile'],
   });
@@ -747,13 +766,26 @@ async function importRefsViaDialog() {
   return importRefsFile(filePaths[0]);
 }
 
-function exportRefsTo(target) {
+// 扩展名 → 格式。`.xml` 在导出侧默认按 MARCXML（EndNote XML 只进不出）。
+const REF_EXPORT_FORMATS = {
+  '.bib': 'bibtex', '.bibtex': 'bibtex', '.ris': 'ris', '.json': 'csljson',
+  '.rdf': 'rdf', '.marcxml': 'marcxml', '.mrcxml': 'marcxml', '.xml': 'marcxml',
+};
+
+function refsToText(records, format) {
+  if (format === 'ris') return formats.recordsToRis(records);
+  if (format === 'csljson') return formats.recordsToCslJson(records);
+  if (format === 'rdf') return formats.recordsToRdf(records);
+  if (format === 'marcxml') return formats.recordsToMarcXml(records);
+  return formats.recordsToBibtex(records);
+}
+
+function exportRefsTo(target, formatHint) {
   try {
     const ext = path.extname(target).toLowerCase();
-    const format = ext === '.ris' ? 'ris' : (ext === '.json' ? 'csljson' : 'bibtex');
+    const format = formatHint || REF_EXPORT_FORMATS[ext] || 'bibtex';
     const records = library.summary().items.filter((x) => !x.deletedAt);
-    const text = format === 'ris' ? formats.recordsToRis(records)
-      : (format === 'csljson' ? formats.recordsToCslJson(records) : formats.recordsToBibtex(records));
+    const text = refsToText(records, format);
     atomicWrite(target, text);
     return { ok: true, path: target, format, count: records.length, bytes: Buffer.byteLength(text) };
   } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
@@ -762,12 +794,14 @@ function exportRefsTo(target) {
 async function exportRefsViaDialog() {
   const base = 'Trove-文献库-' + new Date().toISOString().slice(0, 10);
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    title: '导出 BibTeX / RIS / CSL-JSON',
+    title: '导出题录（BibTeX / RIS / CSL-JSON / RDF / MARCXML）',
     defaultPath: path.join(appState.lastBackupDir || '', base + '.bib'),
     filters: [
       { name: 'BibTeX', extensions: ['bib'] },
       { name: 'RIS', extensions: ['ris'] },
       { name: 'CSL-JSON', extensions: ['json'] },
+      { name: 'RDF（Zotero RDF）', extensions: ['rdf'] },
+      { name: 'MARCXML', extensions: ['marcxml'] },
     ],
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
@@ -1191,6 +1225,67 @@ ipcMain.handle('portal-target', (_e, info) => {
       page: page || 1,
       score: Math.round(best.score * 1000) / 1000,
       why: best.why,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+/*
+ * Overview（手动挑候选）：把「这条引用可能对应库里哪几篇」列出来。
+ * 与 portal-target 的区别：那边只要「有把握的那一个」，这边要「可能的若干个」，
+ * 让用户接手机器不确定的部分。同一个 Portal.rankCandidates，不改算法。
+ */
+ipcMain.handle('portal-candidates', (_e, info) => {
+  try {
+    const entry = String((info && info.entry) || '').trim();
+    const cur = info && info.path ? path.resolve(info.path) : '';
+    if (!entry) return { ok: true, candidates: [] };
+    const items = (library.load().items || []).filter((it) => {
+      if (!it || it.deletedAt || !it.attachment || !it.attachment.path) return false;
+      // 正在读的这篇本身也是候选没意义（已经在眼前了）
+      if (cur && path.resolve(it.attachment.path) === cur) return false;
+      return fs.existsSync(it.attachment.path);
+    });
+    const cands = Portal.rankCandidates(entry, items, { limit: 8 }).map((c) => ({
+      key: c.item.key,
+      title: c.item.title || '(无标题)',
+      score: Math.round(c.score * 1000) / 1000,
+      why: c.why,
+      year: c.item.year || '',
+      authors: (c.item.creators || [])
+        .filter((x) => x && x.creatorType !== 'editor')
+        .map((x) => x.lastName || x.firstName)
+        .filter(Boolean).slice(0, 3).join('、'),
+    }));
+    return { ok: true, candidates: cands };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err), candidates: [] };
+  }
+});
+
+// 用户从候选里挑了一篇：补上起始页（走跟自动 Portal 完全一样的 findStartPage）
+ipcMain.handle('portal-pick', (_e, info) => {
+  try {
+    const key = String((info && info.key) || '').trim();
+    if (!key) return { ok: false, error: '没有指定条目' };
+    const it = (library.load().items || []).find((x) => x && x.key === key && !x.deletedAt
+      && x.attachment && x.attachment.path);
+    if (!it) return { ok: false, error: '库里已经没有这篇了' };
+    fulltextRead.init(currentDataDir());
+    let page = 0;
+    try {
+      const idx = fulltextRead.readIndex(it.attachment.path);
+      page = Portal.findStartPage(idx, it) || 0;
+    } catch (_) { page = 0; }
+    return {
+      ok: true, found: true,
+      key: it.key,
+      title: it.title || path.basename(it.attachment.path),
+      path: it.attachment.path,
+      page: page || 1,
+      score: 1,
+      why: '手动选定',
     };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -1661,11 +1756,22 @@ ipcMain.handle('lib-fetch-pdf', async (_e, info) => {
   if (!it) return { ok: false, error: '条目不存在' };
   if (it.deletedAt) return { ok: false, error: '回收站里的条目不能抓取' };
   const custom = String((info && info.url) || '').trim();
+  const st = settings.get();
   const src = {
     doi: typeof info.doi === 'string' ? info.doi.trim() : (it.doi || ''),
     arxivId: fetchpdf.arxivIdFromUrl(custom || (it.fields && it.fields.arxivId) || it.url || ''),
     url: custom || it.url || '',
-    email: (settings.get().fetchEmail || '').trim(),
+    email: (st.fetchEmail || '').trim(),
+    // 代理与链接解析器只从设置来：抓取参数里不接受，避免一条 IPC 就把请求引到任意地址
+    proxy: (st.fetchProxy || '').trim(),
+    openurl: (st.fetchOpenurl || '').trim(),
+    // OpenURL 需要题录本身才能拼 ContextObject
+    title: it.title || '',
+    publication: it.publication || '',
+    year: it.year || '',
+    volume: it.volume || '',
+    issue: it.issue || '',
+    pages: it.pages || '',
   };
   if (!src.doi && !src.arxivId && !src.url) {
     return { ok: false, error: '这条文献没有 DOI / arXiv / 链接，先在详情里补一个再抓' };
@@ -1697,7 +1803,10 @@ ipcMain.handle('lib-fetch-pdf-batch', async (_e, info) => {
     : [];
   if (!keys.length) return { ok: false, error: '没有选中条目' };
   const force = !!(info && info.force);
-  const email = (settings.get().fetchEmail || '').trim();
+  const st = settings.get();
+  const email = (st.fetchEmail || '').trim();
+  const proxy = (st.fetchProxy || '').trim();
+  const openurl = (st.fetchOpenurl || '').trim();
   const dir = path.join(currentDataDir(), 'attachments');
   fetchBatchAbort = false;
 
@@ -1731,6 +1840,14 @@ ipcMain.handle('lib-fetch-pdf-batch', async (_e, info) => {
         arxivId: fetchpdf.arxivIdFromUrl((it.fields && it.fields.arxivId) || it.url || ''),
         url: it.url || '',
         email,
+        proxy,
+        openurl,
+        title: it.title || '',
+        publication: it.publication || '',
+        year: it.year || '',
+        volume: it.volume || '',
+        issue: it.issue || '',
+        pages: it.pages || '',
       };
       if (!src.doi && !src.arxivId && !src.url) {
         rec.status = 'skipped'; rec.error = '没有 DOI / arXiv / 链接'; skipped++;
@@ -1870,10 +1987,25 @@ ipcMain.handle('lib-open-snapshot', async (_e, info) => {
   return err ? { ok: false, error: err } : { ok: true };
 });
 
+// v1.6：把题录写进 PDF 自身。默认另存副本——写 PDF 二进制不是无损操作，
+// 一次失败就可能让原文档打不开，和「删除只改索引、绝不删原始文档」是同一条原则。
+ipcMain.handle('lib-write-pdf-meta', async (_e, info) => {
+  const key = String((info && info.key) || '').trim();
+  const it = key ? library.findItem(key) : null;
+  if (!it) return { ok: false, error: '条目不存在' };
+  if (it.deletedAt) return { ok: false, error: '回收站里的条目不能写元数据' };
+  const src = it.attachment && it.attachment.path;
+  if (!src || !fs.existsSync(src)) return { ok: false, error: '这条条目没有可用的 PDF 附件' };
+  const r = await PdfWrite.writeToCopy(it, src, (info && info.outPath) || '');
+  if (r.ok) appState.lastDir = path.dirname(r.path);
+  return r;
+});
+
 ipcMain.handle('lib-import-refs', (_e, info) => {
   if (info && typeof info.text === 'string') {
     try {
       const parsed = formats.parseRefs(info.text, info.name || 'import.bib');
+      resolveRefAttachments(parsed.records, info.name || '');
       const res = library.importItems(parsed.records);
       if (win) win.webContents.send('lib-changed');
       return Object.assign({ ok: true, format: parsed.format, parsed: parsed.records.length }, res);
@@ -1882,7 +2014,7 @@ ipcMain.handle('lib-import-refs', (_e, info) => {
   return importRefsViaDialog();
 });
 ipcMain.handle('lib-export-refs', (_e, info) => {
-  if (info && info.outPath) return exportRefsTo(info.outPath);
+  if (info && info.outPath) return exportRefsTo(info.outPath, info.format);
   return exportRefsViaDialog();
 });
 
@@ -2643,6 +2775,13 @@ ipcMain.handle('recall-state', (_e, info) => {
 ipcMain.handle('recall-add', (_e, info) => recall.add(info && info.ids, Date.now()));
 ipcMain.handle('recall-rate', (_e, info) => recall.rate(info && info.id, info && info.rating, Date.now()));
 ipcMain.handle('recall-remove', (_e, info) => recall.remove(info && info.id));
+// v1.6：大纲（全部卡片 + 层级）。和 recall-state 分开：state 会顺手 prune，
+// 大纲只是看，不该因为「打开看了一眼」就动磁盘上的复习进度。
+ipcMain.handle('recall-outline', () => {
+  const now = Date.now();
+  return { ok: true, now, cards: recall.outline(now), stats: recall.stats(now) };
+});
+ipcMain.handle('recall-depth', (_e, info) => recall.setDepth(info && info.id, info && info.depth, Date.now()));
 
 /*
  * 批注 → 跨条目综述草稿（2026-10-29）。
@@ -2822,6 +2961,16 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
   const fmt = info && info.fmt === 'md' ? 'md' : (info && info.fmt === 'doc' ? 'doc' : 'html');
   const it = key ? library.findItem(key) : null;
   if (!it) return { ok: false, error: '找不到这条笔记所属的条目' };
+  // 标题样式跟着设置走：预览用 CSS 变量缩放，导出就得把同一个倍率算成绝对字号，
+  // 否则「预览里调好的样子」和「导出的样子」永远差一截。
+  const nvSet = settings.get();
+  const hScale = (() => {
+    const v = Number(nvSet.noteHeadingScale);
+    return Number.isFinite(v) && v > 0 ? Math.min(1.6, Math.max(0.8, v)) : 1;
+  })();
+  const hWeight = nvSet.noteHeadingWeight === 'normal' ? '400' : '700';
+  const hPt = (base) => (base * hScale).toFixed(1) + 'pt';
+  const hEm = (base) => (base * hScale).toFixed(2) + 'em';
   const notes = it.notes || [];
   const note = notes.find((n) => n.id === info.noteId) || notes[0];
   if (!note) return { ok: false, error: '这条条目还没有笔记内容' };
@@ -2837,19 +2986,22 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
   const hasImageField = !!(note.image && /^snapshots\/[^\\/]+$/i.test(String(note.image)));
   if (!text.trim() && !hasImageField) return { ok: false, error: '笔记是空的' };
 
-  // 收集图片引用（数据目录内相对路径，只认 snapshots/ 前缀，和 note-image 的守卫一致）
+  // 收集图片引用（数据目录内相对路径，只认 snapshots/ 前缀，和 note-image 的守卫一致）。
+  // 解析用渲染器同一套 Md.scanImages：
+  //   - 带标题的 `![图](a.png "说明")` 也得认，否则这张图不会被复制，而且 skipped 还是 0（R-v1.6b-01）；
+  //   - `#w=420` 是宽度标记不是文件名，scanImages 已经把它剥进 frag（R-v1.6-02）；
+  //   - skipCode 与渲染口径一致：代码块里的示例图不复制、也不改写它的文字。
+  const imgs = Md.scanImages(text, { skipCode: true });
   const refs = [];
   const seenRef = new Set();
   const addRef = (p) => {
-    p = String(p || '');
-    if (!/^snapshots\/[^\\/]+$/i.test(p) || seenRef.has(p)) return;
-    seenRef.add(p);
-    refs.push(p);
+    const rel = String(p || '');
+    if (!/^snapshots\/[^\\/]+$/i.test(rel) || seenRef.has(rel)) return;
+    seenRef.add(rel);
+    refs.push(rel);
   };
   addRef(note.image);
-  const imgRe = /!\[[^\]]*\]\((snapshots\/[^)\s]+)\)/g;
-  let m;
-  while ((m = imgRe.exec(text))) addRef(m[1]);
+  for (const im of imgs) addRef(im.base);
 
   const rawTitle = String((info && info.title) || it.title || '未命名笔记').trim() || '未命名笔记';
   const safeTitle = rawTitle.replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 80);
@@ -2896,13 +3048,28 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
         copied++;
       }
     }
-    // 引用改写（Markdown 语法里的链接目标）
-    let outText = text.replace(imgRe, (whole, rel) => rewrite.has(rel) ? whole.replace(rel, rewrite.get(rel)) : whole);
+    // 引用改写：只换 URL 段，标题（`"说明"`）与 `#w=` 标记原样留着。
+    // 从后往前替换，前面那几张的偏移就不会被后面的改动带偏。
+    // 另外把 note.imageW 补到「正文引用了这张图但没写宽度」的地方——
+    // 富文本笔记的宽度只存在字段里，不补的话导出会恢复成原始尺寸（R-v1.6b-02）。
+    const shotW = Math.max(0, Math.round(Number(note.imageW) || 0));
+    let outText = text;
+    for (let i = imgs.length - 1; i >= 0; i--) {
+      const im = imgs[i];
+      const to = rewrite.get(im.base);
+      let frag = im.frag;
+      if (!frag && shotW > 0 && im.base === note.image) frag = '#w=' + shotW;
+      if (!to && !frag) continue;
+      const nextUrl = (to || im.base) + frag;
+      if (nextUrl === im.url) continue;
+      outText = outText.slice(0, im.urlStart) + nextUrl + outText.slice(im.urlEnd);
+    }
     // R04/N03：批注截图存在 note.image 字段、正文里未必有引用——导出时统一带进正文
     //（正文已引用同一张图时不重复插图）。文件已缺失时保留 snapshots/ 原引用：
     // HTML 侧的缺失占位逻辑会把它变成可见的「[图片缺失：…]」，不静默消失。
-    if (hasImageField && !text.includes('](' + note.image + ')')) {
-      outText = '![' + Md.esc('批注截图') + '](' + (rewrite.get(note.image) || note.image) + ')\n\n' + outText;
+    if (hasImageField && !imgs.some((im) => im.base === note.image)) {
+      const target = (rewrite.get(note.image) || note.image) + (shotW > 0 ? '#w=' + shotW : '');
+      outText = '![' + Md.esc('批注截图') + '](' + target + ')\n\n' + outText;
     }
     if (fmt === 'md') {
       atomicWrite(filePath, outText);
@@ -2980,7 +3147,9 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
         '<w:DoNotOptimizeForBrowser/></w:WordDocument></xml><![endif]-->\n' +
         '<style>@page{size:A4;margin:2.2cm 2cm}' +
         'body{font-family:"Noto Serif SC",Georgia,serif;font-size:11pt;line-height:1.7;color:#222}' +
-        'h1{font-size:17pt}h2{font-size:14pt}h3{font-size:12pt}' +
+        'h1{font-size:' + hPt(17) + ';font-weight:' + hWeight + '}' +
+        'h2{font-size:' + hPt(14) + ';font-weight:' + hWeight + '}' +
+        'h3{font-size:' + hPt(12) + ';font-weight:' + hWeight + '}' +
         'img.md-img{max-width:100%;height:auto}' +
         'table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:3px 8px}' +
         'blockquote{margin:1em 0;padding:.3em 1em;border-left:3px solid #bbb;color:#444}' +
@@ -2996,7 +3165,14 @@ ipcMain.handle('export-note-bundle', async (_e, info) => {
       '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
       '<title>' + Md.esc(rawTitle) + '</title>\n' + katexHead +
       '<style>body{font-family:Georgia,"Noto Serif SC",serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.75;color:#24211d;background:#fdfcf9}' +
-      'h1,h2,h3{line-height:1.35}img.md-img{max-width:100%;height:auto}blockquote{margin:1em 0;padding:.4em 1em;border-left:3px solid #c9b98a;background:#f6f1e3;color:#4c4436}' +
+      'h1,h2,h3{line-height:1.35}' +
+      'h1{font-size:' + hEm(1.6) + ';font-weight:' + hWeight + '}' +
+      'h2{font-size:' + hEm(1.4) + ';font-weight:' + hWeight + '}' +
+      'h3{font-size:' + hEm(1.22) + ';font-weight:' + hWeight + '}' +
+      'h4{font-size:' + hEm(1.08) + ';font-weight:' + hWeight + '}' +
+      'h5{font-size:' + hEm(1) + ';font-weight:' + hWeight + '}' +
+      'h6{font-size:' + hEm(0.95) + ';font-weight:' + hWeight + '}' +
+      'img.md-img{max-width:100%;height:auto}blockquote{margin:1em 0;padding:.4em 1em;border-left:3px solid #c9b98a;background:#f6f1e3;color:#4c4436}' +
       'table{border-collapse:collapse}td,th{border:1px solid #d8d2c4;padding:4px 10px}code{background:#f0ece1;border-radius:3px;padding:1px 5px}' +
       'pre{background:#f0ece1;padding:12px;overflow:auto;border-radius:5px}pre code{padding:0;background:none}' +
       '.md-img-missing{color:#a05a2c;font-size:.9em}.q-from{color:#6f6656;font-size:.92em}</style>\n</head>\n<body>\n' +
@@ -3403,7 +3579,29 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
         }
       }
     }
-    const out = Buffer.from(await doc.save());
+    // v1.6：把原始批注数据作为 PDF 附件塞进副本。
+    // 扁平化之后 /Annots 就没了，但这份附件还在文件里——于是「导出副本」不再是单向的，
+    // 打开副本点「导入 PDF 批注」就能完整恢复（含 id、颜色、评论、子类型）。
+    // 嵌入失败不影响副本本身：这只是多出来的恢复能力，不是导出的前提。
+    let embedded = false;
+    if (payload.recover && Array.isArray(payload.recover.pages) && payload.recover.pages.length) {
+      try {
+        await doc.attach(
+          Buffer.from(JSON.stringify(payload.recover), 'utf8'),
+          'trove-annotations.json',
+          {
+            mimeType: 'application/json',
+            description: 'Trove 批注数据（打开这份副本后点「导入 PDF 批注」可恢复）',
+            creationDate: new Date(),
+            modificationDate: new Date(),
+          },
+        );
+        embedded = true;
+      } catch (err) {
+        console.warn('[export-pdf] 批注数据嵌入失败', err && err.message ? err.message : err);
+      }
+    }
+    const outFinal = Buffer.from(await doc.save());
     let target = payload.outPath;
     if (!target) {
       const base = String(payload.fileName || 'document.pdf').replace(/\.pdf$/i, '') + '-标注.pdf';
@@ -3413,9 +3611,9 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
       if (canceled || !filePath) return { ok: false, canceled: true };
       target = filePath;
     }
-    fs.writeFileSync(target, out);
+    fs.writeFileSync(target, outFinal);
     return {
-      ok: true, path: target, skipped, reasons,
+      ok: true, path: target, skipped, reasons, embedded,
       cjk: !!fonts.cjk,
       cjkFont: fonts.cjk ? path.basename(fonts.cjk.path) : '',
       missingGlyphs: stats.missingGlyphs,
@@ -3512,6 +3710,55 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+// ---------- 关窗前先把没落盘的改动存完（v1.6d） ----------
+// 标注与笔记都是防抖保存（600 / 700ms），用户改完立刻点 ✕ 会丢掉最后一批改动。
+// 这里做一次握手：主进程拦下 close → 通知渲染层 flush → 渲染层回报结果 → 再真正关闭。
+// 三条边界：
+//   1. 渲染层卡住也不能关不掉——4 秒超时后强制放行；
+//   2. 保存**失败**时保留窗口与内存内容，弹窗让用户选（继续关 / 回去处理）；
+//   3. 握手期间重复点 ✕ 不重复发请求（closing 标志）。
+let closeAllowed = false;
+let closing = false;
+
+function requestRendererFlush() {
+  if (!win || win.isDestroyed()) { closeAllowed = true; return; }
+  let done = false;
+  let timer = null;
+  let rounds = 0;
+  const onReady = (_e, info) => finish(!info || info.ok !== false, info && info.error);
+  function finish(ok, error) {
+    if (done) return;
+    done = true;
+    closing = false;
+    if (timer) { clearTimeout(timer); timer = null; }
+    ipcMain.removeListener('app-close-ready', onReady);
+    if (!ok) {
+      // 存不进去：别把窗口关掉，内存里那份还在，用户还有机会处理
+      if (!win || win.isDestroyed()) return;
+      const r = dialog.showMessageBoxSync(win, CloseDlg.saveFailedPrompt(error));
+      if (r === 0) { closeAllowed = true; try { win.close(); } catch (_) {} }
+      return;
+    }
+    closeAllowed = true;
+    try { win.close(); } catch (_) {}
+  }
+  // 到点了还没回话：**不能当成成功**。保存慢（大文件、慢盘、防抖排队）时强行关掉
+  // 就等于把没写完的改动扔了。这里问一次，默认继续等。
+  // 「继续等待」永远在，且是 cancelId——按 Esc / 点右上角关闭都等同于继续等待，
+  // 只有明确点「仍然关闭」才放弃（R-v1.6f-02）。
+  function waitMore() {
+    if (done) return;
+    rounds++;
+    const r = dialog.showMessageBoxSync(win, CloseDlg.waitPrompt(rounds));
+    if (r === 0) { timer = setTimeout(waitMore, 4000); return; }
+    finish(true);   // 用户明确选择放弃，不是程序替他决定
+  }
+  timer = setTimeout(waitMore, 4000);
+  ipcMain.on('app-close-ready', onReady);
+  try { win.webContents.send('app-will-close'); }
+  catch (_) { finish(true); }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

@@ -514,6 +514,22 @@ function parseEndNoteXml(text) {
     for (const k of xmlTagAll(block, 'keyword')) for (const part of k.split(/[;,]/)) if (s(part)) keywords.push(s(part));
     const doi = xmlTag(block, 'electronic-resource-num') || xmlTag(block, 'doi');
     const url = xmlTagAll(block, 'url')[0] || '';
+    // EndNote 的附件不在 url 里，而是 internal-pdf:// 形式的「内部路径」：
+    //   <urls><pdf-urls><url>internal-pdf://2295834576/Smith - 2020 - Title.pdf</url>
+    // 这是相对 EndNote 库（.enl + .Data/PDF）的位置，单看 XML 解不出来；
+    // 这里只把原始串带出去，由主进程按「XML 所在目录」试几个候选路径。
+    const attachmentHint = (function () {
+      const urlsBlock = xmlRaw(block, 'urls');
+      if (!urlsBlock) return '';
+      for (const tag of ['pdf-urls', 'related-urls']) {
+        const inner = xmlRaw(urlsBlock, tag);
+        if (!inner) continue;
+        for (const u of xmlTagAll(inner, 'url')) {
+          if (/^internal-pdf:\/\//i.test(u)) return u;
+        }
+      }
+      return '';
+    })();
     const pages = xmlTag(block, 'pages');
     const year = yearOf(xmlTag(block, 'year') || xmlTag(block, 'date'));
     const contributors = xmlRaw(block, 'contributors') || block;
@@ -537,6 +553,7 @@ function parseEndNoteXml(text) {
       language: xmlTag(block, 'language'),
       tags: keywords.slice(0, 20),
       fields: { issn: xmlTag(block, 'issn'), isbn: xmlTag(block, 'isbn'), publisher: xmlTag(block, 'publisher') },
+      attachmentHint,
     });
   }
   return records;
@@ -549,12 +566,21 @@ function detectFormat(text, filename) {
   if (ext === 'json') return 'csljson';
   if (ext === 'enw' || ext === 'enlp') return 'endnote';
   if (ext === 'refworks' || ext === 'rw') return 'refworks';
-  if (ext === 'xml' || ext === 'endnotexml') return 'endnotexml';
+  if (ext === 'rdf') return 'rdf';
+  if (ext === 'marcxml' || ext === 'mrcxml' || ext === 'marc') return 'marcxml';
+  if (ext === 'xml' || ext === 'endnotexml') {
+    // 三种 XML 都可能叫 .xml：先看根元素，别按扩展名硬猜
+    if (/<rdf:RDF\b/i.test(text)) return 'rdf';
+    if (/MARC21\/slim/i.test(text)) return 'marcxml';
+    return 'endnotexml';
+  }
   if (/^\s*%0\s/m.test(text)) return 'endnote';
   if (/^\s*RT\s+\S/m.test(text) && /^\s*A1\s/m.test(text)) return 'refworks';
   if (/^\s*@[A-Za-z]+\s*[{(]/m.test(text)) return 'bibtex';
   if (/^\s*TY\s{1,2}-/m.test(text)) return 'ris';
   if (/^\s*[\[{]/.test(text) && /"type"\s*:/.test(text)) return 'csljson';
+  if (/<rdf:RDF\b/i.test(text)) return 'rdf';
+  if (/MARC21\/slim/i.test(text)) return 'marcxml';
   if (/<records?[\s>]/i.test(text) && /<\/record>/i.test(text)) return 'endnotexml';
   return 'bibtex';
 }
@@ -564,6 +590,14 @@ function parseRefs(text, filename) {
   if (format === 'ris') return { format, records: parseRis(text) };
   if (format === 'endnote') return { format, records: parseEndNote(text) };
   if (format === 'refworks') return { format, records: parseRefWorks(text) };
+  if (format === 'rdf') {
+    try { return { format, records: parseRdf(text) }; }
+    catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
+  }
+  if (format === 'marcxml') {
+    try { return { format, records: parseMarcXml(text) }; }
+    catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
+  }
   if (format === 'endnotexml') {
     try { return { format, records: parseEndNoteXml(text) }; }
     catch (err) { return { format, records: [], error: String(err && err.message || err) }; }
@@ -765,9 +799,453 @@ function recordsToCslJson(records) {
   return JSON.stringify(out, null, 2);
 }
 
+// ======================================================================
+// RDF（Zotero RDF / Dublin Core）与 MARCXML
+// ======================================================================
+// 这两个格式都是「嵌套元素 + 属性」，正则抠字段会一层套一层越写越脆，所以先做一个
+// 极小的 XML 树解析器：够用（元素 / 属性 / CDATA / 注释 / 自闭合）、无依赖、出错不抛。
+// 它不是通用 XML 解析器——不处理 DTD、实体定义与命名空间解析，只把 `a:b` 当普通名字。
+
+function xmlAttrs(src) {
+  const out = {};
+  const re = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  let m;
+  while ((m = re.exec(String(src || '')))) out[m[1]] = xmlDecode(m[2] != null ? m[2] : m[3]);
+  return out;
+}
+
+function parseXmlTree(src) {
+  const root = { name: '#root', attrs: {}, children: [], text: '' };
+  const stack = [root];
+  const s0 = String(src || '');
+  const re = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<\?[\s\S]*?\?>|<\/([^\s>]+)\s*>|<([^\s/>!?]+)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g;
+  let last = 0, m;
+  const top = () => stack[stack.length - 1];
+  while ((m = re.exec(s0))) {
+    if (m.index > last) top().text += xmlDecode(s0.slice(last, m.index));
+    last = re.lastIndex;
+    if (m[1] !== undefined) { top().text += m[1]; continue; }   // CDATA 原样进文本
+    if (m[2]) {
+      // 结束标签：从栈顶往下找最近的同名节点，找不到就忽略（坏文档不该让整份导入失败）
+      for (let i = stack.length - 1; i > 0; i--) {
+        if (stack[i].name === m[2]) { stack.length = i; break; }
+      }
+      continue;
+    }
+    if (m[3]) {
+      const node = { name: m[3], attrs: xmlAttrs(m[4] || ''), children: [], text: '' };
+      top().children.push(node);
+      if (!m[5]) stack.push(node);
+    }
+  }
+  if (s0.length > last) top().text += xmlDecode(s0.slice(last));
+  return root;
+}
+
+const xmlLocal = (name) => String(name || '').replace(/^.*:/, '');
+
+function kids(node, local) {
+  return (node && node.children ? node.children : []).filter((c) => xmlLocal(c.name) === local);
+}
+function kid(node, local) { return kids(node, local)[0] || null; }
+// 节点的整段文字：自身文本 + 所有后代文本，按文档顺序拼
+function nodeText(node) {
+  if (!node) return '';
+  let out = node.text || '';
+  for (const c of node.children || []) out += nodeText(c);
+  return out;
+}
+// 只取「直接文字」：用于 dc:title 这类不该往下钻的字段
+function directText(node) { return s(node ? node.text : ''); }
+// 在子树里找第一个同名后代的文字
+function deepText(node, local) {
+  if (!node) return '';
+  const hit = kid(node, local);
+  if (hit) return s(nodeText(hit));
+  for (const c of node.children || []) {
+    const r = deepText(c, local);
+    if (r) return r;
+  }
+  return '';
+}
+
+const RDF_TYPE = {
+  article: 'journalArticle', journalarticle: 'journalArticle', magazinearticle: 'magazineArticle',
+  newspaperarticle: 'newspaperArticle', book: 'book', booksection: 'bookSection',
+  conferencepaper: 'conferencePaper', proceeding: 'conferencePaper', thesis: 'thesis',
+  report: 'report', manuscript: 'manuscript', webpage: 'webpage', blogpost: 'blogPost',
+  letter: 'letter', email: 'email', interview: 'interview', presentation: 'presentation',
+  map: 'map', film: 'film', artwork: 'artwork', software: 'software', dataset: 'dataset',
+  patent: 'patent', standard: 'standard', legislation: 'legislation', case: 'case',
+  statute: 'statute', hearing: 'hearing', document: 'document', note: 'note', attachment: 'attachment',
+};
+
+// Zotero RDF 的顶层资源元素是 bib:Article / bib:Book…；Dublin Core 导出则统一是
+// rdf:Description，靠 dc:type（"Text.JournalArticle" 这类）区分。两种都读。
+function rdfRecordOf(node) {
+  const local = xmlLocal(node.name).toLowerCase();
+  let itemType = '';
+  const zType = deepText(node, 'itemType');
+  if (zType) itemType = RDF_TYPE[zType.toLowerCase()] || '';
+  if (!itemType) itemType = RDF_TYPE[local] || '';
+  if (!itemType) {
+    const dcType = deepText(node, 'type');
+    if (dcType) {
+      const tail = String(dcType).split(/[.\/]/).filter(Boolean).pop().toLowerCase();
+      itemType = RDF_TYPE[tail] || '';
+    }
+  }
+  if (!itemType) itemType = 'document';
+
+  const title = directText(kid(node, 'title')) || deepText(node, 'title');
+  // 作者：Zotero RDF 用 bib:authors/rdf:Seq/rdf:li/foaf:Person；
+  // DC 简版直接是 <dc:creator>Smith, John</dc:creator>
+  // 编者用 bib:editors 同一个形状——不读它就等于把编者降级成「没有」，
+  // 往返一次角色就丢了（R-v1.6-07）。
+  const creators = [];
+  const personList = (block, type) => {
+    if (!block) return;
+    for (const li of (function walk(n) {
+      const out = [];
+      for (const c of n.children || []) {
+        if (xmlLocal(c.name) === 'li') out.push(c);
+        else out.push(...walk(c));
+      }
+      return out;
+    })(block)) {
+      const person = kid(li, 'Person') || li;
+      const last = directText(kid(person, 'surname')) || directText(kid(person, 'familyName'));
+      const first = directText(kid(person, 'givenName')) || directText(kid(person, 'firstName'));
+      if (last || first) creators.push({ firstName: first, lastName: last, creatorType: type });
+      else if (s(nodeText(li))) {
+        const p = Creators.parseName(s(nodeText(li)));
+        creators.push({ firstName: p.firstName, lastName: p.lastName, creatorType: type });
+      }
+    }
+  };
+  personList(kid(node, 'authors'), 'author');
+  personList(kid(node, 'editors'), 'editor');
+  for (const c of kids(node, 'creator')) {
+    const txt = s(nodeText(c));
+    if (!txt) continue;
+    const person = kid(c, 'Person');
+    if (person) {
+      const last = directText(kid(person, 'surname')) || directText(kid(person, 'familyName'));
+      const first = directText(kid(person, 'givenName')) || directText(kid(person, 'firstName'));
+      if (last || first) { creators.push({ firstName: first, lastName: last, creatorType: 'author' }); continue; }
+    }
+    const p = Creators.parseName(txt);
+    creators.push({ firstName: p.firstName, lastName: p.lastName, creatorType: 'author' });
+  }
+
+  const identifiers = kids(node, 'identifier').map((x) => s(nodeText(x)));
+  let doi = '';
+  let url = '';
+  let isbnId = '';
+  let issnId = '';
+  for (const id of identifiers) {
+    const m = /^(?:DOI\s*[:=]?\s*|info:doi\/)(10\..+)$/i.exec(id);
+    if (m) { doi = m[1]; continue; }
+    const im = /^ISBN\s*[:=]?\s*(.+)$/i.exec(id);
+    if (im) { isbnId = im[1].trim(); continue; }
+    const sm = /^ISSN\s*[:=]?\s*(.+)$/i.exec(id);
+    if (sm) { issnId = sm[1].trim(); continue; }
+    if (/^https?:\/\//i.test(id) && !url) url = id;
+  }
+  if (!doi) {
+    const d = deepText(node, 'doi');
+    if (d) doi = d.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
+  }
+
+  // 出处：dcterms:isPartOf 里通常是一个 bib:Journal 节点，刊名在它的 dc:title
+  const part = kid(node, 'isPartOf');
+  const publication = (part && (deepText(part, 'title') || directText(part)))
+    || deepText(node, 'source') || '';
+  const year = yearOf(deepText(node, 'date') || deepText(node, 'issued'));
+  const tags = kids(node, 'subject').map((x) => s(nodeText(x))).filter(Boolean);
+
+  const rec = {
+    itemType,
+    title: title || '',
+    creators,
+    year,
+    publication,
+    volume: deepText(node, 'volume'),
+    issue: deepText(node, 'issue'),
+    pages: deepText(node, 'pages') || deepText(node, 'page'),
+    doi: doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, ''),
+    url,
+    abstract: deepText(node, 'abstract') || deepText(node, 'description'),
+    language: deepText(node, 'language'),
+    tags: tags.slice(0, 20),
+    fields: {
+      isbn: deepText(node, 'isbn') || isbnId,
+      issn: deepText(node, 'issn') || issnId,
+      publisher: deepText(node, 'publisher'),
+    },
+  };
+  return (rec.title || rec.creators.length) ? rec : null;
+}
+
+function parseRdf(text) {
+  const tree = parseXmlTree(text);
+  // 顶层 <rdf:RDF> 可能被包在别的元素里，先把它找出来
+  let container = null;
+  (function find(node) {
+    if (container) return;
+    for (const c of node.children || []) {
+      if (xmlLocal(c.name) === 'RDF') { container = c; return; }
+      find(c);
+    }
+  })(tree);
+  const nodes = (container || tree).children || [];
+  const out = [];
+  for (const n of nodes) {
+    // rdf:li / rdf:Seq 这类纯结构节点不当条目
+    const local = xmlLocal(n.name);
+    if (local === 'Seq' || local === 'Bag' || local === 'li' || local === 'Alt') continue;
+    const rec = rdfRecordOf(n);
+    if (rec) out.push(rec);
+  }
+  return out;
+}
+
+function rdfEsc(v) {
+  return s(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+const RDF_NODE = {
+  journalArticle: 'Article', magazineArticle: 'Article', newspaperArticle: 'Article',
+  book: 'Book', bookSection: 'BookSection', conferencePaper: 'ConferencePaper',
+  thesis: 'Thesis', report: 'Report', manuscript: 'Manuscript', webpage: 'Webpage',
+  blogPost: 'BlogPost', letter: 'Letter', interview: 'Interview', presentation: 'Presentation',
+  map: 'Map', film: 'Film', artwork: 'Artwork', software: 'ComputerProgram', dataset: 'Dataset',
+  patent: 'Patent', standard: 'Standard', legislation: 'Legislation', case: 'Case',
+  statute: 'Statute', hearing: 'Hearing', document: 'Document', note: 'Note', attachment: 'Attachment',
+};
+
+function recordsToRdf(records) {
+  const lines = [];
+  lines.push('<?xml version="1.0" encoding="UTF-8"?>');
+  lines.push('<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"');
+  lines.push('         xmlns:dc="http://purl.org/dc/elements/1.1/"');
+  lines.push('         xmlns:dcterms="http://purl.org/dc/terms/"');
+  lines.push('         xmlns:bib="http://purl.org/net/biblio#"');
+  lines.push('         xmlns:foaf="http://xmlns.com/foaf/0.1/"');
+  lines.push('         xmlns:z="http://www.zotero.org/namespaces/export#">');
+  (records || []).forEach((r, i) => {
+    if (!s(r.title)) return;
+    const node = RDF_NODE[r.itemType] || 'Document';
+    const about = 'urn:trove:' + (s(r.key) || 'item' + (i + 1));
+    lines.push('  <bib:' + node + ' rdf:about="' + rdfEsc(about) + '">');
+    lines.push('    <z:itemType>' + rdfEsc(r.itemType || 'document') + '</z:itemType>');
+    lines.push('    <dc:title>' + rdfEsc(r.title) + '</dc:title>');
+    const list = Creators.normalizeCreators(r.creators);
+    const authors = list.filter((c) => c.creatorType === 'author');
+    const editors = list.filter((c) => c.creatorType === 'editor');
+    // 作者与编者用同一个形状（bib:authors / bib:editors），这样往返不会把编者丢成作者
+    const personBlock = (tag, people) => {
+      if (!people.length) return;
+      lines.push('    <bib:' + tag + '>');
+      lines.push('      <rdf:Seq>');
+      for (const a of people) {
+        lines.push('        <rdf:li>');
+        lines.push('          <foaf:Person>');
+        if (a.lastName) lines.push('            <foaf:surname>' + rdfEsc(a.lastName) + '</foaf:surname>');
+        if (a.firstName) lines.push('            <foaf:givenName>' + rdfEsc(a.firstName) + '</foaf:givenName>');
+        lines.push('          </foaf:Person>');
+        lines.push('        </rdf:li>');
+      }
+      lines.push('      </rdf:Seq>');
+      lines.push('    </bib:' + tag + '>');
+    };
+    personBlock('authors', authors);
+    personBlock('editors', editors);
+    const y = yearOf(r.year);
+    if (y) lines.push('    <dc:date>' + y + '</dc:date>');
+    if (s(r.publication)) {
+      lines.push('    <dcterms:isPartOf>');
+      lines.push('      <bib:Journal>');
+      lines.push('        <dc:title>' + rdfEsc(r.publication) + '</dc:title>');
+      if (s(r.volume)) lines.push('        <bib:volume>' + rdfEsc(r.volume) + '</bib:volume>');
+      if (s(r.issue)) lines.push('        <bib:issue>' + rdfEsc(r.issue) + '</bib:issue>');
+      lines.push('      </bib:Journal>');
+      lines.push('    </dcterms:isPartOf>');
+    }
+    if (s(r.pages)) lines.push('    <bib:pages>' + rdfEsc(r.pages) + '</bib:pages>');
+    // 出版社：图书 / 学位论文才有意义，期刊那条已经写进 isPartOf 了
+    const publisher = s(r.fields && r.fields.publisher);
+    if (publisher) lines.push('    <dc:publisher>' + rdfEsc(publisher) + '</dc:publisher>');
+    if (s(r.abstract)) lines.push('    <dcterms:abstract>' + rdfEsc(r.abstract) + '</dcterms:abstract>');
+    if (s(r.language)) lines.push('    <dc:language>' + rdfEsc(r.language) + '</dc:language>');
+    for (const t of (r.tags || [])) lines.push('    <dc:subject>' + rdfEsc(t) + '</dc:subject>');
+    if (s(r.doi)) lines.push('    <dc:identifier>DOI ' + rdfEsc(r.doi) + '</dc:identifier>');
+    if (s(r.url)) lines.push('    <dc:identifier>' + rdfEsc(r.url) + '</dc:identifier>');
+    const isbn = s(r.fields && r.fields.isbn);
+    if (isbn) lines.push('    <dc:identifier>ISBN ' + rdfEsc(isbn) + '</dc:identifier>');
+    const issn = s(r.fields && r.fields.issn);
+    if (issn) lines.push('    <dc:identifier>ISSN ' + rdfEsc(issn) + '</dc:identifier>');
+    lines.push('  </bib:' + node + '>');
+  });
+  lines.push('</rdf:RDF>');
+  return lines.join('\n') + '\n';
+}
+
+// ---------------- MARCXML ----------------
+// 只做「论文库够用」的一小撮字段：题名 / 责任者 / 出版 / 丛编 / 主题 / 标识符 / 摘要。
+// 刻意不追求完整 MARC21——真要做编目级映射得有一张 200 行的字段表，收益不在这里。
+function marcEsc(v) {
+  return s(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function marcAuthor(c) {
+  const last = s(c.lastName), first = s(c.firstName);
+  if (last && first) return last + ', ' + first;
+  return last || first;
+}
+
+function recordsToMarcXml(records) {
+  const out = ['<?xml version="1.0" encoding="UTF-8"?>',
+    '<collection xmlns="http://www.loc.gov/MARC21/slim">'];
+  for (const r of (records || [])) {
+    if (!s(r.title)) continue;
+    const y = yearOf(r.year);
+    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    // leader/06 = 语言资料，/07 = 专著或连续出版物
+    const serial = ['journalArticle', 'magazineArticle', 'newspaperArticle'].indexOf(r.itemType) >= 0;
+    const leader = '00000n' + (serial ? 'a' : 'a') + (serial ? 's' : 'm') + ' 2200000 a 4500';
+    out.push('  <record>');
+    out.push('    <leader>' + leader + '</leader>');
+    if (s(r.key)) out.push('    <controlfield tag="001">' + marcEsc(r.key) + '</controlfield>');
+    out.push('    <controlfield tag="003">Trove</controlfield>');
+    out.push('    <controlfield tag="005">' + stamp + '</controlfield>');
+    // 008 固定长 40：录入日期 + 出版状态 + 出版年 + 其余占位
+    const ymd = (stamp.slice(2, 8) || '000000');
+    out.push('    <controlfield tag="008">' + ymd + 's' + (y || '    ') + '    xx     000 0 ' +
+      (s(r.language).slice(0, 3) || 'und') + ' d</controlfield>');
+    const df = (tag, i1, i2, subs) => {
+      const body = subs.filter(([, v]) => s(v))
+        .map(([c, v]) => '<subfield code="' + c + '">' + marcEsc(v) + '</subfield>').join('');
+      if (body) out.push('    <datafield tag="' + tag + '" ind1="' + i1 + '" ind2="' + i2 + '">' + body + '</datafield>');
+    };
+    const isbn = s(r.fields && r.fields.isbn);
+    const issn = s(r.fields && r.fields.issn);
+    if (isbn) df('020', ' ', ' ', [['a', isbn]]);
+    if (issn) df('022', ' ', ' ', [['a', issn]]);
+    if (s(r.doi)) df('024', '7', ' ', [['a', s(r.doi)], ['2', 'doi']]);
+    if (s(r.language)) df('041', ' ', ' ', [['a', s(r.language)]]);
+    const list = Creators.normalizeCreators(r.creators);
+    const authors = list.filter((c) => c.creatorType === 'author');
+    if (authors.length) df('100', '1', ' ', [['a', marcAuthor(authors[0])]]);
+    for (const a of authors.slice(1)) df('700', '1', ' ', [['a', marcAuthor(a)]]);
+    for (const e of list.filter((c) => c.creatorType === 'editor')) df('700', '1', ' ', [['a', marcAuthor(e)], ['e', 'editor']]);
+    df('245', '1', '0', [['a', s(r.title)]]);
+    const pubYear = y || '';
+    if (serial) df('264', ' ', '1', [['a', s(r.fields && r.fields.publisher)], ['b', s(r.publication)], ['c', pubYear]]);
+    else df('264', ' ', '1', [['a', s(r.fields && r.fields.publisher) || s(r.publication)], ['c', pubYear]]);
+    if (serial) {
+      const g = [s(r.volume) ? 'vol. ' + s(r.volume) : '', s(r.issue) ? 'no. ' + s(r.issue) : '',
+        s(r.pages) ? 'pp. ' + s(r.pages) : ''].filter(Boolean).join(', ');
+      df('773', '0', ' ', [['t', s(r.publication)], ['g', g], ['x', issn]]);
+    }
+    if (s(r.pages) && !serial) df('300', ' ', ' ', [['a', s(r.pages)]]);
+    if (s(r.abstract)) df('520', ' ', ' ', [['a', s(r.abstract)]]);
+    for (const t of (r.tags || [])) df('650', ' ', '0', [['a', t]]);
+    if (s(r.url)) df('856', '4', '0', [['u', s(r.url)]]);
+    out.push('  </record>');
+  }
+  out.push('</collection>');
+  return out.join('\n') + '\n';
+}
+
+function parseMarcXml(text) {
+  const tree = parseXmlTree(text);
+  const records = [];
+  (function walk(node) {
+    for (const c of node.children || []) {
+      if (xmlLocal(c.name) === 'record') { records.push(c); continue; }
+      walk(c);
+    }
+  })(tree);
+
+  const out = [];
+  for (const rec of records) {
+    const leader = s(nodeText(kid(rec, 'leader')));
+    const field = (tag) => kids(rec, 'datafield').filter((f) => f.attrs.tag === tag);
+    const subs = (f, code) => kids(f, 'subfield').filter((x) => x.attrs.code === code).map((x) => s(nodeText(x)));
+    const first = (tag, code) => { const f = field(tag)[0]; return f ? (subs(f, code)[0] || '') : ''; };
+    const ctrl = (tag) => {
+      const hit = kids(rec, 'controlfield').find((x) => x.attrs.tag === tag);
+      return hit ? s(nodeText(hit)) : '';
+    };
+
+    const title = first('245', 'a');
+    if (!title) continue;
+    const creators = [];
+    // 700 里既有合作者也有编者 / 译者，靠 $e（文字）或 $4（relator code）区分。
+    // 一律当作者等于把编者降级——往返一次角色就错了（R-v1.6-07）。
+    const roleOf = (f) => {
+      const rel = (subs(f, 'e')[0] || subs(f, '4')[0] || '').toLowerCase();
+      if (!rel) return 'author';
+      if (/edit|edt|编/.test(rel)) return 'editor';
+      if (/trans|trl|译/.test(rel)) return 'translator';
+      return 'author';
+    };
+    const pushName = (tag) => {
+      for (const f of field(tag)) {
+        const name = subs(f, 'a')[0] || '';
+        if (!name) continue;
+        const p = Creators.parseName(name);
+        creators.push({ firstName: p.firstName, lastName: p.lastName, creatorType: roleOf(f) });
+      }
+    };
+    pushName('100');
+    pushName('700');
+
+    const journal = field('773')[0];
+    const isSerial = !!journal;
+    // 连续出版物：刊名在 773$t；专著：出版社在 264$a 或 $b，都当「出处」收下
+    const publication = journal ? (subs(journal, 't')[0] || '')
+      : (first('264', 'b') || first('264', 'a') || first('260', 'b') || first('260', 'a'));
+    const g = journal ? (subs(journal, 'g')[0] || '') : '';
+    const volM = /vol\.\s*([^\s,]+)/i.exec(g);
+    const issueM = /no\.\s*([^\s,]+)/i.exec(g);
+    const pageM = /pp?\.\s*([^\s,]+)/i.exec(g);
+    const yearM = /(1[5-9]\d{2}|20\d{2})/.exec(first('264', 'c') || first('260', 'c') || leader);
+    const doiField = field('024').find((f) => subs(f, '2').some((x) => /^doi$/i.test(x)));
+    const url = first('856', 'u');
+    const tags = [];
+    for (const f of field('650')) for (const a of subs(f, 'a')) if (s(a)) tags.push(s(a));
+
+    out.push({
+      itemType: isSerial ? 'journalArticle' : (leader.charAt(7) === 'm' ? 'book' : 'document'),
+      title,
+      creators,
+      year: yearM ? yearM[1] : '',
+      publication,
+      volume: volM ? volM[1] : '',
+      issue: issueM ? issueM[1] : '',
+      pages: pageM ? pageM[1] : first('300', 'a'),
+      doi: doiField ? (subs(doiField, 'a')[0] || '') : '',
+      url,
+      abstract: first('520', 'a'),
+      language: first('041', 'a'),
+      tags: tags.slice(0, 20),
+      fields: {
+        isbn: first('020', 'a'),
+        issn: first('022', 'a') || (journal ? (subs(journal, 'x')[0] || '') : ''),
+        // 出版社可能在 264$a（专著）或 264$b（连续出版物的出版者），两个都收
+        publisher: first('264', 'a') || first('264', 'b') || first('260', 'a') || first('260', 'b'),
+      },
+      key: ctrl('001') || '',
+    });
+  }
+  return out;
+}
+
 module.exports = {
   parseBibtex, parseRis, parseEndNote, parseRefWorks, parseEndNoteXml, parseRefs, detectFormat,
   recordsToBibtex, recordsToRis, parseCslJson, recordsToCslJson,
+  parseRdf, recordsToRdf, parseMarcXml, recordsToMarcXml, parseXmlTree,
   _bibToRecord: bibToRecord, _risToRecord: risToRecord, _splitAuthors: splitAuthors,
   _cslToRecord: cslToRecord,
 };

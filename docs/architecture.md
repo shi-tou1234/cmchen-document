@@ -1,6 +1,6 @@
 # 架构与数据约定
 
-本文描述当前源码。应用版本为 1.5.0，库格式为 v8；二者独立演进。版本变化见 [CHANGELOG](../CHANGELOG.md)，使用说明见 [README](../README.md)。
+本文描述当前源码。应用版本为 1.6.0，库格式为 v8；二者独立演进。版本变化见 [CHANGELOG](../CHANGELOG.md)，使用说明见 [README](../README.md)。
 
 ## 进程与模块
 
@@ -11,8 +11,8 @@ Trove 使用 Electron 31、原生 JavaScript 和本地 JSON。没有前端框架
 | 主进程 | `main.js` 管窗口、文件、IPC、转换、备份恢复、目录迁移和索引调度 |
 | 数据模块 | `library.js`、`settings.js`、`atomic-file.js`、`data-resources.js` |
 | 内容模块 | `docconvert.js`、`fulltext.js`、`query.js`、`formats.js` |
-| 引用与抓取 | `creators.js`、`cite.js`、`bib.js`、`csl.js`、`csl-styles.js`、`metadata.js`、`fetchpdf.js` |
-| 导入识别与附件定位 | `doiscan.js`（首页文本抽 DOI / arXiv 纯逻辑）、`fingerprint.js`（文件指纹、目录遍历与匹配纯逻辑） |
+| 引用与抓取 | `creators.js`、`cite.js`、`bib.js`、`csl.js`、`csl-styles.js`、`metadata.js`、`fetchpdf.js`、`pdfwrite.js`（题录写回 PDF 副本的 Info + XMP） |
+| 导入识别与附件定位 | `doiscan.js`（首页文本抽 DOI / arXiv 纯逻辑）、`fingerprint.js`（文件指纹、目录遍历与匹配纯逻辑）、`refattach.js`（EndNote `internal-pdf://` → 真实路径的候选与探测） |
 | 写作输出 | `review.js`（批注 → 综述草稿，分组 / 编号 / 截断纯逻辑） |
 | 阅读增强（v36） | `reflow.js`（按坐标把行拼成段落、去断词、切栏的纯逻辑）、`portal.js`（参考文献条目 → 库里哪一条 + 起始页，纯逻辑）、`similar.js`（词袋 tf-idf 与余弦，纯逻辑） |
 | 标注导出字体 | `pdftext.js`（探测系统 CJK 字体、fontkit 子集嵌入、字形覆盖与度量） |
@@ -21,9 +21,12 @@ Trove 使用 Electron 31、原生 JavaScript 和本地 JSON。没有前端框架
 | preload | `preload.js` 经 contextBridge 暴露 `window.pdfBridge` |
 | 阅读界面 | `renderer/renderer.js` 管 PDF/富文档、标签、页码、搜索、缩放、视图旋转、分屏参考视图、双页对开、智能跳转、朗读、会话与导出；`renderer/math.js`（TroveMath）负责笔记公式 KaTeX 增强 |
 | 文献库界面 | `renderer/library-ui.js` 管列表、详情、批量操作、设置及独立笔记编辑器 |
+| 使用指南 | `renderer/help.js` 管目录 / 正文 / 搜索 / 「在界面定位」/ 直达功能；`help-content.js` 是纯数据（UMD，Node 里也能 require），`scripts/check-help.js` 拿它和 `index.html` 对账 |
 | 标注与图片 | `annotations.js`、`native-annos.js`、`selection.js`、`pdfimages.js`、`lightbox.js` |
 
-`query.js`、`markdown.js`、`richtext.js`、`reflow.js`、`portal.js`、`similar.js`、`advsearch.js` 与姓名、引用模块部分采用 UMD，在 Node 与页面共用。**新写的模块只要在 Node 里 require、又在页面里 `<script>` 引用，就必须是 UMD**：CommonJS 的 `module is not defined` 会让整份文件不执行，单测全绿、一进 Electron 就报「X is not defined」。跨脚本 API 显式挂载到 window，不能假定顶层 const 自动成为 window 属性。
+`query.js`、`markdown.js`、`richtext.js`、`reflow.js`、`portal.js`、`similar.js`、`advsearch.js`、`help-content.js` 与姓名、引用模块部分采用 UMD，在 Node 与页面共用。**新写的模块只要在 Node 里 require、又在页面里 `<script>` 引用，就必须是 UMD**：CommonJS 的 `module is not defined` 会让整份文件不执行，单测全绿、一进 Electron 就报「X is not defined」。跨脚本 API 显式挂载到 window，不能假定顶层 const 自动成为 window 属性。
+
+使用指南刻意拆成「数据 + 渲染」两层：文案全在 `help-content.js`（纯数据、无 DOM），`renderer/help.js` 只负责排版、搜索与跳转。这样 `scripts/check-help.js` 才能在 Node 里直接 require 文案，和 `index.html` 的控件 id 做覆盖度对账——界面加了按钮却没人写说明时，脚本会失败，而不是等用户发现「这按钮是干嘛的」。
 
 窗口启用 context isolation，关闭 Node integration。页面不直接读取 fs，磁盘操作经 preload/IPC 交给主进程。富文档转换与富文本分别使用对应的清洗链路。
 
@@ -60,6 +63,8 @@ Trove 使用 Electron 31、原生 JavaScript 和本地 JSON。没有前端框架
 
 笔记记录 id、title、text、html、image、annoIds 与时间戳。独立 Markdown 笔记以 text 为正文、html 为空；富文本子笔记以清洗后的 html 为正文，text 是检索用纯文本。不能用富文本的 text 替代导出正文。
 
+笔记另有可选 `meta: { tags: [], status: '' | 'draft' | 'final' }`（v1.6）。**它不进 `item.tags`**：一条文献下可能挂好几条笔记，各条笔记的标签与「写完没」是两回事，混进文献标签云会把左侧标签区污染成笔记词表。`normalizeNoteMeta()` 是读写两侧共用的唯一入口（标签去空白、截 40 字、最多 20 个，未知状态归空）；`addNote` / `updateNote` 写入，`publicItem` 读出时补默认——**三处少一处就会变成「存得进、界面读不回」**，这是 `notes[].imageW` 踩过的同一个坑，回归从 `summary()` 读回来验。
+
 标注分为三个相关层次：
 
 - `annotations/<hash>.json`：路径、保存时间及各页 shapes，存坐标、颜色、文字与稳定 id。
@@ -75,6 +80,8 @@ PDF 标注使用 scale=1 的页面坐标，左上原点、y 向下，SVG viewBox
 ### 回顾（间隔重复）
 
 复习进度不进 `library.json`：它是一张「标注 id → 下次到期时间」的表，独立放在 `<userData>/recall.json`（`src/recall.js`）。键取标注稳定 id，所以改文字、改颜色、加标签、换标签都不影响复习记录；标注被删除时由 `prune(validIds)` 清掉对应卡片——只有拿到非空 id 集合才动手，读不到标注文件时保留原进度，避免一次 IO 失败把几个月的复习记录清空。
+
+卡片还有可选的 `depth`（0–3，v1.6）：大纲里的缩进层级。**它只影响大纲这张表**，不参与调度、不改变复习顺序，所以 `outline()` 与 `dueList()` 是两条互不相干的读法——前者按 `addedAt` 排全部卡片（回顾的顺序是「你想怎么想」，不是「文献怎么排版」），后者按到期时间升序取前 30 张。`setDepth()` 与评分走同一条 `persist()`：写盘失败回滚内存并如实报错，不假装成功。`recall-outline` 刻意不调用 `prune`——只是打开看了一眼，不该动磁盘上的复习进度。
 
 调度是可预测的 SM-2 骨架，纯函数 `schedule(card, rating, now)`：评分 1/2/3/4 映射到 q=2/3/4/5，`EF' = EF + (0.1 - (5-q)(0.08 + (5-q)·0.02))`（下限 1.3）；q<3 时连击清零、间隔归零、10 分钟后再到期；首次答对 1 天、太简单 3 天，之后模糊 ×1.2、记得 ×EF、太简单 ×EF×1.3，间隔上限 3650 天。刻意不用 FSRS：它要按复习历史拟合记忆稳定性，本地没有足够历史，用户要的只是「今天该看哪几条」。
 
@@ -117,7 +124,104 @@ JSON 备份保持 format 1 兼容性，包含库、设置、标注、回顾进�
 
 朗读按句驱动：把文本项拼成一条字符串并记录「字符 → item / item 内偏移」，断句后按 span 建 DOM Range 回算真实文字框。一次只提交一句给 Web Speech，句间才有稳定的位置锚点；读完当前页再取下一页，无文字页跳过。句级高亮画在独立 `.speech-layer`，与搜索高亮互不清除；朗读中 `H` / `U` 用同一组句框写入普通标注。位置按文档路径存本机 `localStorage`，不写库结构。`App._setSpeechDriver()` 允许测试替换语音驱动，避免依赖系统语音引擎。
 
-PDF 原生批注通过 PDF.js 读取，按 viewport 处理旋转与 CropBox，转换到本地 shapes，按 nativeId 去重；回复批注（/IRT）把父批注 id 记成 shape.replyTo（与 nativeId 同一套 ref 格式），列表层显示「↳ 回复」标记，不重排嵌套树。扫描捕获 PDF 实例、路径、标注容器，等待后检查归属，文档切换则取消。扁平化批注无法恢复，部分形状不支持。用户书签（B 键）也存这个 sidecar（bookmarks 字段）：anno-save 会保留已有书签、bookmarks-save 不碰标注页，两者共存。书签保存按「文档路径 + 加载代际 `loadSeq`」归属，同一路径的操作走一条**串行队列**（`bookmarkQueues`，key 是文件路径）：每次基于上一次「已成功落盘」的工作副本构造候选，成功后提交工作副本、失败只把界面回滚到工作副本。队列**跨加载代际共享**——重新打开同一份文档沿用同一条链，只把工作副本换成新读到的磁盘内容，否则新旧两条队列会并行覆盖 sidecar。任务在发 IPC **之前**再校验一次路径与代际：切走 / 关闭 / 重新打开后，尚未发送的旧任务直接取消（返回 `canceled`），不再写盘；落盘成功即使代际已过期也推进工作副本（磁盘真相），界面更新则只按代际过滤。首次操作会等这一份文档的书签读盘完成，避免用空数组覆盖磁盘。`restoreAnnos` 同样按路径与代际校验，避免切文档期间把旧数据读进新文档。
+PDF 原生批注通过 PDF.js 读取，按 viewport 处理旋转与 CropBox，转换到本地 shapes，按 nativeId 去重；回复批注（/IRT）把父批注 id 记成 shape.replyTo（与 nativeId 同一套 ref 格式），列表层显示「↳ 回复」标记，不重排嵌套树。扫描捕获 PDF 实例、路径、标注容器，等待后检查归属，文档切换则取消。部分形状不支持。用户书签（B 键）也存这个 sidecar（bookmarks 字段）：anno-save 会保留已有书签、bookmarks-save 不碰标注页，两者共存。书签保存按「文档路径 + 加载代际 `loadSeq`」归属，同一路径的操作走一条**串行队列**（`bookmarkQueues`，key 是文件路径）：每次基于上一次「已成功落盘」的工作副本构造候选，成功后提交工作副本、失败只把界面回滚到工作副本。队列**跨加载代际共享**——重新打开同一份文档沿用同一条链，只把工作副本换成新读到的磁盘内容，否则新旧两条队列会并行覆盖 sidecar。任务在发 IPC **之前**再校验一次路径与代际：切走 / 关闭 / 重新打开后，尚未发送的旧任务直接取消（返回 `canceled`），不再写盘；落盘成功即使代际已过期也推进工作副本（磁盘真相），界面更新则只按代际过滤。首次操作会等这一份文档的书签读盘完成，避免用空数组覆盖磁盘。`restoreAnnos` 同样按路径与代际校验，避免切文档期间把旧数据读进新文档。
+
+### 撤销：笔记编辑合并成一个点（v1.6d）
+
+撤销栈存的是**整库 JSON 快照**（每次操作前后各拍一张，真有变化才入栈）。这套做法要求「所有会改库的写操作都在栈里」，漏一个就会出问题：笔记编辑当初被排除在外（怕打字把栈填满），结果撤销「添加标签」时会把快照里那份**旧笔记**一起恢复，把后来保存的正文覆盖掉——这是真的丢数据。
+
+现在的做法是两边都占：
+
+- `addNote` / `updateNote` / `removeNote` 都进撤销栈；
+- `updateNote` 在**同一条笔记、4 秒窗口内**合并成一个撤销点（`NOTE_COALESCE_MS`），连续打字只留一个点；
+- 能合并时连前后快照都省掉（不打字时不必每次序列化整库），只把窗口往后推。
+
+于是撤销按操作顺序一步步走：先「编辑笔记」，再「添加标签」——不会再有「撤了标签，正文也没了」。
+
+### 关窗前的保存握手（v1.6d）
+
+标注与笔记都是防抖保存（600 / 700ms）。用户改完立刻点 ✕，最后那批改动还在定时器里没落盘。
+
+主进程在 `win.on('close')` 里拦下默认行为（`e.preventDefault()`），向渲染层发 `app-will-close`；渲染层按「笔记 → 标注」的顺序 flush，再通过 `app-close-ready` 回报 `{ ok, error }`；主进程收到 `ok` 才真正 `win.close()`。
+
+三条边界：
+
+1. **保存失败不关窗**——弹窗给「仍然关闭（这次改动会丢）」和「返回处理」两个选择，内存里那份还在；选了「返回处理」之后**待保存记录必须留着**，否则再点一次 ✕ 会因为「表里已经空了」而直接放行。
+2. **超时不等于成功**——4 秒没回话时**不能**当作存好了。弹窗问一次，默认「继续等待」（再等 4 秒）。「继续等待」**永远在**，且是 `cancelId`：按 Esc / 点关闭都等于继续等待，只有明确点「仍然关闭」才放弃。
+3. **握手期间重复点 ✕ 不重复发请求**（`closing` 标志）。
+
+「什么算脏」只有一个来源：`noteSaveTimers`。**任何一次保存失败都要把这条重新登记进去**——不管是关窗前的 flush、700ms 的自动保存，还是工具栏按钮触发的立即保存。只在其中一处补记录是不够的：自动保存失败时记录早被删掉了，关窗就会以为「没有待保存的东西」。
+
+两个提示框的文案与按钮放在 `closedlg.js`：`main.js` 一 require 就会拉起 Electron，抽出来才能在 Node 里断言「Esc 永远不等于放弃」。
+
+注意 Electron 的 `window.close()`（渲染层自己调）会直接销毁窗口、**不触发** `close` 事件，所以它绕不过这个握手。界面里没有任何地方调它；用户能触发的关闭路径（✕ / 菜单 / `app.quit()`）都会走 `close`。
+
+### 关闭文档要作废在途加载（v1.6d）
+
+`loadPdf` 是长异步流程，销毁等待期间可能被别人插队。`closeDocument()` 现在会 `loadSeq++`，让所有在途加载在下一个检查点自行退出；`loadPdf` 在提交状态前还会再确认一次「这次加载的目标标签仍然存在」——关标签不一定递增 `loadSeq`，光靠代际挡不住。
+
+不做这两步的表现是：标签已经关光了，过一会儿文档正文、页数、标题又自己冒出来。
+
+### 合并重复条目要搬标注关联（v1.6d）
+
+标注关联是**双向**的：条目侧 `item.annoIds`，标注侧 `annoMeta[id].itemKey`。`mergeItems` 原来只搬笔记，于是合并后保留项看不到被合并条目的标注，而标注还指着一个已经删掉的 key。现在两边一起改：`annoIds` 并入保留项，`annoMeta` 里指向被删 key 的 `itemKey` 全部改指保留条目。
+
+### 标注保存保护用的是「已显示文档」的凭据（v1.6c）
+
+标注写盘前必须满足两条：①这次读盘已经落地；②状态可信（`ok` / `missing`，`unknown` / `broken` 一律不动笔）——否则会把「还没读完的空」当成「用户删光了」，覆盖掉磁盘上还能修复的原文件（R7-01）。
+
+**凭据不能是全局 `loadSeq`**。`loadPdf` 一进来就 `++loadSeq`，但那一刻屏幕上的还是上一份文档：它要先去销毁旧的主文档与对照文档，等待期间新文档根本没装上去。如果这时再打开第三份，保存检查拿「新代际」去核对「旧文档的恢复句柄」，必然不匹配 → 判定「标注还没读完」→ 把第三次打开直接取消掉（R-v1.6c-02，表现就是 `test-main-race` 里 C 永远加载不出来）。
+
+所以凭据是 `annoDoc = { path, gen }`，**只在这一份文档真正成为当前文档时更新**——也就是 `startAnnoRestore()` 被调用的那一刻（此时 `s.filePath` 已经换成新的）。同一处顺手把 `annoState` 重置成 `unknown`，而不是在 `loadPdf` 开头重置：
+
+- `saveAnnosNow` / `flushBeforeLeave` / `rebuildAnnosFile` / `doExportArchive` 全部用 `annoDoc` 的路径与代际；
+- `annoRestoreSettled()` 的「还没切走」判定改成 **恢复令牌身份 + 当前路径**，不再比对 `loadSeq`——下一份可能已经开始加载（`loadSeq` 已递增）但还没装上去，这时这份文档的标注仍然是可信的，该保存就得保存；
+- 保护本身一个字没放宽：状态仍是 `unknown` / `broken` 就不写盘，`test-r7-anno-guard`、`test-r01-anno-race`、`test-save-failures` 全部照旧通过。
+
+
+
+### 扁平化副本的往返（v1.6）
+
+「导出带标注副本」会把批注**画进页面内容**，`/Annots` 随之消失——这就是「扁平化批注无法恢复」的来由。现在导出时多做一件事：把 `App.state.annos` 的**原始 shapes**（未转 PDF 坐标、保留 id / kind / comment / color）作为 PDF 附件 `trove-annotations.json` 写进副本（pdf-lib 的 `attach`）。于是副本不再单向。
+
+导入侧（`native-annos.js`）的顺序是**先看附件、再看 `/Annots`**：
+
+- `readEmbedded()` 用 `pdfDoc.getAttachments()` 取 `trove-annotations.json`，`TextDecoder` 解 UTF-8 后 `JSON.parse`，按 `{ page, shapes }` 校验。命中就当主源（`source: 'embedded'`），跳过 `/Annots` 扫描——数据是我们自己写的，比从绘制结果反推准得多，也快得多。
+- 没有附件才退回 `scan()`（`source: 'native'`），也就是原来的标准批注映射。
+- **去重必须同时认 `nativeId` 与稳定 `id`**：内嵌形状未必有 nativeId，只按 nativeId 去重会让同一批批注导一次多一份（`merge` 里给 id 加了 `id:` 前缀，避免与 ref 串撞车）。
+- 嵌入失败不影响副本本身：`attach` 抛错只记一条 warn，导出照常成功。这是多出来的恢复能力，不是导出的前提。
+
+外部工具扁平化的 PDF 里没有这份附件，仍然只能靠 `/Annots`——那部分确实读不回来，README 的边界里写明了。
+
+### 图片语法只有一份定义（v1.6b）
+
+Markdown 图片的解析**必须三处共用**：渲染（`Md.render`）、拖拽改宽度（`mdImageWidthSet`）、导出复制（`export-note-bundle`）。这三处各写一条正则时，只有渲染认得 `![图](a.png "说明")` 的标题——缩放会跳过它去改下一张，导出会漏掉这张图而且 `skipped` 还是 0（看起来「什么都没缺」）。
+
+现在 `markdown.js` 里只有 `IMAGE_RE_SRC` 一个常量，配 `scanImages(text, { skipCode })` 返回带绝对偏移的 `{ start, end, alt, url, urlStart, urlEnd, base, width, frag }`：
+
+- 渲染用它替换成 `<img>`；
+- 缩放用 `scanImages(..., { skipCode: true })[idx]` 取第 N 张，只替换 `[urlStart, urlEnd)` 这一段——标题和 `#w=` 之外的东西一个字都不动；
+- 导出用同一份扫描结果收集引用、并从后往前改写 URL 段（倒序替换，前面的偏移不会被带偏）。
+
+`codeMask()`（围栏代码块 + 行内代码）也放在这里：渲染器本来就不会把代码里的 `![](...)` 变成图片，另外两处按同一口径跳过，编号才对得上。
+
+**源码位置是传下去的，不是反推的**（v1.6e）。`renderBlocks` 先算出每一行的绝对起点，`inline(text, { base })` 把它加到图内偏移上，`imageTag` 直接写进 `data-md-img-src`；容器递归时把正文起点接着传。脚注正文是「各行 trim 后拼空格」重拼出来的，位置对不上原文，所以在**收集阶段**就从定义所在的源码切片扫出图片偏移，渲染时按顺序发下去。
+
+早先的做法是「渲染完再按 URL 贪心配对」，遇到「正文与脚注引用同一张图」就分不清是哪一处——两处 URL 相同，配对只能靠顺序，而顺序在脚注这里恰好是乱的。表格单元格也要算：`cellStarts()` 给出每个单元格正文在行内的起点，拼上行绝对偏移传下去。注意 `cells()` **不能**在这里把 `\|` 解成 `|`——解了文本会短一个字符，后面图片的偏移就全少算一格；转义统一交给 `inline()` 在 `esc` 之后做，偏移始终按原始文本算。
+
+**定位不到就不改**：缩放只认 `data-md-img-src`，没有就明确提示「定位不到源码位置」，不再按 DOM 序号猜——序号在脚注、表格这些会重排的地方本来就是错的。
+
+`#w=NNN` 是**图片自身的属性**，写在 URL 的片段位置（Markdown 的 URL 里不能有空格）：导出时 Markdown 保留它、HTML 由 `imageTag` 变成 `width` 属性；`notes[].imageW` 是富文本笔记的同一件事的结构化形态，导出时会补成 `#w=` 标记。
+
+### 卡片标题自动链接（v1.6）
+
+笔记预览渲染完之后，`library-ui.js` 的 `autolinkCards()` 走 `TreeWalker` 把文本节点里出现的**回顾卡片标题**换成 `<button class="rv-autolink" data-rv-link="<标注 id>">`。三个约束都不是随手加的：
+
+1. **只认回顾里的卡片**。全库标注都参与的话，正文会亮成一片，等于没有提示——「亮」本身就是信息，亮太多就废了。
+2. **标题至少 4 个字**。两三字的词（「方法」「模型」）命中率高得没有信息量。
+3. **不动 `a` / `code` / `pre` / `button` 里的文字**。代码块里出现同样的词不该变成链接。
+
+标题表在 `openNoteEditor()` 时取一次（`nvLoadCards()` → `recall.outline()`），换来的是每次敲键重渲染预览不用再走 IPC；代价是期间新加的卡片要重开编辑器才生效。调用顺序也重要：**必须放在 KaTeX 增强与图片包装之后**——它替换的是文本节点，放前面会被后面那两步一起冲掉。正则按标题长度降序拼，避免「深度学习」把「深度学习在医学影像中的应用」切碎。
 
 批注归档（`export-anno-archive`）读的是同一份 sidecar，所以有两道前置：渲染层先 `flushAnnos()` 把内存里的改动写进去（写失败就中止，不再假装成功），并在打包前后各核对一次 `filePath + loadSeq`；主进程侧只有 `ENOENT` 才算「从没标注过」，解析失败、结构异常、权限或读取错误一律中止并返回 `broken` 与具体原因。**不能把「读不出来」降级成空 `pages`**——空归档与「备份完成」在界面上长得一模一样，那是最坏的失败方式。
 
@@ -217,7 +321,13 @@ UI 首次展示 20 条，再展开和续拉；类型筛选在结果面板进行�
 
 **引用键模板**（`Cite.citekey(it, { template })`）是纯字符串变换：`[字段:修饰符]` 加字面量，`expandKeyTemplate` 先取字段原值（**保留词间空格**，修饰符要靠它认词边界，`:abbr` 就是每词首字母），再依次应用修饰符，最后统一 `keyClean` 去掉分隔符并按 40 字符截断。默认模板 `[auth:lower][year][veryshorttitle:lower]` 与改造前的固定规则逐字符等价——老用户贴进文稿的 `[@key]` 不会变，这条有回归对拍。作者不可用（没有作者 / 中文作者没有拼音转写）时字段本身退到 `item`+条目 key 前缀，而不是等整串为空才兜底。
 
-文内引注由 `Cite.citeInText(it, { style, num, locator, year })` 生成：编号制定位符进方括号，作者-年份制进圆括号，不做同上 / 前引与作者消歧。同作者同年的消歧年份由 `Bib.disambiguatedYears(items, style)` 统一算：它返回与 `Bib.build()` 内部一致的**完整年份**（`2024a` / `2024a-10`），调用方通过 `Cite.citeInText(it, { year })` 用在正文。返回完整年份而不是「后缀」，是因为年份字段可能带月份 / 日期，而后缀是插在四位年之后的——用「截掉原长度」去推算后缀会截错（`2024-10 → 2024a-10`，末尾是 0 不是 a）。
+文内引注由 `Cite.citeInText(it, { style, num, locator, year, ambiguous })` 生成：编号制定位符进方括号，作者-年份制进圆括号。脚注体走另一组函数（`noteCite` / `shortNote` / `opCit` / `citeSequence`），因为它们解决的不是同一件事：同上 / 前引只在脚注体里有意义，作者-年份制重复引用必须重复写全，编号制靠编号指回表里。`citeSequence(entries, { collapse, locale, ambiguous })` 按正文出现顺序返回 `[{ text, form, key }]`，`form` 是 `full` / `ibid` / `short` / `opcit`——**只有紧接上一次才是同上**，中间隔了一条还写「同上」会让读者指错地方。
+
+同姓消歧由 `Cite.authorLabels(items)` 统一算：它返回 `Map<item.key, Set<小写姓氏>>`，被命中的姓在文内引注里补名字首字母。规则与 APA 一致——**所有**撞车的条目都补，只补其中一条会让另一条看起来像「唯一的 Smith」。两个以上不同首字母才算撞车（同一个人重复出现不算），中文名不硬造拉丁首字母。
+
+同作者同年的消歧年份由 `Bib.disambiguatedYears(items, style)` 统一算：它返回与 `Bib.build()` 内部一致的**完整年份**（`2024a` / `2024a-10`），调用方通过 `Cite.citeInText(it, { year })` 用在正文。返回完整年份而不是「后缀」，是因为年份字段可能带月份 / 日期，而后缀是插在四位年之后的——用「截掉原长度」去推算后缀会截错（`2024-10 → 2024a-10`，末尾是 0 不是 a）。
+
+参考文献表的 HTML 导出每条内嵌 COinS（`Bib.coinsFor(it)`）：`ctx_ver` + `rft_val_fmt` 按文献类型选 journal / book / dissertation，字段映射 `rft.atitle` / `rft.jtitle` / `rft.btitle` / `rft.date` / `rft.volume` / `rft.issue` / `rft.spage` / `rft.epage` / `rft.pages` / `rft.au` / `rft_id`，值做 `encodeURIComponent`，属性里 `&` 写成 `&amp;`（浏览器解码后才是原串）。只写进 HTML——Markdown / RTF / Word 里放 `title` 属性没有意义。
 
 综述草稿（`review.js`）把批注编成 Markdown：输入是 `listAllAnnotations()` 的结果（标签从 `annoMeta` 补上）与未删除条目，按 `groupBy` 分组，组内按作者 → 标题 → 页码排序。编号制样式在渲染过程中按「第一次出现」分配编号，参考文献表用 `Bib.build(items, { order: 'entry' })` 按同一顺序生成，因此正文编号与表内序号一一对应；作者-年份制走默认姓氏排序，正文不编号。输出刻意保持扁平结构（标题 + 引用块 + 斜体出处），不用嵌套列表——自带 Markdown 渲染器对嵌套块引用支持有限，扁平结构在预览与导出里都稳。主进程处理该 IPC 时会先注册用户 CSL 样式，否则 `csl:` 样式会退化成默认样式。范围语义必须用「是否传了 keys」区分：不传（null / undefined）表示全库，传数组就是明确范围、空数组表示零条——不能用 `length` 判断，否则空收藏集或零匹配查询会被放大成全库，生成一份完全不相干的草稿。
 
@@ -234,3 +344,42 @@ docconvert 将支持格式转成受限 HTML，限制页数、总 HTML、单图�
 题录导入的字段取值要按 XML 文本内容处理：EndNote 会把一段文字包进 `<style face="…">` / `<i>` 之类内联标签，直接正则抓标签对会把标签当正文写进标题和作者。formats.js 的做法是先剥内联标签、再把其余标签当空白，最后解实体（顺序不能反，否则 `&lt;` 会被误剥）；CDATA 段原样保留。字段可能由「普通文本 + CDATA + 普通文本」多段拼成，各段必须原样拼接、最后对整段做一次空白规范化——逐段 trim 会把 `Before <![CDATA[Middle]]> After` 粘成 `BeforeMiddleAfter`，而简单在段间插空格又会把 `pre<![CDATA[fix]]>` 变成 `pre fix`。XML 属性单双引号都要认（`ref-type name='Book Section'`），Book Section 映射到项目自己的 `bookSection` 类型。feedparse 的 Atom 链接同理：`href` / `rel` 支持单双引号，标签允许命名空间前缀（`atom:link`，解析前统一剥前缀；RSS 不剥，避免把自闭合的 `<atom:link>` 当成正文链接）。
 
 单实例锁在正常运行时启用，探针/冒烟按测试模式隔离；单实例回归使用自己的 userData，但仍必须保留锁逻辑。
+
+### RDF 与 MARCXML（v1.6）
+
+这两个格式都是「嵌套元素 + 属性」，用正则一层套一层抠字段会越写越脆，所以 `formats.js` 里先放了一个**极小的 XML 树解析器** `parseXmlTree()`：元素 / 属性 / CDATA / 注释 / 自闭合，出错不抛（找不到同名结束标签就忽略，坏文档不该让整份导入失败）。它不是通用 XML 解析器——不处理 DTD、实体定义与命名空间解析，只把 `a:b` 当普通名字，`xmlLocal()` 去掉前缀再比。
+
+- **RDF**：导出 Zotero RDF 的形态（`bib:Article` / `bib:Book` 等顶层节点 + `z:itemType` + `bib:authors/rdf:Seq/rdf:li/foaf:Person`）。解析同时吃 Zotero RDF 与 Dublin Core 简版：DC 没有 `z:itemType` 就从 `dc:type`（`Text.JournalArticle` 这类）取尾段反查类型，`dc:creator` 直接是「姓, 名」时交给 `Creators.parseName`。ISBN 既认 `dc:identifier` 里的 `ISBN …` 也认独立元素。
+- **MARCXML**：只做「论文库够用」的一小撮字段（leader / 001 / 008 / 020 / 022 / 024 / 041 / 100 / 245 / 264 / 300 / 520 / 650 / 700 / 773 / 856）。类型靠 `773` 是否存在区分连续出版物与专著（有 773 → 期刊，leader/07 = s；没有 → 图书，leader/07 = m），年份从 `264$c` 或 `260$c` 取。刻意不追求编目级映射——那要一张 200 行的字段表，收益不在论文库这一侧。
+- **`.xml` 三种格式按内容分辨**：`<rdf:RDF` → rdf，`MARC21/slim` → marcxml，其余当 EndNote XML。三种都可能叫 `.xml`，按扩展名硬猜必然错一种。导出侧 `.xml` 默认按 MARCXML（EndNote XML 只进不出）。
+
+### EndNote 附件路径（v1.6）
+
+EndNote 导出的 XML 里附件不是普通路径，而是「库内位置」：`internal-pdf://<分桶目录>/<文件名>`。那串数字只有配上 `.enl` 库目录才有意义，而用户通常只把 XML 拷出来。`refattach.js` 按「XML 所在目录」试几个落点：`<stem>.Data/PDF/<host>/<name>` → `<stem>.Data/PDF/<name>` → `PDF/<name>` → `<name>`，`%20` 会解码。
+
+**试不到就安静放弃**：编一个不存在的路径会让条目一打开就报「文件不见了」，比「有题录没附件」更烦。单独成模块（而不是塞在 `main.js` 里）是为了能在 Node 里直接回归——主进程文件一 require 就会拉起 Electron。`formats.js` 只负责把原始串带出来（`attachmentHint`），落不落成附件由主进程决定，这个内部字段在入库前删掉。
+
+### 题录写回 PDF（v1.6）
+
+`pdfwrite.js` 把条目的标题 / 作者 / 摘要 / 关键词 / DOI 写进 PDF 自身，**同时写 Info 字典与 XMP**：Info 是 90 年代的老机制但兼容面最广，XMP 是新工具看的，只写一边总会有一半软件读不到。
+
+两条保守决定：
+
+1. **默认另存副本（`-元数据.pdf`），不改原文件**。写 PDF 二进制不是无损操作——对象重排、交叉引用表重建，一次失败就可能让原文档打不开。这和「删除只改索引、绝不删原始文档」是同一条原则。重名自动加序号，不覆盖已有文件。
+2. 只动题录相关字段，不碰书签、注释、附件与加密状态。
+
+XMP 是手写的最小可用包（`dc:title` / `dc:creator` / `dc:description` / `dc:subject` / `dc:identifier` / `xmp:CreatorTool` / `xmp:ModifyDate` / `pdf:Producer` / `pdf:Keywords`），通过 `doc.context.stream(xmp, { Type: 'Metadata', Subtype: 'XML' })` 注册后挂到 catalog 的 `/Metadata`。所有值走 `xmlEsc()`，标题里有 `<C>` 也不会把结构写坏。
+
+**`/Producer` 设了也留不住**：pdf-lib 在序列化时会把 Info 里的 Producer 改写成它自己的字符串（实测 `setProducer('Trove')` → 保存后读回是 `pdf-lib (https://…)`）。所以「谁生成的」只写在 XMP 的 `pdf:Producer` 里——那是我们自己的流，不会被覆盖。这条写在模块注释里，免得下次有人再试一遍。
+
+IPC 是 `lib-write-pdf-meta`：主进程按 key 找条目与附件，`outPath` 只给探针/自动化用，界面入口不传（走默认命名）。
+
+### 抓取：多源聚合与机构代理（v1.6）
+
+`fetchpdf.js` 的候选顺序是 arXiv → 开放获取 → DOI / 直链 → 代理版 → OpenURL。
+
+- **四路开放获取并行**（Unpaywall / OpenAlex / Semantic Scholar / Europe PMC），`Promise.all` 后按可靠性排序去重。串行的话最坏要等四个超时，用户会以为卡死。每路的返回形状都不一样，`pickPdfUrl()` 按来源分别取：OpenAlex 看 `best_oa_location.pdf_url`（没有就找 `locations` 里第一个有 `pdf_url` 的），Semantic Scholar 看 `openAccessPdf.url`，Europe PMC 先挑 `documentStyle` 含 pdf 的、再退到 `availabilityCode` 是 OA/F 的。
+- 排序用的 `rank[source] || 9` 是错的——unpaywall 的序号就是 0，会被当成「没有」而排到最后。改成 `hasOwnProperty` 判断，这条写进了回归。
+- **机构代理** `applyProxy()` 支持两种真实写法：带协议的前缀（`…/login?url=` 后面拼编码后的目标，已有 `url=` / `qurl=` 就直拼，否则补一个）与域名后缀（`doi-org.proxy.univ.edu`，主机名里的 `.` 换 `-`，这是 EZproxy 的既定规则）。**代理版排在直连之后**：反过来会让本来能下到的 PDF 绕一圈登录页。
+- **OpenURL** `openUrlFor()` 用题录拼 ContextObject（`rft.atitle` / `rft.jtitle` / `rft.date` / `rft.volume` / `rft.issue` / `rft.pages` / `rft.spage` / `rft_id=info:doi/…`）。多数解析器返回的是落地页而不是 PDF，所以它排最后一站。
+- 代理与解析器**只从设置读**，抓取参数里不接受——否则一条 IPC 就能把请求引到任意地址。

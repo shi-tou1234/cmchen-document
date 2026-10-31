@@ -430,6 +430,14 @@ function genNoteId() {
   return 'n' + s;
 }
 
+// 笔记截图的显示宽度：0 = 用原尺寸；正数夹到 40–2400。
+// 写入（updateNote）、读盘（normalizeNotes）、返回（publicItem）三处必须共用这一个函数，
+// 否则「存得进、读不回」——v1.6 的 meta 与 imageW 都踩过同一个坑。
+function normalizeImageW(v) {
+  const n = Math.round(Number(v) || 0);
+  return n > 0 ? Math.max(40, Math.min(2400, n)) : 0;
+}
+
 function normalizeNotes(raw, legacyText, created, updated) {
   const src = Array.isArray(raw) ? raw : [];
   const out = [];
@@ -447,14 +455,21 @@ function normalizeNotes(raw, legacyText, created, updated) {
       html: RichText.sanitize(n.html),
       // v8：从标注生成的笔记带一张页面截图（数据目录内的相对/绝对路径）
       image: str(n.image),
+      // 截图的显示宽度：读盘时必须带上，漏了就会在下次保存时把磁盘上的值覆盖成 0
+      imageW: normalizeImageW(n.imageW),
       annoIds: strList(n.annoIds).slice(0, 30),
+      // v1.6：笔记级元数据（标签 / 状态）。同样必须在这里保住，否则重启即丢
+      meta: normalizeNoteMeta(n.meta),
       created: Number.isFinite(+n.created) ? +n.created : (created || 0),
       updated: Number.isFinite(+n.updated) ? +n.updated : (updated || 0),
     });
   }
   if (!out.length && legacyText) {
     // 老库里的单条 note → 变成第一条笔记，不丢内容
-    out.push({ id: genNoteId(), title: '', text: legacyText, html: '', created: created || 0, updated: updated || 0 });
+    out.push({
+      id: genNoteId(), title: '', text: legacyText, html: '', image: '', imageW: 0,
+      meta: normalizeNoteMeta(null), created: created || 0, updated: updated || 0,
+    });
   }
   return out;
 }
@@ -653,6 +668,17 @@ function removeTag(key, tag) {
 }
 
 // ---------- 阅读笔记（v23：一条文献可以挂多条笔记） ----------
+// 笔记级元数据（v1.6）：标签 + 写作状态。
+// 放在 note 上而不是复用条目的 tags —— 一条文献下可能有好几条笔记，
+// 各自的标签与「写完没」是两回事，混进 item.tags 会让左侧标签云被笔记词污染。
+const NOTE_STATUS = ['', 'draft', 'final'];
+function normalizeNoteMeta(v) {
+  const src = v && typeof v === 'object' ? v : {};
+  const tags = strList(src.tags).map((t) => str(t).slice(0, 40)).filter(Boolean).slice(0, 20);
+  const status = NOTE_STATUS.indexOf(src.status) >= 0 ? src.status : '';
+  return { tags, status };
+}
+
 function addNote(key, note) {
   const it = findItem(key); if (!it) return null;
   const html = RichText.sanitize(note && note.html);
@@ -664,6 +690,7 @@ function addNote(key, note) {
     html,
     image: str(note && note.image),
     annoIds: strList(note && note.annoIds).slice(0, 30),
+    meta: normalizeNoteMeta(note && note.meta),
     created: now(),
     updated: now(),
   };
@@ -685,6 +712,11 @@ function updateNote(key, id, patch) {
     if (!('text' in patch)) n.text = RichText.toText(n.html);
   }
   if (patch && 'text' in patch) n.text = str(patch.text);
+  // 标注截图的显示宽度（notes[].imageW）。0 / 非法值 = 用原尺寸。
+  // 不放 html 里的 style 是因为富文本每次保存都要过一遍 sanitize，样式早晚被洗掉。
+  if (patch && 'imageW' in patch) n.imageW = normalizeImageW(patch.imageW);
+  // 笔记级元数据（v1.6）：整块替换，不做增量合并——标签的「删掉一个」没法用增量表达
+  if (patch && 'meta' in patch) n.meta = normalizeNoteMeta(patch.meta);
   n.updated = now();
   it.updated = now();
   save();
@@ -939,6 +971,10 @@ function publicItem(it, collIds) {
   const notes = (Array.isArray(it.notes) ? it.notes : []).map((n) => ({
     id: n.id, title: n.title, text: n.text, html: n.html || '',
     image: n.image || '', annoIds: (n.annoIds || []).slice(),
+    // 截图的显示宽度：0 = 用原尺寸。漏了它界面就永远读不回自己存的宽度
+    imageW: normalizeImageW(n.imageW),
+    // 笔记级元数据：老笔记没有这个字段，读出来补默认（与写入侧同一个规范化函数）
+    meta: normalizeNoteMeta(n.meta),
     created: n.created || 0, updated: n.updated || 0,
   }));
   return {
@@ -1273,6 +1309,10 @@ function mergeItems(keepKey, otherKeys) {
     for (const n of other.notes || []) {
       if (!keep.notes.some((x) => x.id === n.id)) keep.notes.push(n);
     }
+    // 标注关联也要一起搬。annoIds 是「条目 → 标注」，annoMeta[id].itemKey 是「标注 → 条目」，
+    // 两边都要改；只搬笔记不搬标注的话，合并后条目看不到自己的标注，
+    // 而标注还指着一个已经被删掉的 key（R-v1.6d-04）。
+    for (const id of strList(other.annoIds)) if (!keep.annoIds.includes(id)) keep.annoIds.push(id);
     for (const rk of other.relations || []) {
       if (drop.has(rk) || rk === keepKey) continue;
       if (!keep.relations.includes(rk)) keep.relations.push(rk);
@@ -1296,6 +1336,13 @@ function mergeItems(keepKey, otherKeys) {
   if (drop.size) {
     const s = load();
     s.items = s.items.filter((x) => !drop.has(x.key));
+    // 标注那一侧（annoMeta.itemKey）同样要改指到保留条目：被合并的 key 已经不存在了，
+    // 留着它等于让标注挂在一个永远找不到的条目上。
+    for (const [id, meta] of Object.entries(s.annoMeta || {})) {
+      if (!meta || !drop.has(meta.itemKey)) continue;
+      meta.itemKey = keepKey;
+      if (!keep.annoIds.includes(id)) keep.annoIds.push(id);
+    }
   }
   keep.collectionIds = validCollectionIds(keep.collectionIds);
   keep.updated = now();
@@ -1529,18 +1576,44 @@ function redo() {
 
 // 给导出函数套一层：执行前后比对，真有变化才留撤销点（返回 false / 没有改动时不污染栈）。
 // 注意 addPdf / importItems 之类是 async：要等 Promise 落定后再比快照，否则永远比在中间态。
+//
+// 笔记编辑也进撤销栈，但**同一条笔记的连续编辑合并成一个撤销点**（NOTE_COALESCE_MS）。
+// 不合并的话打字每 700ms 就压一个整库快照，栈立刻被填满；完全不记录的话，
+// 撤销别的操作（比如「添加标签」）会连后来保存的笔记一起回退——那是真的丢数据（R-v1.6d-01）。
+const NOTE_COALESCE_MS = 4000;
+function noteKeyOf(args) { return String(args[0] == null ? '' : args[0]) + '|' + String(args[1] == null ? '' : args[1]); }
+
 function enableUndo(names) {
   for (const name of Object.keys(names)) {
     const orig = module.exports[name];
     if (typeof orig !== 'function' || orig.__undoWrapped) continue;
     const wrapped = function (...args) {
+      // 能合并就不必拍「之前」的快照：省掉两次整库 JSON，打字时不至于卡
+      const top = undoStack[undoStack.length - 1];
+      if (name === 'updateNote' && top && top.note === noteKeyOf(args)
+        && (Date.now() - (top.at || 0) < NOTE_COALESCE_MS)) {
+        const r0 = orig.apply(module.exports, args);
+        const bump = () => {
+          const t = undoStack[undoStack.length - 1];
+          if (t && t.note === noteKeyOf(args)) t.at = Date.now();
+          redoStack = [];
+        };
+        if (r0 && typeof r0.then === 'function') { r0.then(bump, bump); return r0; }
+        bump();
+        return r0;
+      }
       let before = '';
       try { before = snapshotJson(); } catch (_) {}
       const finish = () => {
         let after = before;
         try { after = snapshotJson(); } catch (_) {}
         if (before && after !== before) {
-          undoStack.push({ desc: names[name], snap: before });
+          undoStack.push({
+            desc: names[name], snap: before,
+            // 只有笔记编辑参与合并，其它操作不带这两个字段
+            note: name === 'updateNote' ? noteKeyOf(args) : '',
+            at: Date.now(),
+          });
           if (undoStack.length > UNDO_LIMIT) undoStack.shift();
           redoStack = [];
         }
@@ -1565,7 +1638,7 @@ module.exports = {
   findItem, findItemByPath, setPageByKey, addFeed, removeFeed,
   addTag, removeTag, renameTag, removeTagEverywhere, mergeTags, setTagColor,
   addRelation, removeRelation,
-  addNote, updateNote, removeNote,
+  addNote, updateNote, removeNote, normalizeNoteMeta, normalizeImageW, NOTE_STATUS,
   addCollection, removeCollection, renameCollection, setCollectionColor, moveItem, setCollections, setAttachment, setAttachmentFingerprint, setSnapshot,
   addSearch, removeSearch,
   setAnnoTags, addAnnoTags, removeAnnoTag,
@@ -1578,7 +1651,8 @@ module.exports = {
   resetUndo() { undoStack = []; redoStack = []; },   // 测试钩子：清空撤销栈（不动数据）
 };
 
-// 哪些操作可以撤销（描述会显示在提示里）。笔记的逐字编辑不进撤销栈，否则打字就把栈填满了。
+// 哪些操作可以撤销（描述会显示在提示里）。
+// 笔记编辑也在里面，但同一条笔记的连续编辑会合并成一个撤销点（见 enableUndo）。
 enableUndo({
   addPdf: '添加文档',
   // 导入链路已经改走 ensurePdf（查重与建条目要在同一段同步代码里完成）。
@@ -1615,4 +1689,7 @@ enableUndo({
   updateAnno: '编辑标注',
   linkAnnoToItem: '关联标注与条目',
   unlinkAnno: '解除标注关联',
+  addNote: '添加笔记',
+  updateNote: '编辑笔记',
+  removeNote: '删除笔记',
 });

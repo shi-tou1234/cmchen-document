@@ -421,9 +421,9 @@ async function loadPdf(data, fileName, smoke, meta) {
   const my = ++loadSeq;
   // 换文档就把在跑的重排任务作废：它读的是上一份的页，留着只会串内容
   if (reflow.busy || reflow.open) reflowCancel();
-  // 上一份文档的标注读盘状态不能带过来：它会让新文档一打开就被判成「标注损坏」
-  s.annoState = { status: 'unknown', annoPath: '', error: '' };
-  s.annoBrokenNotified = false;
+  // 这里**不**重置 s.annoState：此刻屏幕上的还是上一份文档，它的标注状态仍然有效。
+  // 提前重置会让「打开下一份」时被保存保护判成「标注还没读完」而取消（R-v1.6c-02）；
+  // 真正的重置发生在 startAnnoRestore()——新文档成为当前文档的那一刻。
   // 这次加载是为哪个标签开的：结尾回写标签时要用它，不能拿「此刻的活动标签」凑合
   const tabId = App.activeTabId;
   // v9：切文档前先停掉朗读，别让上一篇的声音念着新一篇的文字
@@ -451,6 +451,9 @@ async function loadPdf(data, fileName, smoke, meta) {
     if (my !== loadSeq) { try { await pdfDoc.destroy(); } catch (_) {} return; }
     if (prevRef) { try { await prevRef.destroy(); } catch (_) {} }
     if (my !== loadSeq) { try { await pdfDoc.destroy(); } catch (_) {} return; }
+    // 目标标签已经没了（关掉了它、或关掉了最后一个标签）：这次加载没有归宿。
+    // 代际检查挡不住「关标签」——关标签不一定递增 loadSeq，所以这里再确认一次（R-v1.6d-03）。
+    if (tabId && !tabById(tabId)) { try { await pdfDoc.destroy(); } catch (_) {} return; }
     s.refDoc = null;
     s.refDocPages = 0;
 
@@ -771,6 +774,10 @@ async function switchTab(id, page) {
 function closeDocument() {
   const s = App.state;
   if (reflow.busy || reflow.open) reflowCancel();
+  // 作废还没落地的加载：closeDocument 之后又有一份文档「加载完成」是最坏的情况——
+  // 标签已经没了，正文却重新出现（R-v1.6d-03）。代际一加，所有在途的加载都会在
+  // 下一个 await 检查点自行退出。
+  loadSeq++;
   s.annoState = { status: 'unknown', annoPath: '', error: '' };
   s.annoBrokenNotified = false;
   if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
@@ -1433,18 +1440,24 @@ function portalEnabled() {
 async function portalFollow(entry) {
   const s = App.state;
   const text = String(entry || '').trim();
+  // 不管最后找没找到，都先把这条条目记下来：Overview 的手动入口随时可调用，
+  // 用户不必为了改一篇再点回去把 Smart Jump 跑一遍。
+  overview.pending = text;
   if (!text || !s.filePath) return null;
   if (!window.pdfBridge || !pdfBridge.portalTarget) return null;
   if (!portalEnabled()) return null;
   let r = null;
   try { r = await pdfBridge.portalTarget({ entry: text, path: s.filePath }); } catch (_) { return null; }
-  if (!r || !r.ok || !r.found) return null;
+  if (!r || !r.ok || !r.found) { portalHint(true); return null; }
   if (r.path && s.filePath && String(r.path) === String(s.filePath)) return null;
   if ((r.score || 0) < 0.75) {
-    // 弱匹配只提示、不动作：跳错一篇比不跳更让人困惑
-    setStatus('库里可能有这条引用：' + r.title + '（把握不大，没有自动打开）');
+    // 弱匹配只提示、不动作：跳错一篇比不跳更让人困惑。
+    // 但「不猜」不该等于「没得选」——右下角挂一个入口让用户自己挑。
+    setStatus('库里可能有这条引用：' + r.title + '（把握不大 → Alt+O 或点「挑一篇」自己选）');
+    portalHint(true);
     return null;
   }
+  portalHint(false);
   if (!s.split) App.setSplitView(true);
   const ok = await loadRefDoc(r.path, r.title, { page: r.page || 1 });
   if (!ok) return null;
@@ -1452,6 +1465,174 @@ async function portalFollow(entry) {
   toast('引用跟随：' + r.title, 2600);
   return r;
 }
+
+/* ---------- Overview：机器没把握时，由用户自己挑（仿 Sioyek 的 Overview） ----------
+ * Smart Jump 与 Portal 的判定原则是「够不到阈值就不猜」——跳错一篇比不跳更让人困惑，
+ * 这条不能动。但「不猜」的代价是：用户明明知道自己要哪一篇，却没处说。
+ * 这里不改变判定策略，只补一个落口：把机器排过序的候选摆出来，点一下就走自动 Portal
+ * 那条完全相同的路径（同样的 setSplitView + loadRefDoc + findStartPage）。
+ * 候选为空也不算失败——下面还有整库的标题/作者搜索，手挑永远能做到。
+ */
+const overview = { pending: '', cands: [], candError: '', libItems: [], libError: '', timer: 0, seq: 0 };
+
+function overviewPending() {
+  return String(overview.pending || '').trim();
+}
+
+// 右下角那个「挑一篇」：弱匹配时才出现，避免常态占着状态栏
+function portalHint(show) {
+  const b = $('portal-cand');
+  clearTimeout(overview.timer);
+  if (!b) return;
+  if (show) {
+    b.hidden = false;
+    overview.timer = setTimeout(() => { b.hidden = true; }, 45000);
+  } else {
+    b.hidden = true;
+  }
+}
+
+function ovScoreHtml(c) {
+  const pct = Math.round((c.score || 0) * 100);
+  const cls = (c.score || 0) >= 0.75 ? ' strong' : ((c.score || 0) >= 0.5 ? ' mid' : '');
+  return '<span class="ov-score' + cls + '" title="' + escHtml(c.why || '') + '">' + pct + '%</span>';
+}
+
+function ovRowHtml(it, opts) {
+  const o = opts || {};
+  const meta = [it.authors, it.year].filter(Boolean).join(' · ');
+  // data-ov-cand：区分「机器排出来的候选」和「全库列表」，界面上行距一致，语义不同
+  return '<button class="ov-item" data-ov-key="' + escHtml(it.key) + '"'
+    + (o.cand ? ' data-ov-cand="1"' : '')
+    + ' data-ov-title="' + escHtml(it.title) + '">'
+    + '<span class="ov-title">' + escHtml(it.title) + '</span>'
+    + '<span class="ov-meta">' + escHtml(meta || '—')
+    + (o.why && it.why ? ' · ' + escHtml(it.why) : '') + '</span>'
+    + (o.score ? ovScoreHtml(it) : '')
+    + '</button>';
+}
+
+function closeOverview() {
+  const m = $('overview-picker');
+  if (m) m.hidden = true;
+}
+
+function ovMatch(it, q) {
+  if (!q) return true;
+  return (String(it.title || '') + ' ' + String(it.authors || '') + ' ' + String(it.year || ''))
+    .toLowerCase().indexOf(q) >= 0;
+}
+
+function renderOverview() {
+  const list = $('overview-list');
+  if (!list) return;
+  const q = String(($('overview-q') || {}).value || '').trim().toLowerCase();
+  const out = [];
+  const cand = q ? overview.cands.filter((c) => ovMatch(c, q)) : overview.cands.slice();
+  if (cand.length) {
+    if (!q) out.push('<div class="ov-sec">机器觉得可能是这几篇（按把握排序）</div>');
+    for (const c of cand) out.push(ovRowHtml(c, { score: true, why: true, cand: true }));
+  }
+  const shown = new Set(cand.map((c) => c.key));
+  const pool = overview.libItems.filter((x) => ovMatch(x, q) && (q || !shown.has(x.key)));
+  if (overview.libError) {
+    out.push('<button class="ov-empty" data-ov-retry="1">库列表读取失败：'
+      + escHtml(overview.libError) + '（点击重试）</button>');
+  } else if (overview.candError && !overview.cands.length) {
+    out.push('<button class="ov-empty" data-ov-retry="1">候选读取失败：'
+      + escHtml(overview.candError) + '（点击重试）</button>');
+  } else if (pool.length) {
+    out.push('<div class="ov-sec">' + (q ? '库里匹配到的（' + pool.length + ' 篇）' : '库里其余 PDF（打几个字按标题 / 作者缩小范围）') + '</div>');
+    for (const x of pool.slice(0, q ? 120 : 60)) out.push(ovRowHtml(x, {}));
+    if (pool.length > (q ? 120 : 60)) out.push('<div class="ov-empty">还有 ' + (pool.length - (q ? 120 : 60)) + ' 篇没列出，继续打字缩小范围</div>');
+  } else if (!cand.length) {
+    out.push('<div class="ov-empty">' + (q ? '没有匹配「' + escHtml(q) + '」的条目' : '库里还没有带 PDF 附件的条目') + '</div>');
+  }
+  list.innerHTML = out.join('');
+}
+
+async function loadOverviewCandidates(text) {
+  // 代际号：快速连续打开（或刚切换了当前文档）时，上一轮的响应可能晚到一步，
+  // 直接用会把「上一次的结果」盖回到列表里。这里和对开栏 loadRefDoc 同一个手法。
+  const my = overview.seq;
+  let r = null;
+  try {
+    r = await window.pdfBridge.portalCandidates({ entry: text, path: App.state.filePath || '' });
+  } catch (err) { r = { ok: false, error: err && err.message }; }
+  if (my !== overview.seq) return;
+  if (r && r.ok && Array.isArray(r.candidates)) {
+    overview.cands = r.candidates;
+    overview.candError = '';
+  } else {
+    overview.cands = [];
+    overview.candError = (r && r.error) || '未知错误';
+  }
+  renderOverview();
+}
+
+async function loadOverviewLib() {
+  const my = overview.seq;
+  let r = null;
+  try { r = await window.pdfBridge.lib.pdfList(); }
+  catch (err) { r = { ok: false, error: err && err.message }; }
+  if (my !== overview.seq) return;
+  if (r && r.ok && Array.isArray(r.items)) {
+    const cur = String(App.state.filePath || '');
+    overview.libItems = r.items.filter((x) => !cur || String(x.path) !== cur);
+    overview.libError = '';
+  } else {
+    overview.libItems = [];
+    overview.libError = (r && r.error) || '未知错误';
+  }
+  renderOverview();
+}
+
+async function openOverview(entry) {
+  const modal = $('overview-picker');
+  if (!modal) return;
+  const text = String(entry === undefined ? overviewPending() : (entry || '')).trim();
+  overview.seq++;
+  if (text) overview.pending = text;
+  overview.cands = []; overview.candError = '';
+  overview.libItems = []; overview.libError = '';
+  const box = $('overview-entry');
+  if (box) {
+    box.textContent = overviewPending()
+      ? (overviewPending().length > 240 ? overviewPending().slice(0, 240) + '…' : overviewPending())
+      : '（还没点过参考文献条目；直接在下面搜标题 / 作者也行）';
+  }
+  const q = $('overview-q');
+  if (q) q.value = '';
+  modal.hidden = false;
+  portalHint(false);
+  renderOverview();
+  setTimeout(() => { try { if (q) q.focus(); } catch (_) {} }, 30);
+  await Promise.all([loadOverviewCandidates(overviewPending()), loadOverviewLib()]);
+}
+App.openOverview = openOverview;
+
+async function pickOverview(key, title) {
+  closeOverview();
+  if (!key) return;
+  if (!window.pdfBridge || !window.pdfBridge.portalPick) return;
+  let r = null;
+  try { r = await window.pdfBridge.portalPick({ key }); }
+  catch (err) { r = { ok: false, error: err && err.message }; }
+  if (!r || !r.ok) { toast('打不开这篇：' + ((r && r.error) || '未知错误')); return; }
+  if (r.path && String(r.path) === String(App.state.filePath)) {
+    closeRefPicker();
+    App.clearRefDoc();
+    toast('这篇就是当前在读的文档');
+    return;
+  }
+  if (!App.state.split) App.setSplitView(true);
+  const ok = await loadRefDoc(r.path, r.title || title || '', { page: r.page || 1 });
+  if (ok) {
+    setStatus('手动选定：' + (r.title || '') + ' · 第 ' + (r.page || 1) + ' 页');
+    toast('对照文献：' + (r.title || '已载入'));
+  }
+}
+App.pickOverview = pickOverview;
 
 // 设置里读到 portal=false 就关掉（默认开）
 function portalLoadPref() {
@@ -2161,7 +2342,7 @@ function refreshAnnoPane() {
     const nbar = document.createElement('div');
     nbar.className = 'anno-export-bar anno-native-bar';
     nbar.innerHTML = '<span class="anno-export-label">PDF 自带</span>' +
-      '<button class="tbtn" id="anno-import-native" title="导入这份 PDF 里已有的标准批注（高亮 / 下划线 / 删除线 / 便签 / 文字 / 手绘 / 方框 / 直线）">导入 PDF 批注</button>' +
+      '<button class="tbtn" id="anno-import-native" title="导入这份 PDF 里已有的标准批注；如果这份是 Trove 导出的副本，会从内嵌数据完整恢复（含颜色、评论、子类型）">导入 PDF 批注</button>' +
       '<span class="anno-native-state" id="anno-native-state"></span>';
     nbar.querySelector('#anno-import-native').addEventListener('click', async () => {
       const btn = nbar.querySelector('#anno-import-native');
@@ -2172,10 +2353,12 @@ function refreshAnnoPane() {
       try {
         const r = window.NativeAnnos ? await window.NativeAnnos.import() : { ok: false };
         if (!r.ok) { state.textContent = ''; toast(r.error || '导入失败', 4000); return; }
-        if (!r.total) { state.textContent = '没有自带批注'; toast('这份 PDF 没有可导入的标准批注', 3500); return; }
-        state.textContent = r.added ? '已导入 ' + r.added + ' 条' : '已是全部导入';
+        if (!r.total) { state.textContent = '没有自带批注'; toast('这份 PDF 没有可导入的批注（也没有 Trove 副本里的内嵌数据）', 3500); return; }
+        state.textContent = r.added ? '已恢复 ' + r.added + ' 条' : '已是全部导入';
         toast(r.added
-          ? '已导入 ' + r.added + ' 条 PDF 原有批注' + (r.skipped ? '，跳过 ' + r.skipped + ' 条（已存在或不支持）' : '')
+          ? (r.source === 'embedded'
+            ? '已从副本内嵌数据恢复 ' + r.added + ' 条批注' + (r.skipped ? '，跳过 ' + r.skipped + ' 条（已存在）' : '')
+            : '已导入 ' + r.added + ' 条 PDF 原有批注' + (r.skipped ? '，跳过 ' + r.skipped + ' 条（已存在或不支持）' : ''))
           : '没有新批注可导入（已存在 ' + r.skipped + ' 条）', 4500);
         refreshAnnoPane();
       } finally {
@@ -2796,24 +2979,38 @@ App.quoteSelection = async function (text, page) {
 // 凭据是「每次加载一份」的：路径 + 加载代际 + promise。用旧文档的恢复结果放行，
 // 等于把 A 的结论用在 B 上（第七轮审核 R7-01）。
 let annoRestore = { gen: -1, path: '', promise: null };
+// 「当前已显示文档」的标注凭据：路径 + 它是第几代加载装上去的。
+// 不能拿全局 loadSeq 当凭据：下一次加载一开始就把 loadSeq 递增了，但屏幕上的还是上一份，
+// 拿新代际去核对旧文档的恢复句柄必然不匹配，保存保护就会把「打开下一份」也一并拦掉
+// （R-v1.6c-02）。凭据只在这一份文档真正成为当前文档时更新。
+let annoDoc = { path: '', gen: -1 };
 let annoRetry = 0;
 
 function startAnnoRestore(filePath) {
   annoRetry = 0;
-  const token = { gen: loadSeq, path: String(filePath || ''), promise: null };
+  const p = String(filePath || '');
+  // 新文档成为当前文档的时刻：凭据与状态一起换。放在这里而不是 loadPdf 开头，
+  // 是因为 loadPdf 开头到真正换页之间还有一段销毁等待，那期间显示的仍是上一份。
+  annoDoc = { path: p, gen: loadSeq };
+  App.state.annoState = { status: 'unknown', annoPath: '', error: '' };
+  App.state.annoBrokenNotified = false;
+  const token = { gen: loadSeq, path: p, promise: null };
   annoRestore = token;
-  token.promise = restoreAnnos(filePath);
+  token.promise = restoreAnnos(p);
   return token;
 }
 
 // 等到「这一份文档、这一次加载」的标注恢复出结果。
 // 返回 true 表示等到了、且等待期间没有切文档（可以放心用 App.state.annoState 判断）。
+// 判定「还没切走」靠的是恢复令牌 + 当前路径：令牌换了或路径变了都说明换了文档。
+// 刻意不比对 loadSeq——下一份文档可能已经开始加载（loadSeq 已递增）但还没装上去，
+// 那种情况下这份文档的标注仍然是可信的，该保存就得保存。
 async function annoRestoreSettled(path0, gen0) {
   const t = annoRestore;
   if (!t || !t.promise) return false;
   if (t.gen !== gen0 || t.path !== path0) return false;
   try { await t.promise; } catch (_) {}
-  return annoRestore === t && loadSeq === gen0 && App.state.filePath === path0;
+  return annoRestore === t && App.state.filePath === path0;
 }
 
 function annoStateOk() {
@@ -2857,9 +3054,10 @@ async function saveAnnosNow(force) {
     // 先看这次文档的标注有没有读完，再决定动不动笔（R7-01）：
     // 刚打开就保存会把「空」写回去，覆盖上次正常保存的标注，且主进程的损坏检查查不出来
     // ——磁盘上那份是把.request 写成功的合法 JSON，看起来跟「用户删光了」一模一样。
-    const path0 = s.filePath;
-    const gen0 = loadSeq;
-    const settled = await annoRestoreSettled(path0, gen0);
+    // 凭据取「当前已显示文档」的那一份，不是全局 loadSeq——下一份可能正在加载但还没装上去
+    const path0 = annoDoc.path || s.filePath;
+    const gen0 = annoDoc.gen >= 0 ? annoDoc.gen : loadSeq;
+    const settled = path0 === s.filePath ? await annoRestoreSettled(path0, gen0) : false;
     if (!settled) {
       // 这批改动还留在内存里，别让用户白画：等这次读盘落地后再补一次（最多重试 20 次，
       // 避免在没有恢复句柄的环境里空转出一个永不停止的定时器）
@@ -2911,13 +3109,47 @@ async function saveAnnosNow(force) {
 }
 App.flushAnnos = saveAnnosNow;
 
+// 关窗握手（v1.6d）：主进程拦下 close，等这里把标注与笔记都存完再真正关闭。
+// 顺序有讲究：笔记先存（它可能改动条目标题），标注后存；任一步失败都要如实回报，
+// 让主进程保留窗口——把没保存的内容关掉是最坏的失败方式。
+async function handleWillClose() {
+  let ok = true;
+  let error = '';
+  try {
+    if (window.LibraryUI && LibraryUI.flushPendingSaves) {
+      if (!await LibraryUI.flushPendingSaves()) { ok = false; error = '笔记没能保存到磁盘。'; }
+    }
+  } catch (e) { ok = false; error = '笔记保存出错：' + (e && e.message ? e.message : e); }
+  if (ok) {
+    try {
+      // 标注还在读盘（刚打开就关窗）时给它一小会儿：直接 flush 会被保护拦成失败，
+      // 用户看到的却是「保存失败」的弹窗，容易误判成丢数据。
+      if (App.state.filePath) {
+        await Promise.race([
+          annoRestoreSettled(annoDoc.path || App.state.filePath, annoDoc.gen),
+          new Promise((r) => setTimeout(r, 1500)),
+        ]);
+      }
+      clearTimeout(App._annoSaveTimer);
+      if ((await App.flushAnnos()) === false) { ok = false; error = '标注没能写入磁盘（磁盘空间或目录权限？）。'; }
+    } catch (e) { ok = false; error = '标注保存出错：' + (e && e.message ? e.message : e); }
+  }
+  if (window.pdfBridge && pdfBridge.closeReady) pdfBridge.closeReady({ ok, error });
+  // 给回归留个可读的结果（关窗后窗口就没了，探针没法再问一次）
+  App._lastCloseFlush = { ok, error };
+  return { ok, error };
+}
+App.handleWillClose = handleWillClose;
+if (window.pdfBridge && pdfBridge.onWillClose) pdfBridge.onWillClose(handleWillClose);
+
 // 切文档 / 关标签前先保存当前标注。返回 true 表示可以继续走。
 // 标注文件损坏时不能 flush（会把还能人工修复的原文件换成一份合法空数据），
 // 但也不能因此把导航卡死——只如实提示「这批改动没保存」，人得能走。
 async function flushBeforeLeave(where) {
   // 先等这批标注读完：读到的内容会并进内存（restore 是往 Map 里追加，不清空用户刚画的），
   // 存下去才是「旧的 + 新的」。不等就用空覆盖上一次的正常保存（R7-01）。
-  if (App.state.filePath) await annoRestoreSettled(App.state.filePath, loadSeq);
+  // 等的是「当前已显示文档」那一份，不是正在加载的下一份（R-v1.6c-02）。
+  if (App.state.filePath) await annoRestoreSettled(annoDoc.path || App.state.filePath, annoDoc.gen);
   if (annoBrokenReason()) {
     clearTimeout(App._annoSaveTimer);
     toast('当前文档的标注文件已损坏，改动没有保存' + (where ? '（' + where + '后这些改动会丢失）' : ''), 6000);
@@ -2938,7 +3170,7 @@ App.rebuildAnnosFile = async function () {
   if (!s.filePath) return { ok: false, error: '没有文档路径' };
   // 重建的判断依据是「读盘状态」，而状态要等这次读盘结束才有意义；
   // 没等就直接看 'unknown'，会把「还在读」误判成「没坏，无需重建」。
-  await annoRestoreSettled(s.filePath, loadSeq);
+  await annoRestoreSettled(annoDoc.path || s.filePath, annoDoc.gen);
   if (annoBrokenReason() === '') return { ok: true, note: '当前标注文件没有损坏，无需重建' };
   clearTimeout(App._annoSaveTimer);
   const r = await saveAnnosNow(true);
@@ -2980,8 +3212,8 @@ async function restoreAnnos(filePath) {
     await App.state.bookmarksReady;
   }
   if (!filePath) return;
-  App.state.annoState = { status: 'unknown', annoPath: '', error: '' };
-  App.state.annoBrokenNotified = false;
+  // annoState 已在 startAnnoRestore() 里重置（那一刻这份文档才成为当前文档）。
+  // 这里再置一次会把「读盘期间已经被更新的加载换掉」的状态又打回 unknown，反而更危险。
   if (!window.pdfBridge.loadAnnos && !window.pdfBridge.loadAnnosState) {
     // 压根没有读标注的通道，也就没有什么「还没读完」可等——留在 unknown 会把所有保存永久挡住
     App.state.annoState = { status: 'ok', annoPath: '', error: '' };
@@ -3642,10 +3874,15 @@ function setStatus(t) { App.els.status.textContent = t; }
 App.buildExportPayload = function (outPath) {
   const s = App.state;
   const pages = [];
+  // v1.6：给「扁平化后可恢复」留一份原始数据。上面那套是**画给 PDF 看**的坐标指令
+  // （已转成 PDF 用户空间、便签被摊成文字），拿回来当标注用会丢掉 id、kind、评论结构；
+  // 所以另存一份 sidecar 原样数据，由主进程作为附件塞进副本。
+  const recoverPages = [];
   for (const [n, shapes] of s.annos) {
     if (!shapes || !shapes.length) continue;
     const el = App.pageEl(n);
     if (!el || !el._pdfPage) continue;
+    recoverPages.push({ page: n, shapes });
     const vp = el._pdfPage.getViewport({ scale: 1 });
     const conv = (p) => { const r = vp.convertToPdfPoint(p.x, p.y); return { x: r[0], y: r[1] }; };
     const out = shapes.map((sh) => {
@@ -3680,7 +3917,14 @@ App.buildExportPayload = function (outPath) {
     });
     pages.push({ index: n - 1, shapes: out });
   }
-  return { fileName: s.fileName, data: s.sourceBytes, pages, outPath };
+  return {
+    fileName: s.fileName, data: s.sourceBytes, pages, outPath,
+    recover: {
+      version: 1, app: 'Trove', exportedAt: new Date().toISOString(),
+      sourcePath: s.filePath || '', fileName: s.fileName || '',
+      pages: recoverPages,
+    },
+  };
 };
 
 // 批注归档（v36）：原文档 + 标注 JSON + 可读清单，一个 zip 带走。
@@ -3692,10 +3936,11 @@ async function doExportArchive(outPath) {
   if (!window.pdfBridge || !pdfBridge.exportAnnoArchive) { toast('当前环境不支持归档导出'); return; }
   // 归档读的是磁盘上的 sidecar，而标注改动要等 600ms 才落盘（notifyAnnoChanged）。
   // 不先 flush 就打包，会把「刚改完的那批」漏掉；第一条标注还没保存时甚至导出零批注。
-  // 同时记住路径与加载代际：flush 是异步的，期间切了文档就不能再按新文档的口径打包。
-  const path0 = s.filePath;
-  const gen0 = loadSeq;
-  const sameDoc = () => loadSeq === gen0 && App.state.filePath === path0 && App.state.mode === 'pdf';
+  // 同时记住路径与凭据：flush 是异步的，期间切了文档就不能再按新文档的口径打包。
+  // 凭据取「当前已显示文档」那一份（annoDoc），不是全局 loadSeq——下一份可能正在加载。
+  const path0 = annoDoc.path || s.filePath;
+  const gen0 = annoDoc.gen >= 0 ? annoDoc.gen : loadSeq;
+  const sameDoc = () => App.state.filePath === path0 && App.state.mode === 'pdf';
 
   clearTimeout(App._annoSaveTimer);   // 无论走哪条分支，都别留一个待触发的写盘定时器
 
@@ -3756,8 +4001,9 @@ async function doSave() {
   const res = await window.pdfBridge.exportPdf(payload);
   if (res && res.ok) {
     const partial = res.skipped > 0 ? '；有 ' + res.skipped + ' 条标注未导出（可能包含不支持的文字）' : '';
-    setStatus('已导出副本：' + res.path + partial);
-    toast(partial ? '副本已保存，但有 ' + res.skipped + ' 条标注未导出，请核对' : '已保存副本', partial ? 6000 : 1800);
+    const recover = res.embedded ? '；副本内嵌了可恢复的批注数据' : '';
+    setStatus('已导出副本：' + res.path + partial + recover);
+    toast(partial ? '副本已保存，但有 ' + res.skipped + ' 条标注未导出，请核对' : '已保存副本' + (res.embedded ? '（打开副本点「导入 PDF 批注」可完整恢复）' : ''), partial ? 6000 : 2600);
   }
   else if (res && res.canceled) setStatus('已取消导出');
   else setStatus('导出失败：' + (res && res.error ? res.error : '未知错误'));
@@ -4359,6 +4605,34 @@ function bind() {
     });
   }
 
+  // Overview 候选：机器没把握时的手动兜底。同一个「比较 → 呈现 → 打开」流程，
+  // 只不过「比」在 portal.rankCandidates 里做一次，由人来决定用哪个结果。
+  {
+    const modal = $('overview-picker');
+    const x = $('overview-x'), c = $('overview-close');
+    const q = $('overview-q'), list = $('overview-list');
+    if (x) x.addEventListener('click', closeOverview);
+    if (c) c.addEventListener('click', closeOverview);
+    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeOverview(); });
+    if (q) q.addEventListener('input', renderOverview);
+    if (list) list.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-ov-retry]')) {
+        await Promise.all([loadOverviewCandidates(overviewPending()), loadOverviewLib()]);
+        return;
+      }
+      const btn = e.target.closest('[data-ov-key]');
+      if (!btn) return;
+      await pickOverview(btn.getAttribute('data-ov-key'), btn.getAttribute('data-ov-title'));
+    });
+    // Esc 挂在弹窗自己身上：全局那个 keydown 在文献库打开时会提前返回，
+    // 而 Overview 也可能从库目录里被调用（阅读器被覆盖层挡着时同样走得到）。
+    if (modal) modal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeOverview(); }
+    });
+    const hint = $('portal-cand');
+    if (hint) hint.addEventListener('click', () => { portalHint(false); openOverview(); });
+  }
+
   // 弹系统对话框选 PDF（工具栏「打开」、标签栏「＋」、Ctrl+O 都走这里）
   async function openViaDialog() {
     const res = await window.pdfBridge.openPdfDialog();
@@ -4595,6 +4869,11 @@ function bind() {
     if (e.key === 'Escape' && refi.open) { closeRefImport(); e.preventDefault(); return; }
     if (e.key === 'Escape' && reflow.open) { closeReflow(); e.preventDefault(); return; }
     if (e.key === 'Escape' && zoomMode.on) { setZoomMode(false); e.preventDefault(); return; }
+    if (e.key === 'Escape' && !$('overview-picker').hidden) { closeOverview(); e.preventDefault(); return; }
+    // Alt+O：Overview。放在 Alt+← 旁边，与 Portal 的入口同一只手够得着
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'o' || e.key === 'O')) {
+      openOverview(); e.preventDefault(); return;
+    }
     // 工具快捷键：v 看图 / p 画笔 / h 荧光 / l 直线 / r 矩形 / a 箭头 / t 文字 / n 便签 / e 橡皮
     if (!e.ctrlKey && !e.altKey && !e.metaKey && App.state.mode !== 'rich') {
       const tool = TOOL_KEYS[e.key.toLowerCase()];
@@ -4751,6 +5030,12 @@ function bind() {
       '-',
       { label: '放大看这一块', run: () => openRegionLightbox(pageEl, e.clientX, e.clientY) },
       { label: '复制页码', run: () => { window.pdfBridge.copyText(String(n)); toast('已复制页码 ' + n); } },
+      { label: '这条引用的出处：自己挑一篇…', run: () => {
+        // 优先用上一次 Smart Jump / Portal 拿到的参考文献条目文本；没有就用选中的文字，
+        // 再没有就让弹窗空着 —— 下面那份「库里所有 PDF」本来就够手挑。
+        const sel = String((window.getSelection && window.getSelection()) || '').trim();
+        openOverview(overviewPending() || sel);
+      } },
       '-',
       {
         label: App.state.viewMode === 'spread' ? '改回连续滚动' : '改成双页对开',
@@ -4942,6 +5227,7 @@ function cmdCommands() {
     { id: 'speak', label: '朗读当前页', keys: '', group: '阅读', run: () => App.speakToggle(), need: hasPdf },
     { id: 'speakstop', label: '停止朗读', keys: '', group: '阅读', run: () => App.speakStop(), need: hasPdf },
     { id: 'split', label: '分屏参考视图', keys: '', group: '阅读', run: () => { if ($('btn-split')) $('btn-split').click(); }, need: hasPdf },
+    { id: 'overview', label: '候选出处：手动挑一篇（Overview）', keys: 'Alt+O', group: '阅读', run: () => { openOverview(); } },
     { id: 'portal', label: (portalEnabled() ? '关闭引用跟随（Portal）' : '打开引用跟随（Portal）'), keys: '', group: '阅读', run: () => {
       portal.off = portalEnabled();
       if (window.pdfBridge && window.pdfBridge.setSettings) window.pdfBridge.setSettings({ portal: !portal.off });
@@ -4965,6 +5251,13 @@ function cmdCommands() {
       if (window.pdfBridge && window.pdfBridge.setSettings) window.pdfBridge.setSettings({ theme: next });
       toast('已切换到' + (next === 'dark' ? '深色' : '浅色') + '主题');
     } },
+
+    // 帮助：说明写在 src/help-content.js；这里只留最常用的三个入口，
+    // 具体某条功能可以在指南里搜（Help 打开后输入框自动聚焦）。
+    { id: 'help', label: '使用指南（所有功能怎么用）', keys: 'F1', group: '帮助', run: () => { if (window.Help) window.Help.open(); } },
+    { id: 'help-keys', label: '快捷键速查', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.openTopic('shortcuts'); } },
+    { id: 'help-trouble', label: '常见问题排查', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.openTopic('trouble'); } },
+    { id: 'help-limits', label: '当前版本做不到什么', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.openTopic('limits'); } },
   ];
   return list.filter((c) => c.need !== false);
 }

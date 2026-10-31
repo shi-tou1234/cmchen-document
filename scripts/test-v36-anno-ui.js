@@ -160,6 +160,13 @@ function ok(name, cond, detail) {
 
   // ---------- 3. 批注归档 zip ----------
   const zipPath = String(st.dataDir).replace(/[\\\\/]+$/, '') + '/archive.zip';
+  // 归档读的是磁盘上的 sidecar，而标注要等 600ms 的自动保存才落盘。
+  // 不先等它落地，这条断言就变成「看机器快不快」——机器闲的时候反而会失败（既有 flake）。
+  const sideShapes = async () => {
+    const pages = await pdfBridge.loadAnnos(App.state.filePath);
+    return (pages || []).reduce((n, e) => n + ((e.shapes || []).length), 0);
+  };
+  for (let i = 0; i < 40 && (await sideShapes()) < 2; i++) await sleep(100);
   const arc = await pdfBridge.exportAnnoArchive({ path: App.state.filePath, outPath: zipPath });
   push('归档导出成功', !!(arc && arc.ok) && !!arc.path, JSON.stringify(arc));
   push('归档统计到批注条数', arc && arc.annotations >= 2, arc && arc.annotations);

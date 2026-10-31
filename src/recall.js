@@ -30,6 +30,7 @@ const AGAIN_DELAY = 10 * 60 * 1000;     // 「忘了」→ 本轮 10 分钟后�
 const SESSION_MAX = 30;                 // 一次最多复习这么多张，做不完明天见
 const RATINGS = [1, 2, 3, 4];
 const Q_OF = { 1: 2, 2: 3, 3: 4, 4: 5 };
+const MAX_DEPTH = 3;                    // 大纲缩进最多 3 层（0 = 顶层）
 
 let dir = null;
 let store = null;
@@ -54,6 +55,9 @@ function sanitizeCard(c, now) {
     lapses: Math.max(0, Math.round(num(c.lapses, 0))),
     last: Math.max(0, Math.round(num(c.last, 0))),
     lastRating: lr >= 0 && lr <= 4 ? lr : 0,
+    // 大纲层级（v1.6）：0 = 顶层，Tab 缩进一层。卡片本身还是那张卡，
+    // 层级只是「这张属于上面那张的展开」，不影响调度与复习顺序。
+    depth: Math.max(0, Math.min(MAX_DEPTH, Math.round(num(c.depth, 0)))),
   };
 }
 
@@ -197,6 +201,41 @@ function has(id) { return !!(store && store.cards[String(id || '').trim()]); }
 function all() { return store ? store.cards : {}; }
 function cardOf(id) { return (store && store.cards[String(id || '').trim()]) || null; }
 
+/*
+ * 大纲：全部卡片按「加入时间」排成一张表，带 depth。
+ * 不按标注的文档 / 页码排，是因为回顾的顺序是「你想怎么想」，不是「文献怎么排版」——
+ * 同一篇文献的两条摘录可能分属不同主题，按页码排反而要把它们拆开。
+ */
+function outline(now) {
+  const at = num(now, Date.now());
+  const rows = [];
+  for (const [id, c] of Object.entries(store ? store.cards : {})) {
+    rows.push({
+      id, depth: c.depth || 0, addedAt: c.addedAt, due: c.due,
+      interval: c.interval, reps: c.reps, lapses: c.lapses,
+      last: c.last, lastRating: c.lastRating,
+      overdue: c.due <= at,
+    });
+  }
+  rows.sort((a, b) => (a.addedAt - b.addedAt) || a.id.localeCompare(b.id));
+  return rows;
+}
+
+// 调层级。depth 会被夹到 0–MAX_DEPTH；卡片不存在时返回失败而不是静默新建。
+function setDepth(id, depth, now) {
+  const key = String(id || '').trim();
+  if (!store || !key || !store.cards[key]) return { ok: false, error: '这张卡不在回顾里' };
+  const prev = store.cards[key].depth || 0;
+  const next = Math.max(0, Math.min(MAX_DEPTH, Math.round(num(depth, 0))));
+  if (next === prev) return { ok: true, id: key, depth: next, unchanged: true };
+  store.cards[key].depth = next;
+  if (!persist()) {
+    store.cards[key].depth = prev;
+    return saveFailed('大纲层级');
+  }
+  return { ok: true, id: key, depth: next };
+}
+
 // 到期卡：按到期时间升序（逾期最久的最先），一次最多 limit 张。
 function dueList(now, limit) {
   const at = num(now, Date.now());
@@ -282,6 +321,7 @@ function clear() {
 
 module.exports = {
   init, schedule, add, rate, remove, has, all, cardOf, dueList, stats, prune,
+  outline, setDepth,
   exportStore, importStore, clear, filePath,
-  constants: { DAY, MIN_EASE, MAX_INTERVAL, MAX_CARDS, AGAIN_DELAY, SESSION_MAX },
+  constants: { DAY, MIN_EASE, MAX_INTERVAL, MAX_CARDS, AGAIN_DELAY, SESSION_MAX, MAX_DEPTH },
 };

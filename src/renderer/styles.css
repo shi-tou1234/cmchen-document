@@ -1376,6 +1376,34 @@ body.tool-arrow .doc-page .anno { cursor: crosshair; }
 #nv-title:hover { border-color: var(--rule); }
 #nv-title:focus { border-color: var(--accent); background: var(--bg-input); }
 
+/* ---------- 笔记元数据面板（v1.6） ---------- */
+.nv-meta {
+  flex: 0 0 auto; margin: 8px 16px 0; padding: 8px 10px;
+  border: 1px solid var(--border-color); border-radius: 6px;
+  background: var(--panel-2, rgba(0, 0, 0, 0.02));
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 12px;
+}
+.nv-meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nv-meta-row select,
+.nv-meta-row input[type="text"] {
+  height: 26px; border: 1px solid var(--border-color); border-radius: 4px;
+  background: var(--bg-color); color: var(--ink); padding: 0 6px; font-size: 12px;
+}
+.nv-meta-row input[type="text"] { min-width: 180px; }
+.nv-meta-val { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.nv-meta-tags { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.nv-meta-tag {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 1px 4px 1px 6px; border-radius: 10px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.06)); color: var(--ink);
+}
+.nv-meta-tag-x {
+  border: none; background: transparent; color: var(--ink-3); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 0 2px;
+}
+.nv-meta-tag-x:hover { color: var(--danger, #b3261e); }
+
 /* ---------- 工具栏（PostToolbar.astro 原样移植） ---------- */
 #nv-toolbar { flex: 0 0 auto; margin: 8px 16px 0; }
 .post-toolbar {
@@ -1428,7 +1456,14 @@ body.nv-preview-hidden #nv-preview-wrap { display: none; }
   --text-color: #2c2416; --muted-text-color: #666;
   --border-color: #e5d6b8; --hover-bg-color: #f1e6d0; --link-color: #8b4513;
   --lh-body: 1.9; --lh-list: 1.85; --lh-pre: 1.75;
-  --fs-h1: 1.6em; --fs-h2: 1.4em; --fs-h3: 1.22em; --fs-h4: 1.08em; --fs-h5: 1em; --fs-h6: 0.95em;
+  /* v1.6：标题字号/字重可由设置调整。倍率与字重由 library-ui 写进 :root 的
+     --md-h-scale / --md-h-weight；这里统一乘上去，六个级别一起缩放，
+     不会出现「只调了 h1，h2 反而比 h1 还大」的错位。
+     注意：这两个变量**不能**在 .md-body 里再声明一次——局部声明会遮蔽 :root 上的值，
+     表现就是「滑杆动了、预览没动」。用 var(…, 默认值) 的兜底形式。 */
+  --fs-h1: calc(1.6em * var(--md-h-scale, 1)); --fs-h2: calc(1.4em * var(--md-h-scale, 1));
+  --fs-h3: calc(1.22em * var(--md-h-scale, 1)); --fs-h4: calc(1.08em * var(--md-h-scale, 1));
+  --fs-h5: calc(1em * var(--md-h-scale, 1)); --fs-h6: calc(0.95em * var(--md-h-scale, 1));
   --fs-code: 0.88rem; --fs-table-code: 0.85em; --fs-ruby: 0.65em;
   --fs-card-desc: 0.9em; --fs-card-meta: 0.85em; --fs-card-chip: 0.8em;
   --fs-music-title: 1rem; --fs-music-artist: 0.9rem;
@@ -1464,7 +1499,9 @@ body.theme-dark .md-body {
 }
 body.theme-dark #nv-preview-wrap { background: #1a1612; }
 
-.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 { font-weight: 700; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
+  font-weight: var(--md-h-weight, 700);
+}
 .md-body h1 {
   padding: 0.5rem 0; font-size: var(--fs-h1); margin: 2rem 0 1rem;
   border-bottom: 1px solid var(--text-color);
@@ -1473,10 +1510,10 @@ body.theme-dark #nv-preview-wrap { background: #1a1612; }
   padding: 0.4rem 0; font-size: var(--fs-h2); margin: 1.8rem 0 1rem;
   border-bottom: 1px solid var(--text-color);
 }
-.md-body h3 { font-size: var(--fs-h3); font-weight: 600; margin: 1.5rem 0 0.8rem; }
-.md-body h4 { font-size: var(--fs-h4); font-weight: 600; margin: 1.2rem 0 0.6rem; }
-.md-body h5 { font-size: var(--fs-h5); font-weight: 600; margin: 1rem 0 0.5rem; }
-.md-body h6 { font-size: var(--fs-h6); font-weight: 600; margin: 1rem 0 0.5rem; }
+.md-body h3 { font-size: var(--fs-h3); font-weight: calc(var(--md-h-weight, 700) - 100); margin: 1.5rem 0 0.8rem; }
+.md-body h4 { font-size: var(--fs-h4); font-weight: calc(var(--md-h-weight, 700) - 100); margin: 1.2rem 0 0.6rem; }
+.md-body h5 { font-size: var(--fs-h5); font-weight: calc(var(--md-h-weight, 700) - 100); margin: 1rem 0 0.5rem; }
+.md-body h6 { font-size: var(--fs-h6); font-weight: calc(var(--md-h-weight, 700) - 100); margin: 1rem 0 0.5rem; }
 .md-body .md-p { margin: 1.1rem 0; text-align: justify; }
 .md-body strong { font-weight: 700; }
 .md-body em { font-style: italic; }
@@ -1975,6 +2012,45 @@ body.theme-dark.invert-pages .doc-page { filter: invert(1) hue-rotate(180deg); }
 /* 卡片默认模糊：先回想再看答案，是主动回忆的关键；评分按钮在显示之前禁用。 */
 .rv-card { width: 620px; }
 .rv-progress { font-family: inherit; font-size: 11px; letter-spacing: 0; text-transform: none; color: var(--ink-2); }
+
+/* v1.6：复习 / 大纲 两个页签 */
+.rv-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--rule); border-radius: 6px; }
+.rv-tab {
+  border: none; background: transparent; color: var(--ink-2); cursor: pointer;
+  font: inherit; font-size: 11.5px; padding: 3px 10px; border-radius: 4px;
+}
+.rv-tab:hover { color: var(--ink); }
+.rv-tab.is-on { background: var(--surface-2); color: var(--ink); font-weight: 600; }
+
+/* v1.6：大纲 */
+.rv-ol-hint { font-size: 11.5px; color: var(--ink-2); margin: 0 0 10px; line-height: 1.6; }
+.rv-ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.rv-ol-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 6px calc(8px + var(--d, 0) * 20px);
+  border: 1px solid transparent; border-radius: 5px; cursor: default;
+  transition: background .12s ease, border-color .12s ease;
+}
+.rv-ol-row:hover { background: var(--surface-2); }
+.rv-ol-row:focus { outline: none; border-color: var(--accent); background: var(--surface-2); }
+.rv-ol-bullet {
+  flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--ink-3); opacity: .7;
+}
+.rv-ol-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.rv-ol-title { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-ol-meta { font-size: 10.5px; color: var(--ink-3); }
+.rv-ol-acts { flex: 0 0 auto; display: inline-flex; gap: 3px; opacity: 0; transition: opacity .12s ease; }
+.rv-ol-row:hover .rv-ol-acts, .rv-ol-row:focus .rv-ol-acts { opacity: 1; }
+
+/* v1.6：笔记里自动亮起来的卡片标题 */
+.rv-autolink {
+  display: inline; border: none; background: transparent; padding: 0; margin: 0;
+  font: inherit; color: inherit; cursor: pointer;
+  border-bottom: 1px dashed var(--accent, #8b4513);
+  text-decoration: none;
+}
+.rv-autolink:hover { background: var(--hover-bg-color, rgba(0, 0, 0, 0.05)); }
 .rv-src { font-size: 11.5px; color: var(--ink-2); }
 .rv-quote {
   font-size: 15px; line-height: 1.75; padding: 14px 16px; white-space: pre-wrap;
@@ -2239,3 +2315,210 @@ body.theme-dark .stamp-pick[data-stamp="todo"] { color: #b48ad0; }
 }
 .tbl-cell:focus { background: var(--accent-soft); }
 .tbl-th { background: var(--surface-2); font-weight: 600; }
+
+/* =========================================================
+   使用指南（内置帮助中心）
+   左边分类、右边正文、顶上搜索。风格沿用「纸 + 墨 + 印泥红」，
+   只在需要「指给你看」时用强调色（定位闪烁 / 当前节）。
+   ========================================================= */
+.help-modal { z-index: 120; }              /* 高于其它弹窗：从设置里打开也压得住 */
+.help-card { width: min(1000px, 96vw); height: min(78vh, 780px); min-height: 420px; }
+.help-head {
+  display: flex; align-items: center; gap: 14px; flex: 0 0 auto;
+  padding: 12px 16px; border-bottom: 1px solid var(--rule); background: var(--surface-3);
+}
+.help-brand { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; }
+.help-brand-name { font-size: 14px; font-weight: 600; letter-spacing: .02em; }
+.help-ver { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); }
+.help-search { position: relative; flex: 1 1 auto; display: flex; align-items: center; max-width: 460px; }
+.help-search svg { position: absolute; left: 9px; width: 15px; height: 15px; color: var(--ink-3); pointer-events: none; }
+.help-search input {
+  width: 100%; padding: 7px 10px 7px 30px; font: inherit; font-size: 12.5px;
+  color: var(--ink); background: var(--surface); border: 1px solid var(--rule-2); border-radius: var(--r);
+}
+.help-search input:focus { outline: none; border-color: var(--accent); }
+.help-main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 226px minmax(0, 1fr); }
+#help-nav {
+  overflow: auto; padding: 12px 10px 24px; border-right: 1px solid var(--rule);
+  background: var(--surface-3);
+}
+.help-group + .help-group { margin-top: 14px; }
+.help-group-title {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-3); padding: 0 8px 5px;
+}
+.help-nav-item {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer;
+  padding: 6px 8px; border-radius: var(--r); font: inherit; font-size: 12.5px; color: var(--ink-2);
+  line-height: 1.4;
+}
+.help-nav-item:hover { background: var(--surface-2); color: var(--ink); }
+.help-nav-item.active { background: var(--accent-soft); color: var(--accent-2); font-weight: 600; }
+.help-nav-item.is-cursor { box-shadow: inset 0 0 0 1px var(--accent); }
+.hni-group { display: block; font-size: 10px; color: var(--ink-3); margin-top: 2px; font-weight: 400; }
+.help-nav-note { font-size: 11px; color: var(--ink-3); padding: 0 8px 8px; }
+#help-article { overflow: auto; padding: 24px 30px 40px; }
+.help-kicker {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--accent); margin-bottom: 6px;
+}
+.help-title { margin: 0 0 8px; font-size: 21px; line-height: 1.35; font-weight: 600; letter-spacing: .01em; }
+.help-summary { margin: 0 0 12px; font-size: 13.5px; line-height: 1.75; color: var(--ink-2); }
+.help-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; }
+.help-where {
+  font-size: 11.5px; color: var(--ink-3); background: var(--surface-3); border: 1px solid var(--rule);
+  border-radius: 999px; padding: 3px 10px;
+}
+.help-act {
+  border: 1px solid var(--rule-2); background: var(--surface); color: var(--ink-2); cursor: pointer;
+  font: inherit; font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+}
+.help-act:hover { border-color: var(--ink-3); color: var(--ink); }
+.help-act.primary { background: var(--accent); border-color: var(--accent); color: var(--ink-inv); font-weight: 600; }
+.help-act.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
+.help-steps { list-style: none; margin: 0 0 6px; padding: 0; counter-reset: hs; }
+.help-steps > li { display: flex; gap: 11px; padding: 9px 0; border-top: 1px solid var(--rule); }
+.help-steps > li:first-child { border-top: 0; padding-top: 2px; }
+.help-step-n {
+  flex: 0 0 auto; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%;
+  background: var(--surface-2); color: var(--ink-2);
+  font-family: var(--font-mono); font-size: 10.5px; line-height: 20px; text-align: center;
+}
+.help-step-body { min-width: 0; }
+.help-step-t { font-size: 13px; font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+.help-step-d { font-size: 12.8px; line-height: 1.72; color: var(--ink-2); }
+.help-block { margin-top: 16px; }
+.help-block-h {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: 7px;
+}
+.help-keys { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; align-items: baseline; }
+.help-key-row { display: contents; }
+.help-keys kbd {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--ink);
+  background: var(--surface-3); border: 1px solid var(--rule-2); border-bottom-width: 2px;
+  border-radius: 3px; padding: 2px 6px; white-space: nowrap;
+}
+.help-keys span { font-size: 12.5px; color: var(--ink-2); }
+.help-tips { margin: 0; padding-left: 18px; }
+.help-tips li { font-size: 12.5px; line-height: 1.72; color: var(--ink-2); margin: 3px 0; }
+.help-limits { border-left: 2px solid var(--danger); padding-left: 12px; }
+.help-limits .help-block-h { color: var(--danger); }
+.help-see { display: flex; flex-wrap: wrap; gap: 6px; }
+.help-see-btn {
+  font: inherit; font-size: 12px; cursor: pointer; color: var(--accent-2);
+  background: var(--accent-soft); border: 1px solid transparent; border-radius: 999px; padding: 4px 11px;
+}
+.help-see-btn:hover { border-color: var(--accent); }
+.help-foot {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; border-top: 1px solid var(--rule); background: var(--surface-3);
+}
+.help-progress { font-size: 11px; color: var(--ink-3); font-family: var(--font-mono); }
+.help-foot-hint { font-size: 11px; color: var(--ink-3); }
+.help-empty { padding: 18px; font-size: 12.5px; color: var(--ink-3); line-height: 1.8; }
+#help-article code {
+  font-family: var(--font-mono); font-size: .92em; background: var(--surface-2);
+  border-radius: 3px; padding: 1px 4px; color: var(--ink);
+}
+#help-article .help-see code, #help-article kbd code { background: transparent; padding: 0; }
+
+/* 「在界面定位」：把控件滚进视野后闪两下，说明与实物对上号 */
+.help-flash { animation: help-flash 2s ease-out; border-radius: var(--r); }
+@keyframes help-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(140, 59, 46, 0); }
+  12% { box-shadow: 0 0 0 3px var(--accent); }
+  40% { box-shadow: 0 0 0 3px var(--accent); }
+  60% { box-shadow: 0 0 0 0 rgba(140, 59, 46, 0); }
+  78% { box-shadow: 0 0 0 3px var(--accent); }
+}
+
+/* 空态里的「使用指南」入口（#empty-hint 本身 pointer-events:none，按钮要单独放行） */
+#empty-hint { flex-direction: column; gap: 10px; }
+.empty-main { font-size: 15px; }
+.empty-help-row { font-size: 12.5px; color: var(--ink-3); }
+.linkbtn {
+  pointer-events: auto; border: 0; background: transparent; padding: 0; cursor: pointer;
+  font: inherit; font-size: inherit; color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.linkbtn:hover { color: var(--accent-2); }
+#hint-bar #hint-help { margin-left: auto; }
+#hint-bar #hint-x { margin-left: 0; }
+
+@media (max-width: 860px) {
+  .help-main { grid-template-columns: minmax(0, 1fr); }
+  #help-nav { display: none; }
+  #help-article { padding: 18px 16px 32px; }
+  .help-foot-hint { display: none; }
+}
+
+/* =========================================================
+   Overview 候选弹窗（机器没把握时手动挑）
+   列表行与对照文献选择器保持一致，只多一个「把握」百分比标记。
+   ========================================================= */
+.ov-card { width: 660px; }
+.ov-entry {
+  font-size: 12px; line-height: 1.7; color: var(--ink-2);
+  background: var(--surface-3); border: 1px solid var(--rule);
+  border-radius: var(--r); padding: 8px 10px; max-height: 76px; overflow: auto;
+  font-family: var(--font-mono);
+}
+.ov-list { display: flex; flex-direction: column; gap: 2px; max-height: 44vh; overflow: auto; }
+.ov-sec {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-3); padding: 8px 4px 3px;
+}
+.ov-item {
+  position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px;
+  align-items: baseline; text-align: left; cursor: pointer; font-family: inherit;
+  border: 1px solid transparent; background: transparent; border-radius: var(--r); padding: 7px 9px;
+}
+.ov-item:hover { background: var(--surface-2); border-color: var(--rule-2); }
+.ov-item .ov-title { grid-column: 1; font-size: 12.5px; color: var(--ink); line-height: 1.45; }
+.ov-item .ov-meta { grid-column: 1; font-size: 11px; color: var(--ink-3); font-family: var(--font-mono); }
+.ov-item .ov-score {
+  grid-column: 2; grid-row: 1 / span 2; align-self: center;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+  border: 1px solid var(--rule-2); border-radius: 999px; padding: 2px 8px;
+}
+.ov-item .ov-score.mid { color: var(--ink-2); border-color: var(--ink-3); }
+.ov-item .ov-score.strong { color: var(--accent-2); border-color: var(--accent); font-weight: 600; }
+.ov-empty {
+  padding: 14px 8px; color: var(--ink-3); font-size: 12px; text-align: center;
+  border: 0; background: transparent; font-family: inherit; width: 100%;
+}
+.ov-foot-hint { font-size: 11px; color: var(--ink-3); }
+
+/* 状态栏里的「挑一篇」：只在机器没把握时出现，用印泥红提示它是一次性的建议 */
+.status-act {
+  font: inherit; font-size: 11px; font-family: var(--font-mono); cursor: pointer;
+  color: var(--accent-2); background: var(--accent-soft);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 1px 9px;
+}
+.status-act:hover { background: var(--accent); color: var(--ink-inv); }
+.status-act[hidden] { display: none; }
+
+/* =========================================================
+   笔记图片缩放：包一层 + 右下角把手
+   把手默认淡出、悬停才亮 —— 图片是为了看内容，不该常驻两个看上去像 a bug 的方块。
+   ========================================================= */
+.note-img-wrap { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.note-img-wrap img { border-radius: var(--r); max-width: 100%; }
+.note-img-handle {
+  position: absolute; right: 1px; bottom: 1px; width: 14px; height: 14px; cursor: nwse-resize;
+  background: var(--surface-2); border: 1px solid var(--rule-2); border-radius: 3px;
+  opacity: 0; transition: opacity .12s ease;
+}
+.note-img-wrap:hover .note-img-handle,
+.note-img-wrap.resizing .note-img-handle { opacity: 1; }
+.note-img-handle::after {
+  content: ''; position: absolute; right: 2px; bottom: 2px; width: 5px; height: 5px;
+  border-right: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3);
+}
+.note-img-wrap.resizing { outline: 1px dashed var(--accent); outline-offset: 1px; }
+.note-img-wrap .note-img-size {
+  position: absolute; left: 4px; top: 4px; padding: 1px 6px; border-radius: 999px;
+  background: rgba(0, 0, 0, .55); color: #fff; font-family: var(--font-mono); font-size: 10px;
+  line-height: 1.5; opacity: 0; transition: opacity .12s ease; pointer-events: none;
+}
+.note-img-wrap.resizing .note-img-size { opacity: 1; }

@@ -25,6 +25,22 @@ fs.mkdirSync(DATA, { recursive: true });
 
 function hash(p) { return crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex'); }
 
+// 读 PDF 附件。pdf-lib 只负责写，读回来用 PDF.js（与渲染层同一条路径）。
+// PDF.js 的 legacy 构建在 Node 里会尝试 polyfill canvas 并打两条无害警告，这里临时静音。
+async function readAttachments(file) {
+  const realLog = console.log;
+  let pdfjs;
+  try {
+    console.log = () => {};
+    pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  } finally {
+    console.log = realLog;
+  }
+  const data = new Uint8Array(fs.readFileSync(file));
+  const doc = await pdfjs.getDocument({ data, isEvalSupported: false }).promise;
+  try { return await doc.getAttachments(); } finally { try { await doc.destroy(); } catch (_) {} }
+}
+
 async function makeFixture(file) {
   const doc = await PDFDocument.create();
   const page = doc.addPage([595, 842]);
@@ -151,6 +167,50 @@ async function makeFixture(file) {
   ok('原 PDF 未被写入', hash(FIX) === beforeHash);
   ok('导出副本已生成', !!res.outPath && fs.existsSync(res.outPath), JSON.stringify({ ok: res.exportOk, error: res.exportError, skipped: res.exportSkipped }));
   ok('导出未跳过任何标注', res.exportOk && res.exportSkipped === 0, JSON.stringify({ ok: res.exportOk, skipped: res.exportSkipped, reasons: res.exportReasons }));
+
+  // ---------- 副本里的内嵌数据 ----------
+  if (res.outPath && fs.existsSync(res.outPath)) {
+    // pdf-lib 只写不读，读回来用 PDF.js（和渲染层同一条路径，顺带证明它认得这份附件）
+    const atts = await readAttachments(res.outPath);
+    const hit = atts['trove-annotations.json'];
+    ok('副本里带 trove-annotations.json', !!hit, Object.keys(atts).join(','));
+    if (hit) {
+      const data = JSON.parse(Buffer.from(hit.content).toString('utf8'));
+      ok('内嵌数据可解析', !!data && Array.isArray(data.pages), Object.prototype.toString.call(data));
+      const shapes = (data.pages || []).flatMap((p) => p.shapes || []);
+      ok('内嵌数据条数与导出条数一致', shapes.length === 11, shapes.length);
+      ok('内嵌数据保留稳定 id', shapes.every((s) => !!s.id), shapes.filter((s) => !s.id).length);
+      ok('内嵌数据保留子类型', shapes.some((s) => s.kind === 'underline'));
+      ok('内嵌数据记了来源路径', typeof data.sourcePath === 'string');
+    }
+
+    // ---------- 打开副本 → 恢复 ----------
+    let r2 = null;
+    try {
+      r2 = runProbe({
+        probe: path.join(__dirname, 'probe-anno-restore.js'),
+        inject: {},
+        tmpDir: tmp,
+        env: {
+          PDFREADER_PROBE_PDF: res.outPath,
+          PDFREADER_DATA_DIR: path.join(tmp, 'data2'),
+          PDFREADER_NO_AUTO_INDEX: '1',
+        },
+        args: ['--user-data-dir=' + path.join(tmp, 'ud2')],
+        label: 'anno-restore',
+        timeout: 180000,
+      });
+    } catch (e) {
+      failed++;
+      console.log('  FAIL 恢复探针抛错  <- ' + (e && e.message ? e.message : e));
+    }
+    if (r2) {
+      ok('恢复探针全部通过', r2.fail === 0, (r2.fail || 0) + ' 项失败');
+      const rr = r2.res || {};
+      ok('恢复来源标记为 embedded', rr.source === 'embedded', rr.source);
+      ok('恢复条数为 11', rr.added === 11, rr.added);
+    }
+  }
 
   console.log('[native-annos] ' + (r.fail + failed ? 'FAIL (' + (r.fail + failed) + ')' : 'PASS (' + (r.total + extra) + ')'));
   fs.rmSync(tmp, { recursive: true, force: true });

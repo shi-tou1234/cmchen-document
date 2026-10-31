@@ -224,6 +224,23 @@ ok('被合并条目已从索引移除', !lib.findItem(A.key) && !lib.findItem(E.
 ok('合并后原 PDF 都还在', fs.existsSync(pdfA) && fs.existsSync(pdfB));
 ok('mergeItems 找不到保留项返回 null', lib.mergeItems('nope', [B.key]) === null);
 
+// 合并要连标注关联一起搬（R-v1.6d-04）：annoIds 是条目侧，annoMeta.itemKey 是标注侧
+{
+  const ka = lib.addItem({ title: '带标注的 A' });
+  const kb = lib.addItem({ title: '带标注的 B' });
+  lib.linkAnnoToItem('anno-merge-1', kb.key);
+  lib.linkAnnoToItem('anno-merge-2', ka.key);
+  const before = lib.summary().items.find((x) => x.key === kb.key);
+  ok('合并前 B 有标注关联', (before.annoIds || []).length === 1, JSON.stringify(before.annoIds));
+  lib.mergeItems(ka.key, [kb.key]);
+  const after = lib.summary().items.find((x) => x.key === ka.key);
+  ok('合并后保留项拿到被合并条目的标注', (after.annoIds || []).includes('anno-merge-1'), JSON.stringify(after.annoIds));
+  ok('保留项原有的标注还在', (after.annoIds || []).includes('anno-merge-2'), JSON.stringify(after.annoIds));
+  ok('标注不再指向已删除条目',
+    lib.annoMetaOf('anno-merge-1').itemKey === ka.key, lib.annoMetaOf('anno-merge-1').itemKey);
+  ok('被合并条目确实没了', !lib.findItem(kb.key));
+}
+
 // 批量编辑：只动选中且未删除的条目；标签/收藏集支持增删
 const b1 = lib.addItem({ title: 'Bulk 1', year: '2000', tags: ['old'], collectionIds: [colX.id] });
 const b2 = lib.addItem({ title: 'Bulk 2', year: '2001', tags: ['old'] });

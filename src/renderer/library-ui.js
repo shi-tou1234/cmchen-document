@@ -31,6 +31,9 @@ window.LibraryUI = (function () {
     visibleCount: 0,        // 上一次 renderGrid 的可见条数（条件横幅直接用，不再算一遍）
     citeStyle: 'gbt7714',   // v14：引用样式
     citekeys: new Map(),    // v27：条目 key → 确定性 citekey
+    ambCache: null,         // v36：authorLabels() 的缓存（按 items 数组引用失效）
+    atcLast: null,          // v36：上一次复制的引注，同上 靠它判断接哪一条
+    atcHistory: [],         // v1.6：本次会话的脚注引注历史，前引 靠它认「之前引过」
     secOpen: { searches: false, tags: false },  // v19：进阶分区默认折叠（新手少看两眼）
     ft: { query: '', results: [], stats: null, loading: false, error: '', type: 'all', show: 20, total: 0, counts: {} },
     settings: { theme: 'light', defaultSort: 'added', autoIndex: true, dataDir: '' },
@@ -1272,7 +1275,11 @@ window.LibraryUI = (function () {
   // ---------- 独立笔记的全屏 Markdown 编辑器（v9.6） ----------
   // 语法与样式对齐用户博客后台（D:/项目/博客站点）：按钮组工具栏（无下拉）+ 左源码右实时预览。
   // 正文存 notes[].text（Markdown 源码）；html 置空，避免和旧的富文本内容打架。
-  const nv = { key: '', noteId: '', timer: null, open: false, previewTimer: null };
+  const nv = {
+    key: '', noteId: '', timer: null, open: false, previewTimer: null,
+    meta: { tags: [], status: '' },
+    cards: [],            // v1.6：回顾卡片标题表（自动链接用），打开编辑器时取一次
+  };
 
   function nvStatus(msg) {
     const s = $('nv-status');
@@ -1288,7 +1295,7 @@ window.LibraryUI = (function () {
     const key = nv.key, id = nv.noteId;
     nvStatus('保存中…');
     const p = Promise.resolve()
-      .then(() => L().updateNote(key, id, { text, html: '' }))
+      .then(() => L().updateNote(key, id, { text, html: '', meta: nv.meta }))
       .then(() => (title ? L().updateItem(key, { title }) : null))
       .then(() => reloadItemsQuiet())
       .then(() => {
@@ -1308,12 +1315,230 @@ window.LibraryUI = (function () {
     nv.timer = setTimeout(() => { nv.timer = null; nvSaveNow(); }, 700);
   }
 
+  // ---------- 笔记级元数据（v1.6） ----------
+  // 元数据与正文存在同一条 note 上，所以走同一条保存链路；但元数据的改动是「点一下就定了」，
+  // 不该等 700ms 的输入防抖——否则用户点完标签马上关窗，改动就丢了。
+  function nvMetaOf(note) {
+    const m = (note && note.meta) || {};
+    const tags = Array.isArray(m.tags) ? m.tags.filter((x) => typeof x === 'string' && x.trim()) : [];
+    const status = ['draft', 'final'].indexOf(m.status) >= 0 ? m.status : '';
+    return { tags: tags.slice(0, 20), status };
+  }
+
+  function noteWordCount(text) {
+    const s = String(text || '');
+    const cjkRe = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g;
+    const cjk = (s.match(cjkRe) || []).length;
+    const latin = (s.replace(cjkRe, ' ').match(/[A-Za-z0-9][A-Za-z0-9'’_-]*/g) || []).length;
+    return { cjk, latin, total: cjk + latin };
+  }
+
+  function fmtTime(ms) {
+    const n = Number(ms) || 0;
+    if (!n) return '—';
+    const d = new Date(n);
+    const p = (x) => String(x).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function renderNvMeta() {
+    const box = $('nv-meta');
+    if (!box) return;
+    const st = $('nv-meta-status');
+    if (st) st.value = nv.meta.status || '';
+    const tags = $('nv-meta-tags');
+    if (tags) {
+      tags.innerHTML = nv.meta.tags.length
+        ? nv.meta.tags.map((t) => '<span class="nv-meta-tag">' + esc(t)
+          + '<button class="nv-meta-tag-x" data-nv-tag="' + esc(t) + '" title="移除标签">×</button></span>').join('')
+        : '<span class="ld-hint">还没有笔记标签</span>';
+    }
+    const md = $('nv-md');
+    const wc = noteWordCount(md ? md.value : '');
+    const cnt = $('nv-meta-count');
+    if (cnt) {
+      cnt.textContent = wc.total.toLocaleString('zh-CN') + ' 字';
+      cnt.title = '中文 ' + wc.cjk + ' 字 · 西文 ' + wc.latin + ' 词';
+    }
+    const note = currentNote();
+    const cr = $('nv-meta-created');
+    if (cr) cr.textContent = fmtTime(note && note.created);
+    const up = $('nv-meta-updated');
+    if (up) up.textContent = fmtTime(note && note.updated);
+    const label = $('nv-meta-source-label');
+    if (label) {
+      const it = state.items.find((x) => x.key === nv.key);
+      label.textContent = it ? (it.title || '（无标题条目）') : '';
+    }
+    const src = $('nv-meta-source');
+    if (src) src.disabled = !nv.key;
+  }
+
+  function currentNote() {
+    const it = state.items.find((x) => x.key === nv.key);
+    if (!it || !Array.isArray(it.notes)) return null;
+    return it.notes.find((x) => x.id === nv.noteId) || null;
+  }
+
+  // 元数据改完立刻落盘：只提交 meta 这一小块补丁。
+  // 不走 nvSaveNow()——那会把正文重写一遍、把条目标题也改一遍、再重读整库；
+  // 大库里点一下标签就全量刷新，代价和收益完全不成比例（R-v1.6-opt2）。
+  async function nvMetaCommit() {
+    if (!nv.open || !nv.key || !nv.noteId) return;
+    renderNvMeta();
+    const key = nv.key, id = nv.noteId;
+    const meta = { tags: nv.meta.tags.slice(), status: nv.meta.status };
+    let saved = null;
+    try { saved = await L().updateNote(key, id, { meta }); }
+    catch (_) { saved = null; }
+    if (!saved) { nvStatus('元数据没保存成功'); return; }
+    // 把服务端规范化后的结果写回内存这一条，界面与磁盘保持一致，不重读整库
+    const it = state.items.find((x) => x.key === key);
+    if (it && Array.isArray(it.notes)) {
+      const n = it.notes.find((x) => x.id === id);
+      if (n) {
+        n.meta = (saved.meta && typeof saved.meta === 'object')
+          ? { tags: (saved.meta.tags || []).slice(), status: saved.meta.status || '' }
+          : meta;
+        if (saved.updated) n.updated = saved.updated;
+      }
+    }
+    renderNvMeta();
+  }
+
+  function toggleNvMeta(force) {
+    const box = $('nv-meta');
+    const btn = $('nv-meta-toggle');
+    if (!box) return;
+    const show = force === undefined ? box.hidden : !!force;
+    box.hidden = !show;
+    if (btn) btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+    if (show) renderNvMeta();
+  }
+
+  // 标题样式：倍率 + 字重存设置，落成两个 CSS 变量，预览与导出共用同一套数
+  function applyNoteHeadingStyle() {
+    const s = state.settings || {};
+    const scale = Number(s.noteHeadingScale) > 0 ? Math.min(1.6, Math.max(0.8, Number(s.noteHeadingScale))) : 1;
+    const weight = s.noteHeadingWeight === 'normal' ? '400' : '700';
+    const root = document.documentElement;
+    if (!root) return;
+    root.style.setProperty('--md-h-scale', String(scale));
+    root.style.setProperty('--md-h-weight', weight);
+  }
+
+  // ---------- 卡片标题自动链接（v1.6） ----------
+  // MarginNote 的「读到旧概念自动亮」：写笔记时，正文里出现某张回顾卡片的标题，
+  // 就把它变成能点回原文的链接——不用自己敲 [[ ]]，也不用记得当初摘过什么。
+  //
+  // 三个克制的地方：
+  //   1. 只认**回顾里**的卡片。全库标注都参与的话，正文会亮成一片，等于没提示。
+  //   2. 标题至少 4 个字。两三字的词（「方法」「模型」）命中率高得没有信息量。
+  //   3. 不动 a / code / pre / button 里的文字。代码里出现同样的词不该变成链接。
+  const AUTOLINK_MIN = 4;
+  const AUTOLINK_MAX_CARDS = 600;
+
+  function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  // 从回顾大纲里取「卡片标题 → 标注 id」。标题相同的只留第一条（同一句话摘两次没有意义）。
+  function cardTitleIndex(cards) {
+    const byId = new Map(state.annos.map((a) => [String(a.id), a]));
+    const out = [];
+    const seen = new Set();
+    for (const c of cards || []) {
+      const a = byId.get(String(c.id));
+      if (!a) continue;
+      const title = rvCardTitle(a).replace(/…$/, '');
+      if (title.length < AUTOLINK_MIN) continue;
+      const key = title.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: String(c.id), title });
+      if (out.length >= AUTOLINK_MAX_CARDS) break;
+    }
+    // 长标题优先匹配，避免「深度学习」把「深度学习在医学影像中的应用」切碎
+    return out.sort((a, b) => b.title.length - a.title.length);
+  }
+
+  function autolinkCards(box, cards) {
+    if (!box || !cards || !cards.length) return 0;
+    const byTitle = new Map(cards.map((c) => [c.title, c]));
+    const re = new RegExp(cards.map((c) => escapeRe(c.title)).join('|'), 'g');
+    const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        let p = node.parentElement;
+        while (p && p !== box) {
+          if (/^(A|CODE|PRE|BUTTON|SCRIPT|STYLE|TEXTAREA)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+          p = p.parentElement;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    while (walker.nextNode()) targets.push(walker.currentNode);
+    let hits = 0;
+    for (const node of targets) {
+      const text = node.nodeValue;
+      re.lastIndex = 0;
+      if (!re.test(text)) continue;
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0, m, local = 0;
+      while ((m = re.exec(text))) {
+        const card = byTitle.get(m[0]);
+        if (!card) continue;
+        if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'rv-autolink';
+        btn.setAttribute('data-rv-link', card.id);
+        btn.title = '在回顾里摘过这句 · 点开原文';
+        btn.textContent = m[0];
+        frag.appendChild(btn);
+        last = m.index + m[0].length;
+        local++;
+      }
+      // 这个节点里一个都没命中：不替换，免得把原文本节点换成空的 fragment
+      if (!local) continue;
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      if (node.parentNode) node.parentNode.replaceChild(frag, node);
+      hits += local;
+    }
+    return hits;
+  }
+
+  // 打开编辑器时取一次卡片标题表：期间新加的卡片要重开编辑器才生效，
+  // 换来的是每次敲键都重新渲染预览时不用再走一遍 IPC。
+  async function nvLoadCards() {
+    nv.cards = [];
+    if (!state.settings || state.settings.recallAutolink === false) return;
+    if (!window.pdfBridge || !pdfBridge.recall || !pdfBridge.recall.outline) return;
+    // 卡片标题要配 state.annos 才拼得出来；直接从列表进编辑器时标注还没载入过
+    await loadAnnos(false);
+    try {
+      const r = await pdfBridge.recall.outline();
+      if (r && r.ok) nv.cards = cardTitleIndex(r.cards);
+    } catch (_) { nv.cards = []; }
+  }
+
   function nvRenderPreview() {
     const md = $('nv-md'), box = $('nv-preview');
     if (!box || !window.Md) return;
     box.innerHTML = window.Md.render(md ? md.value : '');
     if (window.TroveMath) TroveMath.enhance(box);   // $…$ / $$…$ 换成 KaTeX 排版；无 katex 时保留源码
     nvLoadLocalImages(box);   // 本地图片（snapshots/xx.png）走 IPC 读 dataURL
+    noteImgWrap(box, 'md');   // 挂上拖拽把手：拖完写回源码，不留在 DOM 上
+    // 自动链接要放在所有改写 DOM 的步骤之后：它替换的是文本节点，
+    // 放在前面的话，后面的 TroveMath / 图片包装会把刚插进去的按钮一起冲掉。
+    autolinkCards(box, nv.cards);
+    // 字数跟着正文走：每敲几个字就要变，所以只刷数字，不重建标签区
+    const cnt = $('nv-meta-count');
+    if (cnt) {
+      const wc = noteWordCount(md ? md.value : '');
+      cnt.textContent = wc.total.toLocaleString('zh-CN') + ' 字';
+      cnt.title = '中文 ' + wc.cjk + ' 字 · 西文 ' + wc.latin + ' 词';
+    }
     const st = $('nv-preview-status');
     if (st) st.textContent = window.TroveMath && TroveMath.available()
       ? 'Markdown · $…$ 公式已用 KaTeX 排版'
@@ -1411,13 +1636,16 @@ window.LibraryUI = (function () {
     if (!md || !title) return;
     nv.key = key;
     nv.noteId = note ? note.id : '';
+    nv.meta = nvMetaOf(note);
     nv.open = true;
     md.value = nvMdSource(note);
     title.value = it.title || '';
     nvStatus('已打开');
     $('note-view').hidden = false;
     document.body.classList.add('note-editing');
+    await nvLoadCards();
     nvRenderPreview();
+    renderNvMeta();
     setTimeout(() => { md.focus(); }, 30);
   }
 
@@ -1427,6 +1655,8 @@ window.LibraryUI = (function () {
     nv.open = false;
     nv.key = '';
     nv.noteId = '';
+    nv.meta = { tags: [], status: '' };
+    toggleNvMeta(false);
     if (nv.timer) { clearTimeout(nv.timer); nv.timer = null; }
     if (nv.previewTimer) { clearTimeout(nv.previewTimer); nv.previewTimer = null; }
     const box = $('note-view');
@@ -1811,10 +2041,17 @@ window.LibraryUI = (function () {
       // 富文本正文：优先用存下来的 html；老笔记（只有 Markdown text）在这里一次性渲染成富文本
       const mdHtml = (window.Md && n.text) ? window.Md.render(n.text) : '';
       const body = window.RichText ? window.RichText.initial(n, mdHtml) : esc(n.text || '');
+      // 截图的宽度单独存 notes[].imageW：html 会被富文本清洗，塞进 style 迟早被 wash 掉。
+      // 0 是「用原尺寸」的合法值，不能被夹到最小宽度——否则旧截图一打开就被缩成 40px，
+      // 双击还原后重开又会变小（R-v1.6-04）。
+      const rawW = Math.round(Number(n.imageW) || 0);
+      const imgW = rawW > 0 ? Math.max(NOTE_IMG_MIN, Math.min(NOTE_IMG_MAX, rawW)) : 0;
+      const imgStyle = imgW ? ' style="width:' + imgW + 'px;max-width:100%;height:auto;" data-w="' + imgW + '"' : '';
       return '<div class="ld-note" data-note-id="' + esc(n.id) + '">' +
         '<input class="ld-note-title" data-note-field="title" value="' + esc(n.title) + '" placeholder="标题（可以留空）" />' +
         (n.image
-          ? '<img class="ld-note-img" data-note-img="' + esc(n.image) + '" alt="标注截图" title="从标注生成的页面截图" />'
+          ? '<img class="ld-note-img" data-note-img="' + esc(n.image) + '" alt="标注截图"' + imgStyle
+            + ' title="从标注生成的页面截图；拖右下角可改宽度" />'
           : '') +
         RICH_BAR +
         '<div class="ld-note-rich" contenteditable="true" data-note-field="html" ' +
@@ -1827,6 +2064,7 @@ window.LibraryUI = (function () {
       '</div>';
     }).join('');
     nvLoadLocalImages(el.ld.notes);
+    noteImgWrap(el.ld.notes, 'note');
   }
 
   // 容器里的本地图片（截图 data-note-img / Markdown 图片 data-md-img）走 IPC 读 dataURL
@@ -1844,32 +2082,247 @@ window.LibraryUI = (function () {
     }
   }
 
+  /* ---------- 笔记里的图片缩放（v1.6） ----------
+   * 两侧走各自的持久化：
+   *   · Markdown 笔记（NV 编辑器）→ 宽度写在源码里 `![a](x.png#w=420)`，跟图走，导出不丢；
+   *   · 标注截图（notes[].image）→ 同级字段 `notes[].imageW`，因为它本来就是结构化数据。
+   * 共同点：尺寸不留在 DOM 上。预览每敲几个字就整体重渲染一次，改 DOM 等于白改——
+   * 所以拖完一定要回到「源码 / 字段」里，再由渲染把它画出来。
+   */
+  const NOTE_IMG_MIN = 40, NOTE_IMG_MAX = 2400;
+  const noteImgDrag = { on: null };
+
+  function noteImgClamp(w) {
+    const n = Math.round(Number(w) || 0);
+    if (!n) return 0;
+    return Math.max(NOTE_IMG_MIN, Math.min(NOTE_IMG_MAX, n));
+  }
+
+  // 改源码里某张图片的宽度标记。返回 null = 定位不到（调用方提示用户，不要瞎改）。
+  // 定位只认「源码位置」（渲染时打在 data-md-img-src 上）。
+  // **不做按序号兜底**：脚注区、表格都会让 DOM 顺序和源码顺序不一致，按序号猜就是改错图
+  // （R-v1.6f-03）。宁可这次不改，也不能改到别人身上。
+  // oldEnd 用于把光标位置保住：预览可以跳，正在输入的位置不该跟着跳。
+  function mdImageWidthSet(src, target, width) {
+    const text = String(src || '');
+    if (!window.Md || typeof Md.scanImages !== 'function') return null;
+    const off = Number(target && target.offset);
+    if (!Number.isFinite(off) || off < 0) return null;
+    const hit = Md.scanImages(text, { skipCode: true }).find((im) => im.start === off);
+    if (!hit) return null;
+    const want = noteImgClamp(width);
+    const nextUrl = hit.base + (want ? '#w=' + want : '');
+    if (nextUrl === hit.url) return null;
+    return {
+      text: text.slice(0, hit.urlStart) + nextUrl + text.slice(hit.urlEnd),
+      oldEnd: hit.end,
+    };
+  }
+
+  // 包一层 + 挂把手。预览重渲染后元素全换，所以做法是「每次渲染完再包」，
+  // 而不是给图片绑死监听 —— 那样要么漏绑，要么攒一堆失效监听。
+  function noteImgWrap(scope, source) {
+    if (!scope) return;
+    const imgs = scope.querySelectorAll('img.md-img, img.ld-note-img');
+    for (let i = 0; i < imgs.length; i++) {
+      const img = imgs[i];
+      const up = img.parentNode;
+      if (!up) continue;
+      if (up.classList && up.classList.contains('note-img-wrap')) continue;   // 已经包过
+      const wrap = document.createElement('span');
+      wrap.className = 'note-img-wrap';
+      wrap.dataset.imgSource = source;
+      wrap.dataset.imgIdx = String(i);
+      // 渲染时打上的源码位置：定位图片用它，不用 DOM 序号（脚注图片会被挪到文末）
+      wrap.dataset.imgSrc = img.getAttribute('data-md-img-src') || '';
+      const box = img.closest('.ld-note');
+      if (box && box.dataset.noteId) wrap.dataset.imgNoteId = box.dataset.noteId;
+      up.insertBefore(wrap, img);
+      wrap.appendChild(img);
+      const h = document.createElement('span');
+      h.className = 'note-img-handle';
+      h.dataset.imgHandle = '1';
+      h.title = '拖动调整宽度；双击把手还原原始尺寸';
+      wrap.appendChild(h);
+    }
+  }
+
+  function noteImgPaint(w, data) {
+    if (!data.img) return;
+    if (data.w > 0) {
+      data.img.style.width = data.w + 'px';
+      data.img.style.maxWidth = '100%';
+      data.img.style.height = 'auto';
+      data.img.dataset.mdW = String(data.w);
+    } else {
+      data.img.style.removeProperty('width');
+      data.img.style.removeProperty('height');
+      data.img.style.removeProperty('max-width');
+      delete data.img.dataset.mdW;
+    }
+  }
+
+  // 落盘：md 改源码（并保住光标），截图写 notes[].imageW
+  function noteImgCommit(data) {
+    const source = data.wrap && data.wrap.dataset.imgSource;
+    if (source === 'md') {
+      const md = $('nv-md');
+      if (!md) return;
+      const idx = parseInt((data.wrap && data.wrap.dataset.imgIdx) || '0', 10);
+      const offset = parseInt((data.wrap && data.wrap.dataset.imgSrc) || '', 10);
+      const got = mdImageWidthSet(md.value, { offset }, data.w);
+      // 定位不到就明确说，不要「按顺序改一张」——那会改到别的图上
+      if (!got) { nvStatus('这张图定位不到源码位置，宽度没有改动'); return; }
+      const oldLen = md.value.length;
+      const sel = [md.selectionStart, md.selectionEnd];
+      md.value = got.text;
+      const delta = got.text.length - oldLen;
+      const fix = (p) => Math.max(0, Math.min(got.text.length, p > got.oldEnd ? p + delta : p));
+      try { md.setSelectionRange(fix(sel[0]), fix(sel[1])); } catch (_) {}
+      nvStatus(data.w ? '图片宽度 ' + data.w + 'px，已写回源码' : '已还原图片原始尺寸');
+      nvSaveNow();
+      nvSchedulePreview();
+      return;
+    }
+    if (source === 'note') {
+      const noteId = data.wrap && data.wrap.dataset.imgNoteId;
+      if (!noteId || !state.selectedKey) return;
+      Promise.resolve(L().updateNote(state.selectedKey, noteId, { imageW: data.w }))
+        .then(() => reloadItemsQuiet())
+        .catch(() => { nvStatus('宽度没保存成功'); });
+    }
+  }
+
+  // 代理到 document：图片是反复重渲染的，绑在具体元素上必然漏
+  function noteImgInit() {
+    if (noteImgDrag.bound) return;
+    noteImgDrag.bound = true;
+    const handleOf = (e) => (e.target && e.target.closest ? e.target.closest('[data-img-handle]') : null);
+    document.addEventListener('pointerdown', (e) => {
+      const h = handleOf(e);
+      if (!h) return;
+      const wrap = h.closest('.note-img-wrap');
+      const img = wrap && wrap.querySelector('img');
+      if (!img) return;
+      e.preventDefault();
+      const r = img.getBoundingClientRect();
+      const host = wrap.parentElement || wrap;
+      const data = {
+        wrap, img, startX: e.clientX, startW: r.width,
+        max: Math.max(NOTE_IMG_MIN, host.clientWidth || r.width),
+        w: Math.round(r.width),
+      };
+      noteImgDrag.on = data;
+      wrap.classList.add('resizing');
+    });
+    document.addEventListener('pointermove', (e) => {
+      const d = noteImgDrag.on;
+      if (!d) return;
+      d.w = noteImgClamp(Math.min(d.max, d.startW + (e.clientX - d.startX)));
+      noteImgPaint(d.w, d);
+    });
+    document.addEventListener('pointerup', () => {
+      const d = noteImgDrag.on;
+      if (!d) return;
+      noteImgDrag.on = null;
+      d.wrap.classList.remove('resizing');
+      noteImgCommit(d);
+    });
+    document.addEventListener('dblclick', (e) => {
+      const h = handleOf(e);
+      if (!h) return;
+      const wrap = h.closest('.note-img-wrap');
+      if (wrap) {
+        const img = wrap.querySelector('img');
+        noteImgCommit({ wrap, img, w: 0 });
+      }
+    });
+  }
+
   // 富文本正文保存：html 落库，同时提纯文本给搜索/摘要；不重建列表（免得丢焦点）
   const noteSaveTimers = new Map();
   // N01：返回明确的保存结果——true = 已保存 / 无需保存，false = 保存失败。
   // 之前异常被吞掉，调用方（导出）无法知道「导出的内容和库里的是否一致」。
+  // 真正的写盘入口。回归可以临时换掉它来模拟一次失败（自动保存失败的用例需要，
+  // 否则没法让 IPC 真的报错）——所以单独抽出来，不直接在 saveNoteRich 里调 L()。
+  let noteSaveImpl = null;
+  function noteSave(k, i, patch) {
+    if (noteSaveImpl) return noteSaveImpl(k, i, patch);
+    return L().updateNote(k, i, patch);
+  }
+
   async function saveNoteRich(noteEl, immediate) {
     const key = state.selectedKey;
     const id = noteEl && noteEl.dataset.noteId;
     const box = noteEl && noteEl.querySelector('.ld-note-rich');
     if (!key || !id || !box || !window.RichText) return true;
-    const clear = () => { const t = noteSaveTimers.get(id); if (t) { clearTimeout(t); noteSaveTimers.delete(id); } };
+    // 元素已经不在文档里（详情面板被重绘过）：这时候 state.selectedKey 可能已经换成别人，
+    // 再拿它的 innerHTML 去存就是「把 A 的内容写进 B」。宁可不存。
+    if (noteEl.isConnected === false) return true;
+    const clear = () => {
+      const t = noteSaveTimers.get(id);
+      if (t) { clearTimeout(t.timer); noteSaveTimers.delete(id); }
+    };
     if (!immediate) {
       const prev = noteSaveTimers.get(id);
-      if (prev) clearTimeout(prev);
-      noteSaveTimers.set(id, setTimeout(() => { noteSaveTimers.delete(id); saveNoteRich(noteEl, true); }, 700));
+      if (prev) clearTimeout(prev.timer);
+      // 连元素一起记下来：关窗时要立刻把它们全部存掉（见 flushPendingSaves）
+      // 定时器到点时**不预先删除**记录：删了再失败就没人知道还有东西没存
+      noteSaveTimers.set(id, {
+        el: noteEl,
+        timer: setTimeout(() => { saveNoteRich(noteEl, true); }, 700),
+      });
       return true;
     }
     clear();
     const html = window.RichText.sanitize(box.innerHTML);
     const text = window.RichText.toText(html);
+    let ok = false;
     try {
-      const r = await L().updateNote(key, id, { html, text });
-      if (r && r.ok === false) return false;
-      await reloadItemsQuiet();
-      return true;
-    } catch (_) { return false; }
+      const r = await noteSave(key, id, { html, text });
+      ok = !(r && r.ok === false);
+    } catch (_) { ok = false; }
+    if (!ok) {
+      // 存不进去就把这条重新登记成「脏」：自动保存失败、工具栏保存失败都走这里，
+      // 关窗握手才能看见它并重试。只在 flushPendingSaves 里补记录是不够的（R-v1.6f-01）。
+      noteSaveTimers.set(id, { el: noteEl, timer: null });
+      return false;
+    }
+    await reloadItemsQuiet();
+    return true;
   }
+
+  // 关窗前把还在防抖窗口里的笔记改动全部存掉（v1.6d）。
+  // 两处都要处理：全屏编辑器的 700ms 防抖、详情面板富文本笔记的 700ms 防抖。
+  // 返回 false 表示有东西没存进去——调用方（关窗握手）要据此拦下关闭。
+  // 存失败的条目**要放回待保存表**：清掉不补的话，用户点「返回处理」再关一次，
+  // 这里会以为「没有待保存的东西」而直接放行，磁盘上还是旧正文（R-v1.6e-01）。
+  // saveFn 只是注入点（默认 saveNoteRich），回归用它模拟一次失败。
+  async function flushPendingSaves(saveFn) {
+    const save = typeof saveFn === 'function' ? saveFn : saveNoteRich;
+    let ok = true;
+    if (nv.open) {
+      if (nv.timer) { clearTimeout(nv.timer); nv.timer = null; }
+      try { if (!await nvSaveNow()) ok = false; } catch (_) { ok = false; }
+    }
+    const pending = Array.from(noteSaveTimers.entries());
+    noteSaveTimers.clear();
+    for (const [id, p] of pending) {
+      if (!p) continue;
+      if (p.timer) clearTimeout(p.timer);
+      let saved = false;
+      try { saved = await save(p.el, true); } catch (_) { saved = false; }
+      if (!saved) {
+        ok = false;
+        noteSaveTimers.set(id, { el: p.el, timer: null });
+      }
+    }
+    return ok;
+  }
+  // 还有多少条笔记在等写盘（回归用：失败后必须留着，成功后必须清零）
+  function pendingNoteSaves() { return noteSaveTimers.size; }
+  // 仅回归使用：模拟保存失败（传 null 恢复真实写盘）
+  function setNoteSaveImpl(fn) { noteSaveImpl = typeof fn === 'function' ? fn : null; }
 
   // 刷新条目数据但不重绘详情表单（免得把用户没保存的其它字段冲掉）
   async function reloadItemsQuiet() {
@@ -2032,16 +2485,63 @@ window.LibraryUI = (function () {
     const i = list.findIndex((x) => x.key === it.key);
     return i >= 0 ? i + 1 : 1;
   }
+  // 同姓消歧要「看全库」才有意义：只看当前条目永远不知道还有谁姓 Smith。
+  // 按 items 数组的引用缓存——refresh() 每次都会换一个新数组，引用变了才重算。
+  function authorLabelSet() {
+    if (!window.Cite || typeof window.Cite.authorLabels !== 'function') return new Map();
+    const items = state.items || [];
+    if (state.ambCache && state.ambCache.src === items) return state.ambCache.map;
+    const map = window.Cite.authorLabels(items.filter((x) => x && x.itemType !== 'annotation'));
+    state.ambCache = { src: items, map };
+    return map;
+  }
+  function atcForm() {
+    return (el.ld.atcForm && el.ld.atcForm.value) || 'intext';
+  }
+  // 上一次「复制」出去的引注：同上 靠它判断「接的是哪一条」。
+  // 只存在内存里——关掉应用就该重新从完整引注开始，否则下次打开会莫名其妙出「同上」。
+  function atcLast() { return state.atcLast || null; }
+  // 本次会话的引注历史（按复制顺序）。「前引」要认的是「之前引过没有」，
+  // 只看上一条永远认不出 A → B → A 的第三次（R-v1.6-06）。
+  // 只记脚注体（note / ibid）——文内引注本来就没有前引这回事，混进来只会污染判断。
+  const ATC_HISTORY_MAX = 200;
+  function atcHistory() { return Array.isArray(state.atcHistory) ? state.atcHistory : []; }
+  function atcPushHistory(key, item, form) {
+    if (form !== 'note' && form !== 'ibid') return;
+    const list = atcHistory().slice();
+    list.push({ key, item });
+    while (list.length > ATC_HISTORY_MAX) list.shift();
+    state.atcHistory = list;
+  }
   function atcOfForm() {
     const it = selectedItem();
     if (!it || !window.Cite) return '';
     let merged = it;
     try { merged = Object.assign({}, it, readDetailForm()); } catch (_) { merged = it; }
+    const locator = el.ld.atcLocator ? el.ld.atcLocator.value : '';
+    const amb = authorLabelSet().get(it.key) || null;
+    const form = atcForm();
     try {
+      if (form === 'note') {
+        return window.Cite.noteCite(merged, { locator: locator.trim() });
+      }
+      if (form === 'ibid') {
+        // 把「本次会话引过的全部」+「当前这条」整条交给 citeSequence：
+        // 它自己判断紧接同一条（同上）、之前引过（前引）、还是头一次（完整）。
+        const seq = atcHistory().map((h) => ({ it: h.item }));
+        seq.push({ it: merged, locator: locator.trim() });
+        const rows = window.Cite.citeSequence(seq, {
+          ambiguous: authorLabelSet(),
+          collapse: 'opcit',
+          locale: /[\u3400-\u9fff]/.test(locator) ? 'zh' : 'en',
+        });
+        return (rows[rows.length - 1] || {}).text || '';
+      }
       return window.Cite.citeInText(merged, {
         style: state.citeStyle,
         num: atcNumber(it),
-        locator: el.ld.atcLocator ? el.ld.atcLocator.value : '',
+        locator: locator,
+        ambiguous: amb,
       });
     } catch (_) { return ''; }
   }
@@ -2054,7 +2554,23 @@ window.LibraryUI = (function () {
   async function copyAtCitation() {
     const text = atcOfForm();
     if (!text) { feedStatusText(el.ld.citeStatus, '先填标题'); return; }
-    try { await navigator.clipboard.writeText(text); if (el.ld.citeStatus) el.ld.citeStatus.textContent = '文内引注已复制'; }
+    const it = selectedItem();
+    const form = atcForm();
+    try {
+      await navigator.clipboard.writeText(text);
+      // 记住这一次：同上 靠 atcLast，前引 靠 atcHistory
+      if (it) {
+        let merged = it;
+        try { merged = Object.assign({}, it, readDetailForm()); } catch (_) { merged = it; }
+        state.atcLast = { key: it.key, item: merged, form, text };
+        atcPushHistory(it.key, merged, form);
+      }
+      if (el.ld.citeStatus) {
+        const same = text.indexOf('同上') === 0 || text.indexOf('Ibid.') === 0;
+        el.ld.citeStatus.textContent = same ? '引注已复制（同上，接上一次）'
+          : (form === 'ibid' ? '引注已复制（前引 / 完整）' : '引注已复制');
+      }
+    }
     catch (_) { feedStatusText(el.ld.citeStatus, '复制失败（剪贴板不可用）'); }
   }
   function feedStatusText(node, t) { if (node) node.textContent = t; }
@@ -2406,6 +2922,7 @@ window.LibraryUI = (function () {
       if (el.sort) el.sort.value = state.sort;
       applyTheme(state.settings.theme);
       if (window.App && App.applyInvert) App.applyInvert(!!state.settings.invertPages);
+      applyNoteHeadingStyle();
     } catch (_) {}
   }
 
@@ -2685,10 +3202,18 @@ window.LibraryUI = (function () {
     if (el.setRestoreTabs) el.setRestoreTabs.checked = !!state.settings.restoreTabs;
     if (el.setSplitView) el.setSplitView.checked = !!state.settings.splitView;
     if (el.setInvertPages) el.setInvertPages.checked = !!state.settings.invertPages;
+    if (el.setRecallAutolink) el.setRecallAutolink.checked = state.settings.recallAutolink !== false;
     if (el.setFetchEmail) el.setFetchEmail.value = state.settings.fetchEmail || '';
+    if (el.setFetchProxy) el.setFetchProxy.value = state.settings.fetchProxy || '';
+    if (el.setFetchOpenurl) el.setFetchOpenurl.value = state.settings.fetchOpenurl || '';
     if (el.setViewMode) el.setViewMode.value = ['page', 'spread'].includes(state.settings.viewMode) ? state.settings.viewMode : 'scroll';
     if (el.setCitekey) el.setCitekey.value = state.settings.citeKeyTemplate || '';
     renderCitekeyPreview();
+    // v1.6：笔记标题样式
+    const hs = Number(state.settings.noteHeadingScale);
+    if (el.setNoteHScale) el.setNoteHScale.value = String(Number.isFinite(hs) && hs > 0 ? hs : 1);
+    if (el.setNoteHScaleVal) el.setNoteHScaleVal.textContent = (Number(el.setNoteHScale ? el.setNoteHScale.value : 1) || 1).toFixed(2) + '×';
+    if (el.setNoteHWeight) el.setNoteHWeight.value = state.settings.noteHeadingWeight === 'normal' ? 'normal' : 'bold';
     if (window.App && App.setViewMode && state.settings.viewMode) {
       const m = ['page', 'spread'].includes(state.settings.viewMode) ? state.settings.viewMode : 'scroll';
       App.state.viewMode = m;
@@ -2783,13 +3308,27 @@ window.LibraryUI = (function () {
   // 推回你眼前。这里只做「到期了该看哪几条」这一层——调度在主进程 recall.js（纯函数、
   // 可单测），标注正文直接用 state.annos（已经在内存里，不必再读一遍磁盘）。
   const RV_LABEL = { 1: '忘了', 2: '模糊', 3: '记得', 4: '太简单' };
-  const rv = { open: false, queue: [], idx: 0, revealed: false, done: 0, stats: {}, tally: { 1: 0, 2: 0, 3: 0, 4: 0 }, busy: false, scanIncomplete: false };
+  const rv = {
+    open: false, queue: [], idx: 0, revealed: false, done: 0, stats: {}, tally: { 1: 0, 2: 0, 3: 0, 4: 0 },
+    busy: false, scanIncomplete: false,
+    tab: 'review',        // v1.6：review 复习 / outline 大纲
+    outline: [],          // v1.6：大纲行（全部卡片 + depth）
+  };
 
   function annoById(id) { return state.annos.find((a) => a.id === String(id || '')) || null; }
+
+  // 卡片的「标题」：优先正文，没有正文用评论。空白折成单个空格，过长的截断。
+  function rvCardTitle(a) {
+    const raw = String((a && (a.text || a.comment)) || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return '';
+    return raw.length > 80 ? raw.slice(0, 80) + '…' : raw;
+  }
 
   async function openRecall() {
     if (!el.recallModal || !el.recallBody) return;
     rv.open = true;
+    rv.tab = 'review';
+    rvSyncTabs();
     el.recallModal.hidden = false;
     el.recallBody.innerHTML = '<div class="ld-hint">读取中…</div>';
     await loadAnnos(true);
@@ -2801,6 +3340,88 @@ window.LibraryUI = (function () {
     try { st = await pdfBridge.recall.state(30); } catch (_) { st = null; }
     if (!st || !st.ok) { el.recallBody.innerHTML = '<div class="ld-hint">读取回顾记录失败。</div>'; return; }
     rvApply(st);
+  }
+
+  function rvSyncTabs() {
+    const a = $('recall-tab-review'), b = $('recall-tab-outline');
+    if (a) { a.classList.toggle('is-on', rv.tab === 'review'); a.setAttribute('aria-selected', rv.tab === 'review' ? 'true' : 'false'); }
+    if (b) { b.classList.toggle('is-on', rv.tab === 'outline'); b.setAttribute('aria-selected', rv.tab === 'outline' ? 'true' : 'false'); }
+  }
+
+  async function rvSwitchTab(tab) {
+    rv.tab = tab === 'outline' ? 'outline' : 'review';
+    rvSyncTabs();
+    if (rv.tab === 'outline') await rvLoadOutline();
+    else rvRender();
+  }
+
+  async function rvLoadOutline() {
+    if (!window.pdfBridge || !pdfBridge.recall || !pdfBridge.recall.outline) {
+      if (el.recallBody) el.recallBody.innerHTML = '<div class="ld-hint">大纲接口不可用。</div>';
+      return;
+    }
+    let st = null;
+    try { st = await pdfBridge.recall.outline(); } catch (_) { st = null; }
+    if (!st || !st.ok) { if (el.recallBody) el.recallBody.innerHTML = '<div class="ld-hint">读取大纲失败。</div>'; return; }
+    rv.outline = st.cards || [];
+    rv.stats = st.stats || rv.stats;
+    rvRenderOutline();
+  }
+
+  function rvRenderOutline() {
+    rvProgress();
+    const host = el.recallBody;
+    if (!host) return;
+    if (!rv.outline.length) {
+      host.innerHTML = '<div class="rv-empty"><div class="rv-empty-t">大纲还是空的</div>' +
+        '<div class="ld-hint">把标注加入回顾后，这里会按加入顺序列成一张可以缩进的大纲。' +
+        '选中一行按 Tab 缩进一层、Shift+Tab 收一层，用来表达「这张是上面那张的展开」。</div></div>';
+      return;
+    }
+    const rows = rv.outline.map((c) => {
+      const a = annoById(c.id);
+      const title = rvCardTitle(a) || '（这条标注没有文字）';
+      const where = a ? [a.fileName || '', a.page ? '第 ' + a.page + ' 页' : ''].filter(Boolean).join(' · ') : '';
+      const stateText = c.overdue ? '待复习' : '已排期';
+      const meta = [where, stateText, c.reps ? '复习 ' + c.reps + ' 次' : ''].filter(Boolean).join(' · ');
+      return '<li class="rv-ol-row" data-rv-card="' + esc(c.id) + '" tabindex="0" style="--d:' + (c.depth || 0) + '">' +
+        '<span class="rv-ol-bullet" aria-hidden="true"></span>' +
+        '<span class="rv-ol-main">' +
+          '<span class="rv-ol-title">' + esc(title) + '</span>' +
+          '<span class="rv-ol-meta">' + esc(meta) + '</span>' +
+        '</span>' +
+        '<span class="rv-ol-acts">' +
+          '<button class="ld-mini" data-rv-in="1" title="缩进一层（Tab）">→</button>' +
+          '<button class="ld-mini" data-rv-out="1" title="收一层（Shift+Tab）">←</button>' +
+          '<button class="ld-mini" data-rv-goto="1" title="打开原文">打开</button>' +
+        '</span>' +
+      '</li>';
+    }).join('');
+    host.innerHTML = '<div class="rv-ol-hint">按加入顺序排列。选中一行后 <b>Tab</b> 缩进、<b>Shift+Tab</b> 收起，最多 3 层；层级只影响这张表，不影响复习顺序。</div>' +
+      '<ul class="rv-ol">' + rows + '</ul>';
+  }
+
+  // 调一行的层级：先改内存里的那份，界面立刻对；落盘失败再回滚并提示
+  async function rvBumpDepth(id, delta) {
+    const row = rv.outline.find((c) => c.id === id);
+    if (!row) return;
+    const next = Math.max(0, Math.min(3, (row.depth || 0) + delta));
+    if (next === row.depth) return;
+    const prev = row.depth;
+    row.depth = next;
+    rvRenderOutline();
+    if (!window.pdfBridge || !pdfBridge.recall || !pdfBridge.recall.setDepth) return;
+    let r = null;
+    try { r = await pdfBridge.recall.setDepth(id, next); } catch (_) { r = null; }
+    if (!r || !r.ok) {
+      row.depth = prev;
+      rvRenderOutline();
+      window.App && window.App.toast && window.App.toast('层级没保存成功：' + ((r && r.error) || '未知错误'));
+      return;
+    }
+    // 把焦点放回同一行，连着按 Tab 不会掉出去
+    const again = el.recallBody && el.recallBody.querySelector('[data-rv-card="' + id.replace(/"/g, '\\"') + '"]');
+    if (again) again.focus();
   }
 
   function rvApply(st) {
@@ -2997,8 +3618,23 @@ window.LibraryUI = (function () {
     if (el.recallBtn) el.recallBtn.addEventListener('click', openRecall);
     const x = $('recall-close');
     if (x) x.addEventListener('click', closeRecall);
+    // v1.6：复习 / 大纲 两个页签
+    const rvTabReview = $('recall-tab-review'), rvTabOutline = $('recall-tab-outline');
+    if (rvTabReview) rvTabReview.addEventListener('click', () => rvSwitchTab('review'));
+    if (rvTabOutline) rvTabOutline.addEventListener('click', () => rvSwitchTab('outline'));
     if (el.recallBody) {
       el.recallBody.addEventListener('click', (e) => {
+        // 大纲行上的三个按钮
+        const cardRow = e.target.closest('[data-rv-card]');
+        if (cardRow) {
+          const id = cardRow.getAttribute('data-rv-card');
+          if (e.target.closest('[data-rv-in]')) { rvBumpDepth(id, 1); return; }
+          if (e.target.closest('[data-rv-out]')) { rvBumpDepth(id, -1); return; }
+          if (e.target.closest('[data-rv-goto]')) { rvOpenSource(id); return; }
+          // 点行本身：把焦点放到行上，方便接着按 Tab
+          cardRow.focus();
+          return;
+        }
         if (e.target.closest('[data-rv-reveal]')) { rvReveal(); return; }
         const rate = e.target.closest('[data-rv-rate]');
         if (rate) { rvRate(rate.dataset.rvRate); return; }
@@ -3014,11 +3650,21 @@ window.LibraryUI = (function () {
           if (cur) rvRemoveCard(cur.id);
         }
       });
+      // 大纲里的 Tab / Shift+Tab：只在大纲行上接管，其他控件的 Tab 仍然是「切焦点」
+      el.recallBody.addEventListener('keydown', (e) => {
+        if (rv.tab !== 'outline' || e.key !== 'Tab') return;
+        const row = e.target.closest && e.target.closest('[data-rv-card]');
+        if (!row) return;
+        e.preventDefault();
+        rvBumpDepth(row.getAttribute('data-rv-card'), e.shiftKey ? -1 : 1);
+      });
     }
     // 键盘：空格显示、1–4 评分、Esc 关闭。只在面板开着的时候接管，不影响搜索框和编辑器。
     document.addEventListener('keydown', (e) => {
       if (!rv.open) return;
       if (e.key === 'Escape') { e.preventDefault(); closeRecall(); return; }
+      // 大纲页签下空格 / 1–4 不评分（否则在列表里按空格会误判成「显示答案」）
+      if (rv.tab !== 'review') return;
       if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '')) return;
       if (e.key === ' ' || e.code === 'Space') {
         if (!rv.revealed && rv.idx < rv.queue.length) { e.preventDefault(); rvReveal(); }
@@ -3189,9 +3835,14 @@ window.LibraryUI = (function () {
       restoreTabs: el.setRestoreTabs ? el.setRestoreTabs.checked : false,
       splitView: el.setSplitView ? el.setSplitView.checked : false,
       invertPages: el.setInvertPages ? el.setInvertPages.checked : false,
+      recallAutolink: el.setRecallAutolink ? el.setRecallAutolink.checked : true,
       viewMode: el.setViewMode ? el.setViewMode.value : 'scroll',
       fetchEmail: el.setFetchEmail ? el.setFetchEmail.value.trim() : '',
+      fetchProxy: el.setFetchProxy ? el.setFetchProxy.value.trim() : '',
+      fetchOpenurl: el.setFetchOpenurl ? el.setFetchOpenurl.value.trim() : '',
       citeKeyTemplate: el.setCitekey ? el.setCitekey.value.trim() : '',
+      noteHeadingScale: el.setNoteHScale ? Number(el.setNoteHScale.value) || 1 : 1,
+      noteHeadingWeight: el.setNoteHWeight && el.setNoteHWeight.value === 'normal' ? 'normal' : 'bold',
     };
     const r = await window.pdfBridge.setSettings(patch);
     if (!r || !r.ok) { setSettingsStatus('保存失败：' + ((r && r.error) || '未知错误')); return; }
@@ -3201,6 +3852,7 @@ window.LibraryUI = (function () {
     if (el.sort) el.sort.value = state.sort;
     applyTheme(state.settings.theme);
     if (window.App && App.applyInvert) App.applyInvert(!!state.settings.invertPages);
+    applyNoteHeadingStyle();
     if (window.App && App.setViewMode) App.setViewMode(state.settings.viewMode);
     if (window.App && App.setSplitView && App.state && App.state.split !== !!state.settings.splitView) {
       App.setSplitView(!!state.settings.splitView, { persist: false });
@@ -3338,6 +3990,27 @@ window.LibraryUI = (function () {
     el.ld.fetchStatus.textContent = '已下载（' + kb + ' KB · 来源 ' + String(r.source || '')
       + '），可以直接双击阅读';
     window.App && window.App.toast && window.App.toast('PDF 已挂到条目上');
+  }
+
+  // v1.6：把题录写进 PDF 副本。默认另存，原文件一个字节都不动。
+  async function writePdfMeta() {
+    const it = selectedItem();
+    if (!it || it.deletedAt) return;
+    if (!L() || !L().writePdfMeta) { el.ld.fetchStatus.textContent = '当前环境不支持写入元数据'; return; }
+    if (!it.attachment || !it.attachment.path) { el.ld.fetchStatus.textContent = '这条条目还没有 PDF 附件'; return; }
+    const btn = el.ld.pdfMeta;
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '写入中…'; }
+    el.ld.fetchStatus.textContent = '正在写入元数据…';
+    let r;
+    try { r = await L().writePdfMeta(it.key); }
+    catch (err) { r = { ok: false, error: err.message || String(err) }; }
+    finally { if (btn) { btn.disabled = false; btn.textContent = old || '写入 PDF 元数据'; } }
+    if (!r || !r.ok) { el.ld.fetchStatus.textContent = '没写成：' + ((r && r.error) || '未知错误'); return; }
+    const f = r.fields || {};
+    const got = [f.title ? '标题' : '', f.author ? '作者' : '', f.keywords ? '关键词' : '', f.xmp ? 'XMP' : ''].filter(Boolean).join(' / ');
+    el.ld.fetchStatus.textContent = '已另存：' + r.path.split(/[\\/]/).pop() + (got ? '（' + got + '）' : '');
+    window.App && window.App.toast && window.App.toast('元数据已写入副本，原文件未改动', 4000);
   }
 
   // v31：批量抓取。选中多条 → 依次抓，进度实时显示在批量条上；再点一次可请求取消。
@@ -3553,7 +4226,8 @@ window.LibraryUI = (function () {
     const r = await L().importRefs();
     if (r && r.ok) {
       await refresh();
-      window.App && window.App.toast && window.App.toast('导入 ' + r.added + ' 条，跳过重复 ' + r.skipped + ' 条');
+      const linked = r.linked ? '，顺带接回 ' + r.linked + ' 个附件' : '';
+      window.App && window.App.toast && window.App.toast('导入 ' + r.added + ' 条，跳过重复 ' + r.skipped + ' 条' + linked);
     } else if (r && !r.canceled) {
       window.App && window.App.toast && window.App.toast('导入失败：' + (r.error || '未知错误'));
     }
@@ -3562,7 +4236,7 @@ window.LibraryUI = (function () {
   async function exportRefs() {
     if (!L() || !L().exportRefs) return;
     const r = await L().exportRefs();
-    if (r && r.ok) window.App && window.App.toast && window.App.toast('已导出 ' + r.count + ' 条到 ' + r.path);
+    if (r && r.ok) window.App && window.App.toast && window.App.toast('已导出 ' + r.count + ' 条（' + (r.format || '') + '）到 ' + r.path);
     else if (r && !r.canceled) window.App && window.App.toast && window.App.toast('导出失败：' + (r.error || '未知错误'));
   }
 
@@ -4226,8 +4900,9 @@ window.LibraryUI = (function () {
       statsBtn: $('lib-stats'), statsModal: $('stats-modal'), statsBody: $('stats-body'),
       recallBtn: $('lib-recall'), recallModal: $('recall-modal'), recallBody: $('recall-body'), recallProgress: $('recall-progress'),
       settingsModal: $('settings-modal'), setTheme: $('set-theme'), setSort: $('set-sort'), setViewMode: $('set-view-mode'),
-      setAutoIndex: $('set-auto-index'), setRestoreTabs: $('set-restore-tabs'), setSplitView: $('set-split-view'), setInvertPages: $('set-invert-pages'), setFetchEmail: $('set-fetch-email'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
+      setAutoIndex: $('set-auto-index'), setRestoreTabs: $('set-restore-tabs'), setSplitView: $('set-split-view'), setInvertPages: $('set-invert-pages'), setRecallAutolink: $('set-recall-autolink'), setFetchEmail: $('set-fetch-email'), setFetchProxy: $('set-fetch-proxy'), setFetchOpenurl: $('set-fetch-openurl'), setDataDir: $('set-data-dir'), setStatus: $('set-status'),
       setCitekey: $('set-citekey'), setCitekeyPreview: $('set-citekey-preview'),
+      setNoteHScale: $('set-note-hscale'), setNoteHScaleVal: $('set-note-hscale-val'), setNoteHWeight: $('set-note-hweight'),
       advModal: $('adv-modal'), advMatch: $('adv-match'), advBar: $('lib-adv-bar'),
       setFtStatus: $('set-ft-status'), setIndex: $('set-index'), setReindex: $('set-reindex'),
       dupModal: $('dup-modal'), dupBody: $('dup-body'), dupStatus: $('dup-status'),
@@ -4245,13 +4920,14 @@ window.LibraryUI = (function () {
         tags: $('ld-tags'), tagInput: $('ld-tag-input'), tagAdd: $('ld-tag-add'),
         colls: $('ld-colls'), attach: $('ld-attach'), dates: $('ld-dates'), status: $('ld-status'),
         readStatus: $('ld-readstatus'),
-        fetch: $('ld-fetch'), fetchPdf: $('ld-fetch-pdf'), fetchStatus: $('ld-fetch-status'),
+        fetch: $('ld-fetch'), fetchPdf: $('ld-fetch-pdf'), fetchStatus: $('ld-fetch-status'), pdfMeta: $('ld-pdf-meta'),
         snapshot: $('ld-snapshot'), snapshotOpen: $('ld-snapshot-open'),
         save: $('ld-save'), trash: $('ld-trash'), restore: $('ld-restore'),
         del: $('ld-delete'), close: $('ld-close'),
         citeStyle: $('ld-cite-style'), citeCopy: $('ld-cite-copy'),
         citeStatus: $('ld-cite-status'), citePreview: $('ld-cite-preview'),
         atcBtn: $('ld-atc-btn'), atcRow: $('ld-atc-row'), atcLocator: $('ld-atc-locator'),
+        atcForm: $('ld-atc-form'),
         atcCopy: $('ld-atc-copy'), atcPreview: $('ld-atc-preview'),
         citekey: $('ld-citekey'), citekeyCopy: $('ld-citekey-copy'),
         citekeyAt: $('ld-citekey-at'), citekeyStatus: $('ld-citekey-status'),
@@ -4493,6 +5169,7 @@ window.LibraryUI = (function () {
       if (!el.ld.atcRow.hidden) { renderAtc(); if (el.ld.atcLocator) el.ld.atcLocator.focus(); }
     });
     if (el.ld.atcLocator) el.ld.atcLocator.addEventListener('input', renderAtc);
+    if (el.ld.atcForm) el.ld.atcForm.addEventListener('change', renderAtc);
     if (el.ld.atcCopy) el.ld.atcCopy.addEventListener('click', copyAtCitation);
     if (el.ld.citekeyCopy) el.ld.citekeyCopy.addEventListener('click', () => copyCitekey(false));
     if (el.ld.citekeyAt) el.ld.citekeyAt.addEventListener('click', () => copyCitekey(true));
@@ -4690,6 +5367,41 @@ window.LibraryUI = (function () {
     // 全屏笔记编辑器（Markdown）
     const nvBack = $('nv-back');
     if (nvBack) nvBack.addEventListener('click', closeNoteEditor);
+    // v1.6：笔记元数据面板（状态 / 标签 / 字数 / 来源）
+    const nvMetaBtn = $('nv-meta-toggle');
+    if (nvMetaBtn) nvMetaBtn.addEventListener('click', () => toggleNvMeta());
+    const nvMetaStatus = $('nv-meta-status');
+    if (nvMetaStatus) nvMetaStatus.addEventListener('change', () => {
+      nv.meta.status = ['draft', 'final'].indexOf(nvMetaStatus.value) >= 0 ? nvMetaStatus.value : '';
+      nvMetaCommit();
+    });
+    const nvTagInput = $('nv-meta-tag-input');
+    if (nvTagInput) nvTagInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const t = nvTagInput.value.trim();
+      if (!t) return;
+      if (nv.meta.tags.indexOf(t) < 0 && nv.meta.tags.length < 20) nv.meta.tags.push(t.slice(0, 40));
+      nvTagInput.value = '';
+      nvMetaCommit();
+    });
+    const nvMetaTags = $('nv-meta-tags');
+    if (nvMetaTags) nvMetaTags.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('[data-nv-tag]');
+      if (!btn) return;
+      const t = btn.getAttribute('data-nv-tag');
+      nv.meta.tags = nv.meta.tags.filter((x) => x !== t);
+      nvMetaCommit();
+    });
+    const nvMetaSource = $('nv-meta-source');
+    if (nvMetaSource) nvMetaSource.addEventListener('click', async () => {
+      if (!nv.key) return;
+      const key = nv.key;
+      await closeNoteEditor();
+      openDetail(key);
+    });
+    // v1.6：预览里的自动链接（回顾卡片标题）——点一下跳到那条标注的原文页。
+    // 放在下面那个预览点击处理里，避免同一个容器挂两个 click 监听。
     // v33：模板 / 导出下拉——用完归位到「模板…」/「导出…」，同一项可以连续用
     const nvTpl = $('nv-template');
     if (nvTpl) nvTpl.addEventListener('change', () => {
@@ -4745,6 +5457,16 @@ window.LibraryUI = (function () {
         }
         const blBtn = e.target.closest('[data-bl-open]');
         if (blBtn) { e.preventDefault(); openNoteEditor(blBtn.dataset.blOpen); return; }
+        // v1.6：自动链接的回顾卡片标题 —— 先落盘再离开，别把刚打的字丢了
+        const rvLink = e.target.closest('[data-rv-link]');
+        if (rvLink) {
+          e.preventDefault();
+          const id = rvLink.getAttribute('data-rv-link');
+          if (!await nvSaveNow()) return;
+          nvCloseQuiet();
+          rvOpenSource(id);
+          return;
+        }
         const wl = e.target.closest('[data-wikilink]');
         if (wl) {
           e.preventDefault();
@@ -4974,6 +5696,17 @@ window.LibraryUI = (function () {
       // 引用键模板：输入即预览，预设按钮直接填进输入框（真正的保存在「保存设置」）
       if (el.setCitekey) {
         el.setCitekey.addEventListener('input', renderCitekeyPreview);
+        // v1.6：拖动倍率即时看到效果（保存仍走「保存设置」）
+        if (el.setNoteHScale) el.setNoteHScale.addEventListener('input', () => {
+          const v = Number(el.setNoteHScale.value) || 1;
+          if (el.setNoteHScaleVal) el.setNoteHScaleVal.textContent = v.toFixed(2) + '×';
+          state.settings.noteHeadingScale = v;
+          applyNoteHeadingStyle();
+        });
+        if (el.setNoteHWeight) el.setNoteHWeight.addEventListener('change', () => {
+          state.settings.noteHeadingWeight = el.setNoteHWeight.value === 'normal' ? 'normal' : 'bold';
+          applyNoteHeadingStyle();
+        });
       }
       const presetHost = $('set-citekey-presets');
       if (presetHost) {
@@ -5060,6 +5793,7 @@ window.LibraryUI = (function () {
     // 详情：DOI/arXiv 抓取
     if (el.ld.fetch) el.ld.fetch.addEventListener('click', fetchMetadata);
     if (el.ld.fetchPdf) el.ld.fetchPdf.addEventListener('click', fetchPdfFull);
+    if (el.ld.pdfMeta) el.ld.pdfMeta.addEventListener('click', writePdfMeta);
     if (el.ld.snapshot) el.ld.snapshot.addEventListener('click', snapshotPage);
     if (el.ld.snapshotOpen) el.ld.snapshotOpen.addEventListener('click', openSnapshot);
 
@@ -5671,6 +6405,7 @@ window.LibraryUI = (function () {
   function init() {
     if (inited) return; inited = true;
     bind();
+    noteImgInit();   // 笔记图片拖动大小的把手：代理到 document，图片重渲染也不用重绑
     // 拖到库界面也能导入（支持一次多个 PDF）
     // 必须 stopPropagation：否则同一次 drop 还会冒泡到阅读器的 drop 处理器，
     // 那里会把第一个文件当「打开阅读」，库刚导入完就被覆盖层盖掉了。
@@ -5718,5 +6453,6 @@ window.LibraryUI = (function () {
   }
 
   // annoMarkdown 暴露出来：回归脚本要能直接验「标注 → 笔记」的排版
-  return { init, show, hide, refresh, isOpen, openDetail, closeDetail, openSettings, annoMarkdown, loadAnnos };
+  // openNoteEditor 暴露出来：回归要能按 key 直接进编辑器（界面上是从列表卡片点进去的）
+  return { init, show, hide, refresh, isOpen, openDetail, closeDetail, openSettings, annoMarkdown, loadAnnos, openNoteEditor, flushPendingSaves, pendingNoteSaves, _setNoteSaveImpl: setNoteSaveImpl };
 })();

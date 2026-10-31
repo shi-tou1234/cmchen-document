@@ -126,6 +126,45 @@ let code = 0;
   const pages2 = document.querySelectorAll('#pages .page');
   push('顺序切换后页块数量正确', pages2.length === 5, pages2.length);
 
+  // ===== 关闭最后一个标签时，在途的加载必须作废（R-v1.6d-03） =====
+  // 场景：打开 B 卡在「销毁旧对照」的等待里 → 关掉最后一个标签 → 释放等待。
+  // 旧行为：标签没了，B 的正文/页数/标题又冒出来；修好后 B 在下一个检查点自行退出。
+  await openPath(${JSON.stringify(mainPdf)});
+  await waitFor(() => base(App.state.filePath) === 'main.pdf' && App.state.numPages === 3 && App.state.rendered.get(1), 25000);
+  App.setSplitView(true);
+  await waitFor(() => !$('#ref-pane').hidden, 5000);
+  await App.loadRefDoc(${JSON.stringify(otherPdf)}, 'other.pdf', { page: 1 });
+  const refLoaded2 = await waitFor(() => App.splitState().refPages === 5, 20000);
+  push('第二次挂对照文献成功', refLoaded2, JSON.stringify(App.splitState()));
+
+  const stalled2 = App.state.refDoc;
+  let release2 = null, calls2 = 0;
+  const gate2 = new Promise((res) => { release2 = res; });
+  const origDestroy2 = stalled2.destroy.bind(stalled2);
+  stalled2.destroy = () => {
+    calls2++;
+    try { origDestroy2(); } catch (_) {}
+    if (calls2 === 1) return gate2;
+    return Promise.resolve();
+  };
+
+  await openPath(${JSON.stringify(otherPdf)});          // 打开 B，卡在销毁等待
+  const entered2 = await waitFor(() => calls2 >= 1, 20000);
+  push('第二次进入销毁等待', entered2, calls2);
+
+  // 关掉最后一个标签（探针里此时只有这一个标签）
+  App.closeTab(App.activeTabId);
+  const closedAll = await waitFor(() => App.tabs.length === 0, 15000);
+  push('标签全部关闭', closedAll, App.tabs.length);
+
+  release2();
+  await sleep(1500);
+  push('关闭后没有文档重新出现', App.state.numPages === 0, App.state.numPages);
+  push('关闭后文件路径是空的', !App.state.filePath, App.state.filePath);
+  push('关闭后页面容器是空的', document.querySelectorAll('#pages .page').length === 0,
+    document.querySelectorAll('#pages .page').length);
+  push('关闭后标签数仍是 0', App.tabs.length === 0, App.tabs.length);
+
   return { checks };
 })()`;
 

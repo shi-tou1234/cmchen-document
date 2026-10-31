@@ -19,7 +19,12 @@ const DEFAULTS = {
   viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
   splitView: false,      // v34：打开 PDF 时默认显示只读分屏参考视图
   fetchEmail: '',        // v9：抓 PDF 全文时给 Unpaywall 的联系邮箱（留空则跳过 Unpaywall）
+  fetchProxy: '',        // v1.6：机构代理前缀（https://proxy/login?url=）或域名后缀（doi-org.proxy.edu）
+  fetchOpenurl: '',      // v1.6：链接解析器基址（SFX / Alma / 360Link），抓不到时作为最后一站
   citeKeyTemplate: '',   // v35：引用键模板；空 = 用 Cite 的默认模板（与旧算法等价）
+  noteHeadingScale: 1,   // v1.6：笔记标题字号倍率（0.8–1.6），配合 noteHeadingWeight 用
+  noteHeadingWeight: 'bold', // v1.6：笔记标题字重 normal | bold
+  recallAutolink: true,  // v1.6：笔记正文里出现回顾卡片标题时自动变成链接
   ruler: false,          // v36：阅读标尺（跟随鼠标的一条半透明横带，防串行）
   portal: true,          // v36：引用跟随（点 [12] 时把库里对应的那篇开到对开栏）
 };
@@ -70,6 +75,24 @@ function sanitize(raw) {
     // 只要像邮箱就行，别把奇怪的东西存进去
     out.fetchEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) ? e.slice(0, 120) : '';
   }
+  // 机构代理两种写法：带协议的 URL 前缀，或不带协议的域名后缀。
+  // 只做「形状」校验，不去连它——代理是否可用只有真正抓一次才知道。
+  if (typeof src.fetchProxy === 'string') {
+    const p = src.fetchProxy.trim().slice(0, 200);
+    out.fetchProxy = /^https?:\/\/[^\s]+$/i.test(p) || /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(p) ? p : '';
+  }
+  if (typeof src.fetchOpenurl === 'string') {
+    const p = src.fetchOpenurl.trim().slice(0, 300);
+    out.fetchOpenurl = /^https?:\/\/[^\s]+$/i.test(p) ? p : '';
+  }
+  if (src.noteHeadingScale !== undefined) {
+    const n = Number(src.noteHeadingScale);
+    out.noteHeadingScale = Number.isFinite(n) ? Math.min(1.6, Math.max(0.8, n)) : 1;
+  }
+  if (src.noteHeadingWeight === 'normal' || src.noteHeadingWeight === 'bold') {
+    out.noteHeadingWeight = src.noteHeadingWeight;
+  }
+  if (typeof src.recallAutolink === 'boolean') out.recallAutolink = src.recallAutolink;
   return out;
 }
 

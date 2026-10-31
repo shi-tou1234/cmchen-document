@@ -138,5 +138,57 @@ console.log('5. entryAt');
   eq('行数上限生效', capped.split(' ').filter((x) => x === 'continuation').length, 3);
 }
 
+// ---------- 6. Overview 候选排序 ----------
+// rankCandidates 与 matchEntry 共用 scoreEntry：两者一旦漂移，就会出现
+// 「自动跳了的那篇不在候选列表第一位」这种说不通的现象，这条不变量必须钉住。
+console.log('6. 候选排序（Overview）');
+{
+  eq('空条目没有候选', P.rankCandidates('', ITEMS).length, 0);
+  eq('空库没有候选', P.rankCandidates('anything', []).length, 0);
+
+  const strong = P.rankCandidates('M. Zhang, "Reading interfaces for scholars," Digital Scholarship, 2021, pp. 33-51.', ITEMS);
+  ok('有把握时第一篇就是它', strong.length > 0 && strong[0].item.key === 'k2', strong.length && strong[0].item.key);
+  ok('候选按分数降序', strong.every((c, i) => i === 0 || strong[i - 1].score >= c.score),
+    JSON.stringify(strong.map((c) => c.score)));
+
+  // 两条不变量：最佳匹配必须与候选首位同一种算法结果；弱于 match 阈值也要留在列表里
+  const hit = P.matchEntry('J. Smith, "Deep learning for document analysis," 2020.', ITEMS);
+  const cand = P.rankCandidates('J. Smith, "Deep learning for document analysis," 2020.', ITEMS);
+  ok('matchEntry 的结果就是候选第一名', hit && cand.length && hit.item.key === cand[0].item.key,
+    (hit && hit.item.key) + ' vs ' + (cand[0] && cand[0].item.key));
+  ok('两者分数一致（算法没漂移）', hit && cand.length && Math.abs(hit.score - cand[0].score) < 1e-12,
+    (hit && hit.score) + ' vs ' + (cand[0] && cand[0].score));
+
+  // Overview 存在的理由：自动不敢跳的，人还能从候选里挑出来
+  // 完全相同的标题词组顺序换来的一定是高分；这里要的是「沾了一半、且没有年份」的中间地带
+  const weakEntry = 'A short note touching document analysis, unpublished draft.';
+  const weakScore = P.rankCandidates(weakEntry, ITEMS)[0];
+  ok('弱匹配分数落在 match 阈值之下', weakScore && weakScore.score < P.THRESHOLD.match, weakScore && weakScore.score);
+  ok('弱匹配但高于候选地板（算得出来才有得挑）', weakScore && weakScore.score >= P.THRESHOLD.candidate, weakScore && weakScore.score);
+  const weakHit = P.matchEntry(weakEntry, ITEMS);
+  const weakCand = P.rankCandidates(weakEntry, ITEMS);
+  ok('弱匹配：matchEntry 不敢下结论', weakHit === null, weakHit && weakHit.score);
+  ok('弱匹配但候选里还留着（Overview 的落脚点）', weakCand.length > 0 && weakCand[0].item.key === 'k1',
+    JSON.stringify(weakCand.map((c) => [c.item.key, c.score])));
+
+  // 噪声必须被挡住：完全不相干的条目不该占候选位
+  eq('完全不相干没有候选', P.rankCandidates('Cooking with cast iron, Kitchen Press, 2018.', ITEMS).length, 0);
+
+  // 上限与地板参数
+  const many = [];
+  for (let i = 0; i < 12; i++) {
+    many.push({
+      key: 'm' + i, title: 'Deep learning for document analysis part ' + i, year: '2020', doi: '',
+      creators: [], attachment: { path: '/lib/m' + i + '.pdf' },
+    });
+  }
+  eq('limit 生效', P.rankCandidates('Deep learning for document analysis, 2020.', many, { limit: 4 }).length, 4);
+  eq('floor 可调高', P.rankCandidates('Deep learning for document analysis, 2020.', many, { floor: 0.9 }).length, 0);
+
+  // 回收站里的条目：main 会先过滤，这里再加一层保险，避免历史 lists 漏过滤
+  const withTrash = P.rankCandidates('Deep learning for document analysis, 2020.', [ITEMS[3]]);
+  eq('回收站条目不进候选', withTrash.length, 0);
+}
+
 console.log('test-portal: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

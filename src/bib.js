@@ -30,9 +30,74 @@
   const escHtml = (v) => String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // ---------------- COinS ----------------
+  // OpenURL 的 ContextObject 塞进一个 <span class="Z3988" title="…">，别人用 Zotero
+  // Connector 之类的工具抓这份 HTML 时能直接还原成题录。这正是「导出 HTML」与
+  // 「导出一张纸」的区别：前者可被再次导入，后者只能看。
+  // 规范要求值做百分号编码；HTML 属性里 & 还要写成 &amp;，浏览器解码后才是原串。
+  const COINS_GENRE = {
+    journalArticle: 'article', magazineArticle: 'article', newspaperArticle: 'article',
+    book: 'book', bookSection: 'bookitem', conferencePaper: 'proceeding',
+    thesis: 'dissertation', report: 'report', webpage: 'unknown', document: 'unknown',
+  };
+
+  function coinsEncode(v) {
+    // encodeURIComponent 会把 () 也编码，DOI 里的括号编码后仍合法，统一走它更安全
+    return encodeURIComponent(String(v == null ? '' : v));
+  }
+
+  function coinsFor(it) {
+    if (!it) return '';
+    const type = str(it.itemType) || 'document';
+    const genre = COINS_GENRE[type] || 'unknown';
+    const fmt = genre === 'article' ? 'journal'
+      : (genre === 'book' || genre === 'bookitem') ? 'book' : 'dissertation';
+    const fields = (it.fields && typeof it.fields === 'object') ? it.fields : {};
+    // 标识符实际存在 fields 里（item.isbn 是早期形态，保留兜底）
+    const isbn = str(fields.isbn) || str(it.isbn);
+    const issn = str(fields.issn) || str(it.issn);
+    const publisher = str(fields.publisher) || str(it.publisher);
+
+    const kv = [['ctx_ver', 'Z39.88-2004'], ['rft_val_fmt', 'info:ofi/fmt:kev:mtx:' + fmt]];
+    const push = (k, v) => { const s = str(v); if (s) kv.push([k, s]); };
+    push('rft.genre', genre);
+    // 题名映射按类型分开：图书用 btitle，期刊论文用 atitle，**章节用 atitle + 书名 btitle**。
+    // 章节的题名和所属书名都写成 btitle 会让 OpenURL 解析器拿书名当篇名去查（R-v1.6-08）。
+    if (type === 'book') {
+      push('rft.btitle', it.title);
+      push('rft.pub', publisher || it.publication);
+    } else if (type === 'bookSection') {
+      push('rft.atitle', it.title);
+      push('rft.btitle', it.publication);
+      push('rft.pub', publisher);
+    } else {
+      push('rft.atitle', it.title);
+      push('rft.jtitle', it.publication);
+      push('rft.pub', publisher);
+    }
+    const year = str(it.year).match(/\d{4}/);
+    if (year) push('rft.date', year[0]);
+    push('rft.volume', it.volume);
+    push('rft.issue', it.issue);
+    const pages = str(it.pages);
+    if (pages) {
+      push('rft.pages', pages);
+      const m = /^\s*([A-Za-z]?\d+)\s*[-–—]\s*([A-Za-z]?\d+)\s*$/.exec(pages);
+      if (m) { push('rft.spage', m[1]); push('rft.epage', m[2]); }
+    }
+    push('rft.isbn', isbn);
+    push('rft.issn', issn);
+    const authors = (typeof Cite.authorNames === 'function' ? Cite.authorNames(it) : []);
+    for (const a of authors) push('rft.au', a);
+    const doi = str(it.doi).replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
+    if (doi) push('rft_id', 'info:doi/' + doi);
+    else if (str(it.url)) push('rft_id', it.url);
+    return kv.map(([k, v]) => k + '=' + coinsEncode(v)).join('&amp;');
+  }
+
   // 参考文献表的 HTML：编号制用 <ol>，作者-年份制用 <ul>。
   // 存在的意义是省掉「粘进 Word 再排版」这一步 —— 存成 .doc 时 Word 直接按 HTML 解析，
-  // 编号、缩进、引用键都能保留。
+  // 编号、缩进、引用键都能保留。rows[].item 有值时顺带内嵌 COinS。
   function toHtml(title, rows, numeric) {
     // 空表不输出空壳：和 markdown / text 一致地返回空串，让主进程按「没有可保存的内容」拦掉，
     // 免得导出一个只有 <ol></ol> 的空文件。
@@ -44,6 +109,8 @@
     for (const r of rows) {
       let body = escHtml(r.body);
       if (r.key) body += ' <code>[@' + escHtml(r.key) + ']</code>';
+      const coins = coinsFor(r.item);
+      if (coins) body += '<span class="Z3988" title="' + coins + '"></span>';
       out += '  <li>' + body + '</li>\n';
     }
     return out + '</' + tag + '>\n';
@@ -309,7 +376,7 @@
       if (numeric && style !== 'ieee' && !(typeof Cite.isCslStyle === 'function' && Cite.isCslStyle(style))) {
         body = '[' + n + '] ' + body;
       }
-      return { body, key: o.includeKeys ? (keys.get(it.key) || Cite.citekey(it)) : '' };
+      return { body, key: o.includeKeys ? (keys.get(it.key) || Cite.citekey(it)) : '', item: it };
     });
 
     const title = str(o.title);
@@ -347,6 +414,7 @@
 
   return {
     build, sortItems, isNumeric, defaultOrder, toHtml, wrapHtmlDoc, toRtf, rtfEscape, disambiguatedYears,
+    coinsFor,
     STYLES: Cite.STYLES,
   };
 });

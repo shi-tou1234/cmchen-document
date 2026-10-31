@@ -66,6 +66,37 @@ function doiInEntry(entry) {
   return m ? normDoi(m[0]) : '';
 }
 
+// 三档阈值：≥ strong 才自动开；[match, strong) 之间「有候选但没把握」；
+// ≥ candidate 才进候选列表（再低就纯粹是噪声，宁可让用户自己搜）。
+const THRESHOLD = { match: 0.62, strong: 0.75, candidate: 0.18 };
+
+/**
+ * 单个条目的打分。DOI 相同 → 满分；否则标题词命中率 *0.75 + 年份 0.15 + 姓氏 0.1。
+ * 抽出来是为了 matchEntry 与 rankCandidates 共用同一套口径——两处算法漂移会
+ * 变成「自动跳的那篇不在候选列表里」这种说不通的现象。
+ */
+function scoreEntry(entry, item) {
+  const text = String(entry || '');
+  const folded = fold(text);
+  if (!folded || !item) return null;
+  const doi = doiInEntry(text);
+  if (doi && normDoi(item.doi) === doi) return { item, score: 1, why: 'DOI 相同' };
+
+  const tokens = titleTokens(item.title);
+  if (!tokens.length) return null;
+  let hit = 0;
+  for (const t of tokens) if (folded.indexOf(t) >= 0) hit++;
+  const ratio = hit / tokens.length;
+  // 标题太短（1–2 个词）时 ratio 很容易满分，所以再要求「年份也在」
+  const year = String(item.year || '').trim();
+  const yearOk = year ? text.indexOf(year) >= 0 : false;
+  const surname = String(((item.creators || [])[0] || {}).lastName || '').trim();
+  const nameOk = surname ? folded.indexOf(fold(surname)) >= 0 : false;
+  let score = ratio * 0.75 + (yearOk ? 0.15 : 0) + (nameOk ? 0.1 : 0);
+  if (tokens.length <= 2 && !yearOk) score *= 0.6;      // 短标题：没有年份就大幅降权
+  return { item, score, why: ratio >= 0.999 ? '标题完整出现' : '标题词 ' + hit + '/' + tokens.length };
+}
+
 /**
  * 条目文本 → 与库里条目的最佳匹配。
  * @param {string} entry 参考文献条目的正文（可跨行）
@@ -85,22 +116,42 @@ function matchEntry(entry, items) {
 
   let best = null;
   for (const it of list) {
-    const tokens = titleTokens(it.title);
-    if (!tokens.length) continue;
-    let hit = 0;
-    for (const t of tokens) if (folded.indexOf(t) >= 0) hit++;
-    const ratio = hit / tokens.length;
-    // 标题太短（1–2 个词）时 ratio 很容易满分，所以再要求「年份也在」
-    const year = String(it.year || '').trim();
-    const yearOk = year ? text.indexOf(year) >= 0 : false;
-    const surname = String(((it.creators || [])[0] || {}).lastName || '').trim();
-    const nameOk = surname ? folded.indexOf(fold(surname)) >= 0 : false;
-    let score = ratio * 0.75 + (yearOk ? 0.15 : 0) + (nameOk ? 0.1 : 0);
-    if (tokens.length <= 2 && !yearOk) score *= 0.6;      // 短标题：没有年份就大幅降权
-    if (!best || score > best.score) best = { item: it, score, why: ratio >= 0.999 ? '标题完整出现' : '标题词 ' + hit + '/' + tokens.length };
+    const got = scoreEntry(text, it);
+    if (!got) continue;
+    if (!best || got.score > best.score) best = got;
   }
-  if (!best || best.score < 0.62) return null;
+  if (!best || best.score < THRESHOLD.match) return null;
   return best;
+}
+
+/**
+ * 条目文本 → 候选列表（降序）。给 Overview 用：机器没把握的时候交给用户挑。
+ *
+ * 与 matchEntry 的分工：matchEntry 只回答「有没有把握」，rankCandidates 回答「可能的有哪几篇」。
+ * 所以这里砍到 candidate 而不是 0.62，也不要求一定有把握——把握由界面上的分数标记表达。
+ *
+ * @param {string} entry 参考文献条目文本
+ * @param {Array} items 库条目（调用方负责先排除当前文档，避免候选里出现正在读的那篇）
+ * @param {{limit?:number, floor?:number}} [opts]
+ * @returns {Array<{item, score, why}>} 可能为空数组
+ */
+function rankCandidates(entry, items, opts) {
+  const o = opts || {};
+  const limit = Math.max(1, Math.min(30, Number(o.limit) || 8));
+  const floor = typeof o.floor === 'number' ? o.floor : THRESHOLD.candidate;
+  const folded = fold(entry);
+  if (!folded) return [];
+  const out = [];
+  for (const it of items || []) {
+    if (!it || it.deletedAt) continue;
+    const got = scoreEntry(entry, it);
+    if (!got || got.score < floor) continue;
+    out.push(got);
+  }
+  // 分数相同先短标题：标题越短越容易「整串命中」，信息量反而低，排后面
+  out.sort((a, b) => (b.score - a.score)
+    || (String(a.item.title || '').length - String(b.item.title || '').length));
+  return out.slice(0, limit);
 }
 
 /**
@@ -161,5 +212,8 @@ function entryAt(lines, idx, opts) {
   return out.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-return { matchEntry, findStartPage, entryAt, titleTokens, doiInEntry, fold, normDoi, CJK };
+return {
+  matchEntry, rankCandidates, scoreEntry, findStartPage, entryAt,
+  titleTokens, doiInEntry, fold, normDoi, CJK, THRESHOLD,
+};
 });

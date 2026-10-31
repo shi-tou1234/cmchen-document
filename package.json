@@ -1,6 +1,6 @@
 {
   "name": "trove",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "本地优先的文档阅读器与文献库（PDF / Word / PPT / Excel / Markdown / EPUB）",
   "main": "src/main.js",
   "author": "me",
@@ -9,6 +9,10 @@
     "start": "electron .",
     "copy-pdfjs": "node scripts/copy-pdfjs.js",
     "check-doc-links": "node scripts/check-doc-links.js",
+    "check-help": "node scripts/check-help.js",
+    "test-help": "node scripts/test-help.js",
+    "test-overview": "node scripts/test-overview.js",
+    "test-note-image": "node scripts/test-note-image.js",
     "dist": "electron-builder"
   },
   "dependencies": {

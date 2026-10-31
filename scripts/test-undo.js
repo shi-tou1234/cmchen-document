@@ -67,11 +67,30 @@ function check(name, ok, detail) {
   check('重复加标签不重复入栈', lib.undoInfo().canUndo <= depth + 1, lib.undoInfo().canUndo + '/' + depth);
   check('标签没有重复', lib.summary().items.find((x) => x.key === it.key).tags.filter((t) => t === 'x').length === 1, lib.summary().items.find((x) => x.key === it.key).tags);
 
-  // 笔记编辑不进撤销栈（避免打字把栈填满）
+  // 笔记编辑进撤销栈，但**同一条笔记的连续编辑合并成一个点**（R-v1.6d-01）
   const before = lib.undoInfo().canUndo;
   const n = lib.addNote(it.key, { title: 't', text: '写点什么' });
   check('笔记仍可创建', !!n);
-  check('笔记创建不占撤销点', lib.undoInfo().canUndo === before, lib.undoInfo().canUndo + '/' + before);
+  check('新建笔记占一个撤销点', lib.undoInfo().canUndo === before + 1, lib.undoInfo().canUndo + '/' + before);
+
+  // 连续打字（多次 updateNote）只增加一个点
+  const afterAdd = lib.undoInfo().canUndo;
+  for (let i = 0; i < 5; i++) lib.updateNote(it.key, n.id, { text: '写点什么' + i });
+  check('连续编辑同一笔记只占一个点', lib.undoInfo().canUndo === afterAdd + 1, lib.undoInfo().canUndo + '/' + afterAdd);
+  check('撤销描述是「编辑笔记」', lib.undoInfo().undoDesc === '编辑笔记', lib.undoInfo().undoDesc);
+
+  // 关键回归：撤销别的操作不能把后来保存的笔记一起回退
+  lib.addTag(it.key, '后加的标签');
+  lib.updateNote(it.key, n.id, { text: '最终正文' });
+  lib.undo();   // 先撤「编辑笔记」
+  const afterUndoNote = lib.summary().items.find((x) => x.key === it.key);
+  check('撤销笔记编辑后正文回到上一次', afterUndoNote.notes[0].text !== '最终正文', afterUndoNote.notes[0].text);
+  const tagStill = afterUndoNote.tags.includes('后加的标签');
+  check('撤销笔记编辑不动标签', tagStill, afterUndoNote.tags);
+  lib.undo();   // 再撤「添加标签」
+  const afterUndoTag = lib.summary().items.find((x) => x.key === it.key);
+  check('撤销加标签真的撤掉了标签', !afterUndoTag.tags.includes('后加的标签'), afterUndoTag.tags);
+  check('撤销加标签没有把笔记清空', !!afterUndoTag.notes.length && !!afterUndoTag.notes[0].text, afterUndoTag.notes.map((x) => x.text));
 
   // 栈上限
   for (let i = 0; i < 30; i++) lib.addTag(it.key, 'tag' + i);
