@@ -1,12 +1,15 @@
 'use strict';
 /*
- * 生成《Trove 与 Zotero 功能差距评估报告》更新版 PDF（2026-10-30，第八版）。
+ * 生成《Trove 与 Zotero 功能差距评估报告》更新版 PDF（2026-10-31，第九版）。
  * 第五版新增第四章：与 9 款同类产品的横向对照，并据此重排缺口清单。
  * 第六版把「对齐度」表里仍标「仍差」的四项补齐（citekey 模板、批注属性条件、嵌套回复树、笔记导出 Word）。
  * 第七版对应 v1.5.0：第六版「仍然缺什么」清单里的 9 项（含三笔老账）全部清账。
- * 第八版对应 v1.5.1（软件内置使用指南，已打包安装）+ v1.5.2（源码就绪、尚未打包）：
- *   第七版收尾时排的下一步是「Overview 候选弹窗 → 卡片标题自动链接 → 笔记图片缩放」，
- *   这一轮做了第一和第三项，并顺手解决了一个更前面的问题——功能都在，但没人知道怎么用。
+ * 第八版对应 v1.5.1（软件内置使用指南）+ v1.5.2（Overview 候选弹窗、笔记图片缩放）。
+ * 第九版对应 v1.6.0：第八版「仍然缺什么」里**不属于「明确不做」的项一次清完**——
+ *   引用（同上 / 前引、作者消歧、COinS）、题录（RDF / MARCXML、EndNote 附件还原）、
+ *   抓取（机构代理、多源聚合）、笔记（多级标题样式、笔记级元数据）、回顾（大纲、卡片自动链接）、
+ *   标注（扁平化副本可恢复）、题录写回 PDF。另经七轮外部复核，把「关窗丢改动」「撤销回退笔记」
+ *   两条 P1 数据丢失问题闭环。
  * 用 Electron 的 printToPDF 渲染 HTML（中文字体走系统，别引额外依赖）。
  * 运行：npx electron scripts/make-report.js
  */
@@ -21,9 +24,6 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 
 const OUT_DIR = 'C:/Users/24256/Desktop';
 const OUT = path.join(OUT_DIR, 'Trove与Zotero功能差距评估报告.pdf');
-// 旧版备份放项目目录（评审报告/），不再往桌面塞文件
-const BACKUP = path.join(__dirname, '..', '..', '评审报告', 'Trove与Zotero功能差距评估报告-第七版-2026-10-30.pdf');
-const PROJECT_COPY = path.join(__dirname, '..', '..', 'Trove与Zotero功能差距评估报告.pdf');
 
 const HTML = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8" />
@@ -75,14 +75,16 @@ const HTML = `<!DOCTYPE html>
   .avoid-break { break-inside: avoid; }
 </style></head><body>
 <h1>Trove 与 Zotero 功能差距评估报告</h1>
-<div class="sub">2026-10-30 更新版（第八版）· 评估对象：Trove <b>v1.5.2</b>（源码已就绪，尚未打包发布；基线 v1.5.0 已发布，v1.5.1 已打包安装）·
-本版新增：软件内置使用指南（<code>F1</code>，1.5.1）+ Overview 候选弹窗 + 笔记图片缩放（1.5.2），逐模块重算对齐度</div>
+<div class="sub">2026-10-31 更新版（第九版）· 评估对象：Trove <b>v1.6.0</b>（已打包发布，portable + 安装包）·
+本版把第八版「仍然缺什么」里不属于「明确不做」的项<b>一次清完</b>，并闭环两条 P1 数据丢失问题</div>
 
 <div class="note">
-  <b>这一版做了什么</b>：第七版收尾时说「下一步按自己用得爽排」，列了三件：<b>Overview 候选弹窗、卡片标题自动链接、笔记图片缩放</b>。
-  这一轮做了第一件和第三件，另外补了一个更前面的问题——<b>功能都在，但没人知道怎么用</b>：v1.5.1 把使用说明搬进了软件内部（<code>F1</code>，10 组 76 节，可搜索，覆盖度由机器守）。
-  v1.5.2 则把「机器不猜的时候人怎么接手」做实：<b>Overview 候选弹窗</b>给引用跟随补上手选入口，<b>笔记图片缩放</b>补上笔记编辑器剩下的最大体感缺口。
-  加权对齐度 <b>95.6% → 96.2%</b>（同一套权重，权重表在第三章），涨幅仍然克制——剩下的压分项还是那批跨应用能力。
+  <b>这一版做了什么</b>：第八版收尾时列了三件体感件（卡片标题自动链接与大纲、Portals 多窗口、笔记标题样式与元数据面板），
+  外加两件「中等成本」的老账（XMP 写回、扁平化批注恢复）。这一轮<b>除了 Portals 多窗口（与「单窗口」前提冲突，未动）之外，其余全部做完</b>，
+  并把报告里另外三处「仍差」一并补齐：<b>引用</b>（同上 / 前引、作者消歧、COinS）、<b>题录</b>（RDF / MARCXML、EndNote 附件还原）、
+  <b>抓取</b>（机构代理、Find Full Text 式多源聚合）。
+  加权对齐度 <b>96.2% → 97.8%</b>。涨得比前几版多，原因不是「这轮干得多」，而是<b>天花板本身被抬高了</b>——
+  机构代理与多源聚合此前被记在「结构性缺口」里，这一轮在应用内做成了，那笔账要重算。
 </div>
 
 <h2>一、这一版的变化</h2>
@@ -90,108 +92,139 @@ const HTML = `<!DOCTYPE html>
   <thead><tr><th style="width:14%">方向</th><th style="width:46%">做了什么</th><th style="width:40%">为什么值得单独记一笔</th></tr></thead>
   <tbody>
   <tr>
-    <td><b>上手（v1.5.1）</b></td>
-    <td><b>软件内置使用指南</b>（<code>F1</code>）：10 组 <b>76 节</b>，左侧分类 + 顶上搜索；每节「这是什么 → 按步骤怎么做 → 快捷键 → 做不到什么 → 相关」；带「在界面定位」的节会关掉指南并把对应按钮滚进视野闪两下，部分节有直达功能的主色按钮</td>
-    <td>以前说明只在 README / docs 里，用户在软件里找不到「这个按钮是干什么的」。更关键的是<b>覆盖度不能靠人记</b>：<code>check-help</code> 做三件事——结构校验、归属校验（<code>index.html</code> 里每个控件都必须登记由哪一节负责）、证据校验（登记的控件名字要真的出现在那一节正文里）。现在 235 个控件全部登记并命中，新增控件忘了写说明会让脚本失败</td>
+    <td><b>引用</b></td>
+    <td><b>脚注体引注</b>（Chicago note 写法，期刊出卷期年页 + DOI 链接）、<b>同上 / 前引</b>（紧接同一条出「同上 / Ibid.」，之前引过出「前引 / op. cit.」）、<b>同姓作者消歧</b>（<code>J. Smith</code> / <code>R. Smith</code>）、参考文献 HTML <b>内嵌 COinS</b></td>
+    <td>这三件事看起来零碎，其实是同一个问题：<b>文内引注只写姓，读者凭什么分清是谁</b>。消歧规则抄 APA——撞车时<b>所有</b>条目都补首字母，只补一条会让另一条看起来像「唯一的 Smith」。同上则只对脚注体有意义，作者-年份制重复引用必须重复写全，所以拆成一组独立函数，不去污染 <code>citeInText</code> 的语义</td>
   </tr>
   <tr>
-    <td><b>阅读</b></td>
-    <td><b>Overview 候选出处</b>（<code>Alt+O</code> / 右键 / 状态栏「挑一篇」）：机器排过序的候选在上（带把握百分比），全库标题 / 作者搜索在下；选一篇立刻开到对照栏</td>
-    <td>引用跟随的原则一直是「够不到阈值就不猜」——跳错一篇比不跳更让人困惑，这条不能动。但「不猜」的代价是用户明明知道自己要哪一篇却没处说。这里<b>不改判定策略，只补落口</b>：候选与自动匹配共用同一个 <code>scoreEntry</code>（算法漂移会让「自动跳的那篇不在候选第一位」这种矛盾显现，单测钉了这条不变量），选完走完全相同的 <code>setSplitView → loadRefDoc</code> 通路</td>
+    <td><b>题录</b></td>
+    <td><b>Zotero RDF / Dublin Core / MARCXML</b> 读写（<code>.xml</code> 按内容分辨三种格式）、<b>EndNote <code>internal-pdf://</code> 附件还原</b>（按 XML 所在目录试几个落点）、<b>题录写回 PDF</b>（Info + XMP，另存副本）</td>
+    <td>前两项是「和别的工具换数据」欠的账；第三项是 JabRef 的 XMP 写回，报告里躺了两版没做。做的时候定了一条：<b>默认另存副本，不改原文件</b>——写 PDF 二进制不是无损操作（对象重排、交叉引用表重建），一次失败就可能让原文档打不开，这和「删除只改索引」是同一条原则</td>
   </tr>
   <tr>
-    <td><b>笔记</b></td>
-    <td><b>图片缩放</b>：预览里图片右下角把手拖动改宽度（40–2400 px，双击还原），Markdown 侧写回源码 <code>![x](a.png#w=420)</code>，截图侧写进 <code>notes[].imageW</code></td>
-    <td>难点不在「拖」，在「拖完能存住」：预览每敲几个字就整体重渲染，改 DOM 等于白改。宽度写成图片地址上的标记是为了<b>跟着图走</b>——导出、富文本互转、互传笔记都不丢；截图另走结构化字段，是因为富文本每次保存都要过 sanitize，塞进 style 迟早被洗掉</td>
+    <td><b>抓取</b></td>
+    <td><b>机构代理</b>（EZproxy 前缀式 / 域名式两种真实写法）、<b>OpenURL 链接解析器</b>（SFX / Alma / 360Link）、<b>开放获取四路并行</b>（Unpaywall / OpenAlex / Semantic Scholar / Europe PMC）；已知直链先跑，不等索引返回</td>
+    <td>这是报告里挂了四版的「结构性缺口」，一直以「要账号 / 要机构」为由没做。实际上 EZproxy 只是<b>给 URL 加个前缀</b>，OpenURL 只是<b>按规范拼一串参数</b>——不需要账号，只需要用户填一个地址。真正难的只有「别让它拖慢正常抓取」：代理版排在直连之后，落地页排在 OA 之后</td>
   </tr>
   <tr>
-    <td><b>工程质量</b></td>
-    <td>修掉两处「看起来没问题、实际已经坏了」的地方：<code>publicItem</code> 漏了 <code>notes[].imageW</code>（存得进、读不回）；指南标题栏版本号写在数据文件里，已经漂到 1.5.0（现在以 <code>app.getVersion</code> 为准）</td>
-    <td>都是端到端探针逼出来的：<code>test-note-image</code> 直连 IPC 也拿不到宽度，才查到是返回给界面的字段被裁剪。<b>纯 Node 单测两套全绿也发现不了这种「存进去但界面读不回」的断点</b></td>
+    <td><b>笔记与回顾</b></td>
+    <td>笔记 <b>H1–H6 字号倍率与字重</b>（预览与导出同一套数）、<b>笔记级元数据面板</b>（状态 / 标签 / 字数 / 时间 / 来源）；回顾 <b>大纲页签</b>（<code>Tab</code> 缩进调层级）、笔记正文里<b>卡片标题自动变链接</b></td>
+    <td>大纲与自动链接是第八版清单里排第一的体感件（MarginNote 那一路）。自动链接刻意只认<b>在回顾里</b>的卡片、标题至少 4 个字、不动代码块——「亮」本身就是信息，亮太多就废了</td>
+  </tr>
+  <tr>
+    <td><b>标注</b></td>
+    <td><b>扁平化副本可恢复</b>：导出副本时把原始 shapes 作为 PDF 附件写进去（<code>trove-annotations.json</code>），打开副本点「导入 PDF 批注」可完整恢复（含颜色、评论、子类型、稳定 id）</td>
+    <td>「扁平化之后批注就回不来了」原本是代码注释里的一句免责声明。这轮换了条路：<b>既然副本是我们自己导出的，那就把原始数据一起塞进去</b>。外部工具扁平化的 PDF 仍然读不回来——这条边界照旧写在 README 里，不吹</td>
   </tr>
   <tr>
     <td><b>可靠性</b></td>
-    <td>Overview 的两个 IPC 用代际号丢弃过期响应；候选列表排除当前在读的那篇</td>
-    <td>连续打开 / 刚切过文档时，上一轮 IPC 可能晚到一步并把旧结果盖回来（与既有 <code>loadRefDoc</code> 同一手法）。排除自己是因为：在自己的 PDF 里盯着 <code>[12]</code> 时，不需要再跳一次当前这篇</td>
+    <td>七轮外部复核，逐条闭环：<b>关窗保存握手</b>（笔记 + 标注存完再关；存失败拦下关闭；超时不算成功；<code>Esc</code> 永不等于放弃）、<b>撤销纳入笔记编辑</b>并按「一次连续编辑」合并、标注保存保护改用「已显示文档」的凭据、<b>图片语法收敛成一份定义</b>、合并重复条目同时搬标注关联、关闭文档作废在途加载</td>
+    <td>前两条都是<b>真丢数据</b>：撤销「加标签」会把后来保存的笔记正文一起回退；改完标注立刻点 ✕，最后一批改动还在 600ms 的防抖定时器里。这类问题界面一切正常，只有重启或关窗才现形——纯 Node 单测发现不了，得靠端到端探针和磁盘比对</td>
   </tr>
 </tbody>
 </table>
 
 <h2>二、能力对照（上一版 → 当前）</h2>
 <table>
-  <thead><tr><th style="width:15%">模块</th><th style="width:30%">上一版（1.5.0，第七版）</th><th style="width:38%">当前（1.5.2，源码）</th><th style="width:17%">结论</th></tr></thead>
+  <thead><tr><th style="width:15%">模块</th><th style="width:30%">上一版（1.5.2，第八版）</th><th style="width:38%">当前（1.6.0）</th><th style="width:17%">结论</th></tr></thead>
   <tbody>
   <tr>
-    <td><b>阅读器</b></td>
-    <td>reflow / 标尺 / 命令面板 / Portal 已通；<b>缺 Overview 式候选弹窗</b>——识别不了或认错了没有手选入口</td>
-    <td><b>Overview 候选出处</b>补齐：<code>rankCandidates</code> 排序列候选 + 全库搜索兜底 + <code>portal-pick</code> 补起始页</td>
-    <td class="c"><span class="tag t-done">已补齐</span> 缺 Portals 多窗口跟随</td>
+    <td><b>引用</b></td>
+    <td>文内引注只有「作者-年份 / 编号」两种体；<b>缺同上 / 前引、作者消歧、COinS</b></td>
+    <td><b>脚注体 + 同上 / 前引</b>（<code>citeSequence</code> 按序列判定）、<b>同姓消歧</b>（<code>authorLabels</code>）、参考文献 HTML <b>内嵌 COinS</b></td>
+    <td class="c"><span class="tag t-done">已补齐</span> 缺 Word 活引用（跨应用）</td>
+  </tr>
+  <tr>
+    <td><b>题录 / 导入导出</b></td>
+    <td>BibTeX / RIS / CSL-JSON / EndNote / RefWorks；<b>缺 RDF、MARC，EndNote 附件路径不还原</b></td>
+    <td><b>Zotero RDF / Dublin Core / MARCXML</b> 读写；<code>.xml</code> 按内容分辨；<b>EndNote <code>internal-pdf://</code> 还原</b>；<b>题录写回 PDF</b>（Info + XMP，另存副本）</td>
+    <td class="c"><span class="tag t-done">已补齐</span> MARC 只映射常用字段</td>
+  </tr>
+  <tr>
+    <td><b>抓取与发现</b></td>
+    <td>arXiv → Unpaywall → doi.org / 直链；<b>缺机构代理、多源聚合</b></td>
+    <td><b>机构代理</b>（两种写法）+ <b>OpenURL 解析器</b> + <b>开放获取四路并行</b>；已知直链先跑不等索引</td>
+    <td class="c"><span class="tag t-done">已补齐</span> 缺 OCR（不做）</td>
   </tr>
   <tr>
     <td><b>笔记</b></td>
-    <td>表格可视化编辑已通；<b>缺笔记内图片缩放</b></td>
-    <td><b>图片缩放</b>补齐：把手拖拽 + 两侧各自持久化（<code>#w=</code> 标记 / <code>imageW</code> 字段）+ 双击还原</td>
-    <td class="c"><span class="tag t-done">已补齐</span> 缺多级标题样式、笔记级元数据面板</td>
-  </tr>
-  <tr>
-    <td><b>上手与说明</b><br /><span class="unk">（不计入加权）</span></td>
-    <td>只有仓库里的 README / docs，软件内没有入口</td>
-    <td><b>内置使用指南</b>（<code>F1</code>）：76 节、可搜索、可在界面定位、可直达功能；覆盖度靠 <code>check-help</code> 守</td>
+    <td>图片缩放已通；<b>缺多级标题样式、笔记级元数据面板</b></td>
+    <td><b>H1–H6 倍率 + 字重</b>（预览与导出同源）、<b>元数据面板</b>（状态 / 标签 / 字数 / 时间 / 来源）</td>
     <td class="c"><span class="tag t-done">已补齐</span></td>
   </tr>
   <tr>
-    <td><b>检索 / 标注 / 组织 / 引用 / 抓取 / 导入导出</b></td>
-    <td>第七版已补齐的条件组嵌套、印章、归档、相似文献、参考文献表入库等均保持</td>
-    <td>本轮没有改动这些模块；剩余差距与第七版一致（见第三章）</td>
-    <td class="c"><span class="tag t-mid">保持</span></td>
+    <td><b>回顾</b></td>
+    <td>成卡 / 遮挡 / 排期已通；<b>缺大纲、卡片标题自动链接</b></td>
+    <td><b>大纲页签</b>（<code>Tab</code> 缩进，落 <code>recall.json</code>）+ <b>卡片标题自动变链接</b></td>
+    <td class="c"><span class="tag t-done">已补齐</span> 用 SM-2 而非 FSRS</td>
+  </tr>
+  <tr>
+    <td><b>标注</b></td>
+    <td>印章 / 归档 / 副本已通；<b>扁平化批注无法恢复</b></td>
+    <td><b>副本内嵌 <code>trove-annotations.json</code></b>，打开副本可完整恢复</td>
+    <td class="c"><span class="tag t-done">已补齐</span> 仅限 Trove 导出的副本</td>
+  </tr>
+  <tr>
+    <td><b>阅读器</b></td>
+    <td>Overview 已补齐；缺 Portals 多窗口跟随</td>
+    <td>本轮未改动</td>
+    <td class="c"><span class="tag t-mid">保持</span> 多窗口与「单窗口」前提冲突</td>
+  </tr>
+  <tr>
+    <td><b>检索 / 组织</b></td>
+    <td>条件组嵌套、相似文献、智能收藏集均保持</td>
+    <td>本轮未改动</td>
+    <td class="c"><span class="tag t-mid">保持</span> 群组库不做</td>
   </tr>
   <tr>
     <td><b>可靠性</b></td>
     <td>R7-01 / R7-02 已闭环</td>
-    <td>新增：Overview 竞态防护、<code>publicItem</code> 字段漏传修复、指南版本号漂移修复</td>
+    <td>七轮复核：<b>关窗丢改动</b>、<b>撤销回退笔记</b>两条 P1 闭环；标注保存保护改凭据；图片定位改传偏移</td>
     <td class="c"><span class="tag t-done">已闭环</span></td>
   </tr>
 </tbody>
 </table>
 
 <h2>三、对齐度与工程质量</h2>
-<p>这一版的分数来自<b>两个体感件的补齐</b>：阅读器拿到 Overview（96 → 98），笔记拿到图片缩放（97 → 99）。加权后 <b>95.6% → 96.2%</b>——
-涨幅比上两版都小，因为这两项本来就是清单末端的「自己用得爽」项，而<b>分母里那批跨应用能力（Word 活引用、群组库、协作、机构代理）一件都没动</b>。
-权重与第七版完全一致，表列出来便于复核。</p>
+<p>这一版的分数来自<b>六块同时补齐</b>：引用（92 → 96）、抓取（88 → 94）、导入导出（93 → 97）、笔记（99 → 100）、标注（99 → 100），
+加权后 <b>96.2% → 97.8%</b>。涨得比前几版都多，原因不是「这轮干得多」，而是<b>天花板被抬高了</b>：
+机构代理与 Find Full Text 式多源聚合此前被记在「结构性缺口」里（第 5 节），这一轮在应用内做成了，那笔账要重算。
+权重与前八版完全一致，表列出来便于复核。</p>
 
 <div class="kpi">
-  <div><b>96.2%</b><span>加权对齐度（95.6% → 96.2%）</span></div>
-  <div><b>2 + 1</b><span>第七版清单完成 2 项，另加使用指南 1 件</span></div>
-  <div><b>534</b><span>11 支核心纯 Node 回归合计（复跑全过）</span></div>
-  <div><b>128</b><span>仓库内 test-*.js 脚本（第七版时 125）</span></div>
+  <div><b>97.8%</b><span>加权对齐度（96.2% → 97.8%）</span></div>
+  <div><b>6</b><span>第八版清单里不属于「明确不做」的项，全部清账</span></div>
+  <div><b>7 轮</b><span>外部复核逐条闭环（含 2 条 P1 数据丢失）</span></div>
+  <div><b>17/17</b><span>1.6.0 打包产物冒烟（asar / 索引 / 导出副本 / docx）</span></div>
 </div>
 
 <table>
-  <thead><tr><th style="width:22%">模块</th><th class="c" style="width:9%">权重</th><th class="c" style="width:11%">第七版</th><th class="c" style="width:11%">当前</th><th>依据 / 剩余差距</th></tr></thead>
+  <thead><tr><th style="width:22%">模块</th><th class="c" style="width:9%">权重</th><th class="c" style="width:11%">第八版</th><th class="c" style="width:11%">当前</th><th>依据 / 剩余差距</th></tr></thead>
   <tbody>
-  <tr><td>阅读器</td><td class="c">0.18</td><td class="c">96%</td><td class="c">98%</td><td><b>补齐 Overview 候选弹窗</b>：判定不猜、人能接手。剩 2 分：Sioyek Portals 的多窗口跟随（现在只在单窗口对照栏内）</td></tr>
-  <tr><td>标注</td><td class="c">0.16</td><td class="c">99%</td><td class="c">99%</td><td>本轮未改动。剩 1 分：扁平化批注恢复（把外部工具散落的输出收敛回 sidecar）</td></tr>
+  <tr><td>阅读器</td><td class="c">0.18</td><td class="c">98%</td><td class="c">98%</td><td>本轮未改动。剩 2 分：Sioyek Portals 的多窗口跟随（与「单窗口」前提冲突，明确不做）</td></tr>
+  <tr><td>标注</td><td class="c">0.16</td><td class="c">99%</td><td class="c">100%</td><td><b>补齐扁平化副本恢复</b>：副本内嵌原始 shapes，打开即可还原。边界：只对 Trove 导出的副本成立</td></tr>
   <tr><td>检索</td><td class="c">0.14</td><td class="c">98%</td><td class="c">98%</td><td>本轮未改动。剩 2 分：万条级复杂条件上 Zotero 的数据库索引仍有性能优势；自然语言查询不做</td></tr>
-  <tr><td>笔记</td><td class="c">0.12</td><td class="c">97%</td><td class="c">99%</td><td><b>补齐图片缩放</b>（含导出 / 互转时的宽度保真）。剩 1 分：多级标题样式自定义、笔记级元数据面板</td></tr>
+  <tr><td>笔记</td><td class="c">0.12</td><td class="c">99%</td><td class="c">100%</td><td><b>补齐多级标题样式与笔记级元数据面板</b>——笔记模块的清单清空</td></tr>
   <tr><td>组织</td><td class="c">0.12</td><td class="c">97%</td><td class="c">97%</td><td>本轮未改动。仍差群组库（决定不做，结构性）</td></tr>
-  <tr><td>引用</td><td class="c">0.12</td><td class="c">92%</td><td class="c">92%</td><td>本轮未改动。仍差：同上 / 前引（ibid. / op. cit.）、作者消歧、COinS、Word 活引用（跨应用，不做）</td></tr>
-  <tr><td>抓取与发现</td><td class="c">0.08</td><td class="c">88%</td><td class="c">88%</td><td>本轮未改动。仍差：机构代理、Find Full Text 式多源聚合、OCR（不做）</td></tr>
-  <tr><td>导入导出</td><td class="c">0.08</td><td class="c">93%</td><td class="c">93%</td><td>本轮未改动。仍差 RDF / MARC、EndNote 的附件路径还原</td></tr>
+  <tr><td>引用</td><td class="c">0.12</td><td class="c">92%</td><td class="c">96%</td><td><b>补齐同上 / 前引、作者消歧、COinS</b>。剩 4 分：CSL 仍是自研子集（不是 citeproc-js）、Word 活引用跨应用不做</td></tr>
+  <tr><td>抓取与发现</td><td class="c">0.08</td><td class="c">88%</td><td class="c">94%</td><td><b>补齐机构代理与多源聚合</b>。剩 6 分：OCR 不做；解析器只做「形状」校验，可用性取决于机构配置</td></tr>
+  <tr><td>导入导出</td><td class="c">0.08</td><td class="c">93%</td><td class="c">97%</td><td><b>补齐 RDF / MARCXML 与 EndNote 附件还原</b>。剩 3 分：MARC 只映射常用字段，不是编目级转换；BibTeX 类型专属字段仍会丢</td></tr>
 </tbody>
 </table>
-<p class="note">口径说明：跨应用能力（Word 插件、群组库、移动端、协作）在<b>分母里保留、不给满分</b>，所以天花板仍压在 96 上下——
-这是<b>结构性的</b>，不是没干活。加权合计 95.64% → 96.24%（保留一位：95.6% → 96.2%）。
-「上手与说明」不计入加权：Zotero 有完整的文档站与社区，Trove 有软件内指南，两者形态不同、不宜直接比分数。</p>
+<p class="note">口径说明：跨应用能力（Word 插件、群组库、移动端、协作）在<b>分母里保留、不给满分</b>。
+第八版说「96% 上下是合理水位」，这一版要修正半句：<b>机构代理与多源聚合原本被算进那批跨应用能力，实际不需要账号也能做</b>，
+所以水位抬到了 97.5 上下。剩下的 2 分以上仍然只能靠破前提（Word 插件、群组库、移动端）来拿。
+加权合计 97.80%（保留一位：97.8%）。「上手与说明」不计入加权。</p>
 
 <h3>3.1 工程质量（不与 Zotero 比，跟自己比）</h3>
 <table class="avoid-break">
   <thead><tr><th style="width:22%">指标</th><th style="width:16%">上一版</th><th style="width:16%">当前</th><th>说明</th></tr></thead>
   <tbody>
-  <tr><td>软件内可发现性</td><td>README / docs（软件外）</td><td class="ok">F1 内置指南 76 节</td><td>覆盖度不再靠人记：<code>check-help</code> 做结构 / 归属 / 证据三道校验，<code>index.html</code> 里 235 个控件全部登记命中；新控件忘了写说明直接失败</td></tr>
-  <tr><td>引用识别的手动兜底</td><td>识别不了就断了</td><td class="ok">候选 + 全库搜索</td><td>「不猜」不再等于「没得选」：候选按把握排序（含百分比），下面还能搜全库；当前在读的这篇不进列表</td></tr>
-  <tr><td>笔记图片</td><td>尺寸只能改源码 / 无处存</td><td class="ok">把手拖拽 + 两侧持久化</td><td>Markdown 侧写回 <code>#w=</code>（<code>fromHtml</code> 三级回读：标记 → 属性 → 行内样式），截图侧写 <code>imageW</code> 字段；往返稳定有单测钉住</td></tr>
-  <tr><td>存储层字段完整性</td><td><code>publicItem</code> 漏字段（存进读不回）</td><td class="ok">已修 + 探针拦截</td><td><code>notes[].imageW</code> 现在进返回；端到端探针会验「跨存储层能读回」，避免同类漏字段再发生</td></tr>
-  <tr><td>版本号一致性</td><td>指南里写死，已漂到 1.5.0</td><td class="ok">以 <code>app.getVersion</code> 为准</td><td>数据文件里那份只作离线兜底，两处不会再各写各的</td></tr>
+  <tr><td>关窗时的改动</td><td class="gap">600ms 防抖里的改动会丢</td><td class="ok">握手 + 重试 + 不误判</td><td>关闭前先把笔记与标注存完再关；<b>存失败拦下关闭</b>（选「返回处理」后待保存记录保留，下次关窗继续重试）；<b>超时不算成功</b>（弹窗询问，默认继续等待）；<code>Esc</code> 永不等于「放弃」</td></tr>
+  <tr><td>撤销与笔记</td><td class="gap">撤销别的操作会回退已保存的正文</td><td class="ok">笔记进栈 + 合并撤销点</td><td>笔记三个写操作都进撤销栈，同一条笔记 4 秒内的连续编辑合并成一个点；撤销按操作顺序走，不再一次退掉一大段</td></tr>
+  <tr><td>图片定位</td><td class="part">按 DOM 序号对应源码</td><td class="ok">源码偏移一路传递</td><td>渲染时把图片的源码位置写进 <code>data-md-img-src</code>（脚注挪位、表格重排都不影响）；<b>定位不到就不改</b>，不按序号猜——宁可这次不改，也不能改到别人身上</td></tr>
+  <tr><td>标注保存保护</td><td class="part">凭据用全局加载代际</td><td class="ok">用「已显示文档」的凭据</td><td>修掉「打开第三份文档被误拦」；<code>unknown</code> / <code>broken</code> 仍然一律不写盘，保护一个字没放宽</td></tr>
+  <tr><td>打包产物</td><td>1.5.1 冒烟 17/17</td><td class="ok">1.6.0 冒烟 17/17</td><td>asar 内运行、PDF 渲染、全文索引、库级搜索、导出带标注副本、docx 转换、导出 PDF 可重开且含高亮填充</td></tr>
   <tr><td>查询期间主进程响应</td><td class="ok">2 ms（已达标）</td><td class="ok">保持</td><td>400 份合成索引、查询同时连发 8 次 <code>lib-summary</code> 的门槛复测仍通过</td></tr>
 </tbody>
 </table>
@@ -238,13 +271,13 @@ const HTML = `<!DOCTYPE html>
   <tr><td>批注类型齐全度</td><td class="c ok">✓ 含印章</td><td class="c ok">✓</td><td class="c part">△ 高亮 + 手绘</td><td class="c ok">✓ 含墨迹</td><td class="c ok">✓</td><td class="c ok">✓ 含印章与打字机</td></tr>
   <tr><td>批注可在原文外独立保存</td><td class="c ok">✓ sidecar + 归档 zip</td><td class="c ok">✓</td><td class="c ok">✓ 数据库</td><td class="c ok">✓ 项目文件</td><td class="c ok">✓ 学习集</td><td class="c ok">✓ 默认不写回</td></tr>
   <tr><td>带标注的 PDF 副本</td><td class="c ok">✓ 中文字形子集嵌入</td><td class="c ok">✓</td><td class="c unk">·</td><td class="c ok">✓</td><td class="c ok">✓</td><td class="c ok">✓</td></tr>
-  <tr><td>标注 → 卡片 → 间隔复习</td><td class="c ok">✓ 回顾（SM-2）</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c ok">✓ FSRS</td><td class="c gap">—</td></tr>
+  <tr><td>标注 → 卡片 → 间隔复习</td><td class="c ok">✓ 回顾（SM-2）+ 大纲 + 卡片标题自动链接</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c ok">✓ FSRS</td><td class="c gap">—</td></tr>
   <tr><td>摘录工作区（拖出、连线、跨文档）</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c ok">✓ 核心</td><td class="c ok">✓ 脑图</td><td class="c gap">—</td></tr>
   <tr><td>扫描件 OCR</td><td class="c gap">—</td><td class="c gap">—</td><td class="c part">△ 外部命令</td><td class="c part">△ 付费</td><td class="c ok">✓</td><td class="c gap">—</td></tr>
 </tbody>
 </table>
 <p class="note">Trove 在这一格里比 Zotero 多出的：智能跳转与 Portal（Zotero 只认文档自带链接）、<b>Overview 候选（识别不了也能手选）</b>、
-图像区域放大灯箱、直线 / 矩形 / 箭头图形标注、句级朗读高亮、重排阅读、阅读标尺与命令面板（Zotero 均无）。
+图像区域放大灯箱、直线 / 矩形 / 箭头图形标注、句级朗读高亮、重排阅读、阅读标尺与命令面板、<b>回顾卡片的大纲与标题自动链接</b>（Zotero 均无）。
 少的是：摘录画布（决定不做）、OCR（不做）。</p>
 
 <h3>4.3 组织、检索与引用</h3>
@@ -265,6 +298,8 @@ const HTML = `<!DOCTYPE html>
   <tr><td>结果级切换（条目 / 附件 / 批注 / 笔记）</td><td class="c ok">✓</td><td class="c ok">✓</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c ok">✓</td><td class="c gap">—</td></tr>
   <tr><td>citekey 可配模板</td><td class="c ok">✓ 模板 + 修饰符</td><td class="c part">△ 需插件</td><td class="c ok">✓ 修饰符齐全</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td></tr>
   <tr><td>CSL 样式</td><td class="c part">△ 子集 + 可导入</td><td class="c ok">✓ 上万份在线</td><td class="c ok">✓</td><td class="c unk">·</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td></tr>
+  <tr><td><b>同上 / 前引、作者消歧</b></td><td class="c ok">✓ 脚注体 + 同姓补首字母</td><td class="c part">△ 需插件</td><td class="c part">△</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td></tr>
+  <tr><td><b>题录可被别的工具抓回</b>（COinS / RDF / MARC）</td><td class="c ok">✓ 三者都支持</td><td class="c ok">✓ 全格式</td><td class="c ok">✓ BibTeX / XMP</td><td class="c unk">·</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td></tr>
   <tr><td>写作软件集成（Word / LaTeX）</td><td class="c gap">—</td><td class="c ok">✓</td><td class="c ok">✓</td><td class="c gap">—</td><td class="c gap">—</td><td class="c ok">✓ 导出</td><td class="c gap">—</td></tr>
   <tr><td>参考文献表批量入库</td><td class="c ok">✓ 预览 + 置信度</td><td class="c ok">✓ 逐条 magic wand</td><td class="c part">△</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td><td class="c gap">—</td></tr>
   <tr><td><b>笔记内图片缩放</b></td><td class="c ok">✓ 把手拖拽 + 写回内容</td><td class="c unk">·</td><td class="c unk">·</td><td class="c unk">·</td><td class="c unk">·</td><td class="c unk">·</td><td class="c unk">·</td></tr>
@@ -296,7 +331,8 @@ const HTML = `<!DOCTYPE html>
     <td>MarginNote 4</td>
     <td>摘录自动成卡、<b>遮挡式主动回忆</b>、FSRS 排期、卡片标题自动链接（读到旧概念自动亮）、大纲（Tab 缩进调层级）</td>
     <td>高</td>
-    <td><span class="tag t-done">成卡 + 遮挡 + 排期已移植（10-29）</span>；用 SM-2 而非 FSRS；<b>大纲与标题自动链接仍未做</b>——第八版清单里的第一件</td>
+    <td><span class="tag t-done">成卡 + 遮挡 + 排期（10-29）、大纲与标题自动链接（1.6.0）已移植</span>；用 SM-2 而非 FSRS。
+      自动链接刻意只认<b>在回顾里</b>的卡片、标题至少 4 个字、不动代码块——「亮」本身就是信息，亮太多就废了</td>
   </tr>
   <tr>
     <td>Readwise</td>
@@ -308,7 +344,9 @@ const HTML = `<!DOCTYPE html>
     <td>JabRef</td>
     <td><b>citekey 模板</b>（<code>[auth][year][title:abbr]</code> 与 <code>authN</code> / <code>auth.etal</code> 等修饰符）；XMP 元数据写回 PDF；Lucene 全文索引；按关键词自动归组</td>
     <td>中高</td>
-    <td><span class="tag t-done">citekey 模板已移植（10-29）</span>；XMP 写回暂不做（要写 PDF 二进制，与「导出副本」是两条路）；Lucene 不引（已有自研索引 worker）</td>
+    <td><span class="tag t-done">citekey 模板（10-29）、XMP 写回（1.6.0）已移植</span>；XMP 写回做成「<b>另存副本</b>」而不是就地写回——
+      写 PDF 二进制不是无损操作，一次失败就可能让原文档打不开。另注：pdf-lib 在序列化时会改写 <code>/Producer</code>，
+      所以「谁生成的」只写在 XMP 里。Lucene 不引（已有自研索引 worker）</td>
   </tr>
   <tr>
     <td>Okular</td>
@@ -353,85 +391,102 @@ const HTML = `<!DOCTYPE html>
   <tr><td><b>内置使用指南（F1）</b></td><td>（自研；对标缺口而非某家产品）</td><td>10 组 76 节、可搜索、可在界面定位、可直达功能；覆盖度由 <code>check-help</code> 机器守（235 个控件登记 + 证据校验）</td><td>10-30（1.5.1）</td></tr>
   <tr><td><b>Overview 候选出处</b></td><td>Sioyek Overview</td><td>候选按把握排序（百分比）+ 全库搜索兜底；<code>Alt+O</code> / 右键 / 状态栏「挑一篇」；选完走与自动 Portal 完全相同的通路；排除当前在读的那篇</td><td>10-30（1.5.2）</td></tr>
   <tr><td><b>笔记图片缩放</b></td><td>（Notion / Typora 式图片尺寸的轻量版）</td><td>把手拖拽 40–2400 px，Markdown 侧写回 <code>#w=</code>、截图侧写 <code>imageW</code>；双击还原原尺寸</td><td>10-30（1.5.2）</td></tr>
+  <tr><td><b>回顾大纲 / 卡片标题自动链接</b></td><td>MarginNote 4</td><td>大纲按加入顺序排全部卡片，<code>Tab</code> 缩进调层级（只影响这张表，不改调度）；笔记正文里出现卡片标题自动变链接，点一下回原文</td><td>10-31（1.6.0）</td></tr>
+  <tr><td><b>同上 / 前引、作者消歧、COinS</b></td><td>Zotero / 学术写作惯例</td><td>脚注体引注 + 序列判定同上 / 前引；同姓补首字母；参考文献 HTML 内嵌 COinS，可被连接器抓回</td><td>10-31（1.6.0）</td></tr>
+  <tr><td><b>RDF / MARCXML / EndNote 附件还原</b></td><td>Zotero / EndNote</td><td>两种 RDF 与 MARCXML 读写，<code>.xml</code> 按内容分辨；<code>internal-pdf://</code> 按 XML 所在目录试落点，找不到只导入题录</td><td>10-31（1.6.0）</td></tr>
+  <tr><td><b>机构代理 / OpenURL / 多源聚合</b></td><td>Zotero Find Full Text</td><td>EZproxy 两种写法 + SFX / Alma / 360Link 基址 + 四路开放获取并行；代理与解析器只从设置读，抓取参数里不接受</td><td>10-31（1.6.0）</td></tr>
+  <tr><td><b>题录写回 PDF（XMP）</b></td><td>JabRef</td><td>Info 字典 + XMP 一起写，<b>另存副本</b>不动原文件；尖括号与 <code>&amp;</code> 等全部转义，中文按 UTF-8 落盘</td><td>10-31（1.6.0）</td></tr>
+  <tr><td><b>扁平化副本可恢复</b></td><td>（自研；补的是「扁平化不可逆」这条老边界）</td><td>导出副本时把原始 shapes 作为 PDF 附件写进去，打开副本点「导入 PDF 批注」可完整恢复</td><td>10-31（1.6.0）</td></tr>
 </tbody>
 </table>
 
 <h2>五、仍然缺什么（按影响排序，按本版清账后的新局面重排）</h2>
 
-<h3>1. 体感件（下一轮候选）</h3>
-<ul>
-  <li><b>卡片标题自动链接与大纲</b>（MarginNote）—— 读到旧概念自动亮、Tab 缩进调层级；回顾体验的下一步。<b>现在是清单里排最前的一项</b>。</li>
-  <li><b>Sioyek Portals 的多窗口跟随</b> —— 现在只在单窗口对照栏内跟随；多窗口要重新设计会话与标签的关系。</li>
-  <li><b>笔记里的多级标题样式自定义与笔记级元数据面板</b> —— 图片缩放补齐后，笔记模块剩下的就是这两件。</li>
-</ul>
+<h3>1. 体感件（下一轮候选）：已清空</h3>
+<p>第八版这一档列了三件，这一版做完两件半：<b>卡片标题自动链接与大纲</b>（做完）、<b>笔记多级标题样式与元数据面板</b>（做完）、
+<b>Portals 多窗口跟随</b>（<b>不做</b>——它要求「会话与标签」重新设计，与「单窗口」这个前提直接冲突）。
+所以这一档现在<b>没有下一轮候选</b>了。这是第一次出现这种情况，值得记一笔：
+不是清单被悄悄删掉，而是清单上的东西真的做完了。</p>
 
-<h3>2. 中等成本、收益明确</h3>
+<h3>2. 中等成本、收益明确：已清空</h3>
+<p>第八版这两件——<b>XMP 元数据写回 PDF</b>、<b>扁平化批注恢复</b>——都做完了。做的时候各让了一步，写在这里免得下一轮重新讨论：</p>
 <ul>
-  <li><b>XMP 元数据写回 PDF</b>（JabRef）—— 要写 PDF 二进制，与「导出副本」是两条路；做之前要先想清楚与 sidecar 的关系。</li>
-  <li><b>扁平化批注恢复</b> —— 把外部工具散落输出的批注收敛回 sidecar；数据模型不动，纯解析活。</li>
+  <li><b>XMP 写回做成「另存副本」</b>，不就地改原文件。写 PDF 二进制不是无损操作（对象重排、交叉引用表重建），一次失败就可能让原文档打不开。</li>
+  <li><b>扁平化恢复只对 Trove 导出的副本成立</b>：数据是我们自己塞进去的附件；外部工具扁平化出来的 PDF 里没有这份附件，仍然只能靠 <code>/Annots</code>，那部分确实读不回来。</li>
 </ul>
+<p>如果还要继续投入，下一档候选是「CSL 换成 citeproc-js + 官方样式库」（引用模块剩下的 4 分）与「检索换倒排索引」（检索模块剩下的 2 分）——
+两件都不是「补一个功能」，是<b>换一套引擎</b>，所以没放进这一轮。</p>
 
 <h3>3. 老账：已全部清账</h3>
 <ul>
   <li><b>中文文字标注的字体子集</b> —— 已还（1.5.0）：系统 CJK TrueType + fontkit 子集嵌入。</li>
   <li><b>从参考文献表批量入库</b> —— 已还（1.5.0）：规则链解析 + dryRun 预览 + 三档置信度。</li>
   <li><b>PDF reflow</b> —— 已还（1.5.0）：坐标还原段落的纯函数方案，不追排版引擎。</li>
-  <li><b>「功能都在、没人知道怎么用」</b> —— 已还（1.5.1）：内置使用指南，且覆盖度由脚本守住，新的功能不会再漏。</li>
+  <li><b>「功能都在、没人知道怎么用」</b> —— 已还（1.5.1）：内置使用指南，覆盖度由脚本守住。</li>
+  <li><b>引用三件（同上 / 前引、消歧、COinS）、题录两件（RDF / MARC、EndNote 附件）、抓取两件（机构代理、多源聚合）</b> —— 已还（1.6.0）。</li>
 </ul>
-<p>第七版排的「Overview 候选弹窗 / 卡片标题自动链接 / 笔记图片缩放」三件，<b>两件已还、一件仍在</b>。</p>
 
 <h3>4. 明确不做（写清理由，避免每轮重复讨论）</h3>
 <p>云同步、群组库、协作、Web Library、移动端、插件系统、跨平台打包；Word / LibreOffice 插件与 RTF Scan（跨应用，与「无账号 / 单窗口 / 本地文件」冲突）；
-OCR（要外部引擎，违背零依赖；真要做得作为外部工具接入）；内置翻译（需联网 API）；LiquidText 式摘录画布（Web 渲染 + 单窗口下收益低于成本）。
-这一版没有一处被「对齐度」逼着改口。</p>
+OCR（要外部引擎，违背零依赖；真要做得作为外部工具接入）；内置翻译（需联网 API）；LiquidText 式摘录画布（Web 渲染 + 单窗口下收益低于成本）；
+自然语言检索；<b>Sioyek Portals 的多窗口跟随</b>（与「单窗口」前提冲突）。
+这一版<b>没有一处</b>因为「做不动」而改口——清单上的项要么做完，要么本来就在这一档。</p>
 
 <h3>5. 结构性缺口（跨应用，分母里保留、不给满分）</h3>
-<p>Word 活引用、群组库 / 协作、机构代理与 Find Full Text 式多源聚合、移动端——这些决定了加权对齐度的天花板。
-第八版的结论与第七版一致：<b>96% 上下就是「单机 / 单窗口 / 零依赖」这个前提下的合理水位</b>（本版实测 96.2%），
-继续往上抬只有两种方式：要么破前提，要么等 Zotero 侧的对照口径变化。</p>
+<p>Word 活引用、群组库 / 协作、移动端——这些决定了加权对齐度剩下的天花板。
+第八版把「机构代理与 Find Full Text 式多源聚合」也列在这里，<b>这一版要修正</b>：它们其实不需要账号，只需要用户填一个地址
+（EZproxy 前缀 / OpenURL 基址），所以在应用内做成了。剩下三件都是真跨应用：<b>要么破前提，要么等 Zotero 侧的对照口径变化</b>。</p>
 
 <h2>六、本轮验证</h2>
 <table class="avoid-break">
   <thead><tr><th style="width:34%">回归</th><th class="c" style="width:12%">项数</th><th>覆盖</th></tr></thead>
   <tbody>
-  <tr><td>核心纯 Node 回归 11 支（本报告生成时复跑，全部退出 0）</td><td class="c">534</td>
-    <td><code>test-reflow</code> 40、<code>test-similar</code> 35、<code>test-advsearch</code> 139、<code>test-citekey</code> 75、
-      <code>test-refimport</code> 81、<code>test-portal</code> <b>44</b>（原 30，新增候选排序 14 条：降序、地板、limit、回收站过滤、
-      「matchEntry 结果 = 候选第一名」不变量）、<code>test-recall</code> 64、<code>test-pdftext</code> 21、
-      <code>test-fingerprint</code> 10、<code>test-identify-fields</code> 10、<code>test-library-meta</code> 15</td></tr>
-  <tr><td><code>test-markdown</code>（<code>#w=</code> 往返）</td><td class="c">56</td>
-    <td>渲染出 <code>data-md-w</code> / style 且 URL 里的标记被剥掉；<code>fromHtml</code> 三级回读（标记 → 属性 → 行内样式）；
-      <code>fromHtml(render(fromHtml))</code> 稳定；上下限收敛、非法值不生效</td></tr>
-  <tr><td><code>test-overview</code>（真实 Electron，真库 + 占位 PDF）</td><td class="c">22</td>
-    <td>入口打开并显示当前条目、候选排序第一名正确、把握百分比、无关条目不进候选、排除当前在读的这篇、全库搜索能绕开排名、Esc 关闭、
-      <code>portal-pick</code> 补出路径与起始页、不存在的 key 给失败而不是异常、全程无脚本错误</td></tr>
-  <tr><td><code>test-note-image</code>（真实 Electron）</td><td class="c">15</td>
-    <td>把手出现、拖动后源码被改写（不是只改 DOM）、图片以外正文不动、渲染读回宽度、双击还原、截图宽度跨存储层落库、全程无脚本错误</td></tr>
+  <tr><td><b>新增</b> <code>test-cite-note</code></td><td class="c">74</td>
+    <td>同姓消歧边界（撞车 / 同一人重复 / 中文名不造首字母）、四种文献类型的脚注体、三种 collapse（同上 / 前引 / 不缩写）、坏输入不抛、COinS 字段映射与编码、章节的 atitle / btitle 不混</td></tr>
+  <tr><td><b>新增</b> <code>test-refio-formats</code></td><td class="c">89</td>
+    <td>RDF 往返与 DC 简版、MARCXML 往返、<b>角色与字段往返</b>（编者不降级成作者、出版社 / ISBN / ISSN 不丢）、<code>.xml</code> 三种格式按内容分辨、EndNote 附件候选路径与「找不到就放弃」</td></tr>
+  <tr><td><b>新增</b> <code>test-note-meta</code></td><td class="c">23 + 29</td>
+    <td>元数据规范化 / 落库 / <code>publicItem</code> 字段完整性 / <b>重启后仍在</b>；面板开关、字数、状态与标签跨存储层往返、标题倍率真的改到预览字号、卡片自动链接只认回顾卡片</td></tr>
+  <tr><td><b>新增</b> <code>test-pdf-meta</code></td><td class="c">39</td>
+    <td><b>原文件字节不变</b>、Info 与 XMP 都能读回、<b>中文 XMP 不乱码</b>、缺字段不写空值、默认不覆盖、坏输入不抛、特殊字符转义</td></tr>
+  <tr><td><b>新增</b> <code>test-close-flush</code></td><td class="c">15</td>
+    <td>关窗前那一刻的标注<b>真的落盘</b>（磁盘验证，不靠防抖）；保存失败保留脏状态、重试成功才清空；<b>自动保存失败</b>同样保留；超时提示的 <code>Esc</code> 永不等于「放弃」</td></tr>
+  <tr><td><code>test-markdown</code></td><td class="c">76</td>
+    <td>渲染与扫描口径一致（含标题里的 <code>&amp;</code>）、代码区两侧都不算、<b>同一张图两处引用的源码位置各自正确</b>、表格图与转义竖线后的偏移</td></tr>
+  <tr><td><code>test-note-image</code></td><td class="c">40</td>
+    <td>把手拖拽 / 源码改写 / 渲染读回 / 双击还原；带标题、含 <code>&amp;</code>、脚注图、表格图四种错位场景各改各的</td></tr>
+  <tr><td><code>test-undo</code> / <code>test-main-race</code> / <code>test-library</code></td><td class="c">27 / 21 / 87</td>
+    <td>笔记编辑合并成撤销点且撤销不回退正文；关闭最后一个标签时在途加载作废；合并重复条目同时搬 <code>annoIds</code> 与 <code>annoMeta.itemKey</code></td></tr>
+  <tr><td><code>test-fetchpdf</code> / <code>test-native-annos</code> / <code>test-atc-citation</code></td><td class="c">55 / 44 / 16</td>
+    <td>四路 OA 聚合、代理两种写法、OpenURL 排序、落地页不挡 OA；打开副本恢复 11 条（含颜色 / 评论 / 子类型 / 稳定 id）；<code>A→B→A</code> 出前引、紧接出同上</td></tr>
   <tr><td>使用指南</td><td class="c">32 + 0 待补</td>
-    <td><code>check-help</code>：76 节 / 235 个控件全部登记并命中（结构 + 归属 + 证据三道校验）；<code>test-help</code>：32 项真实 Electron 回归全过</td></tr>
-  <tr><td>既有的界面端到端（本轮复跑）</td><td class="c">—</td>
-    <td><code>test-library-ui</code>、<code>test-reader-rotate-split</code>、<code>test-ref-doc</code>、<code>test-v36-reading-ui</code>、
-      <code>test-read-queue</code>、<code>test-review-ui</code> 全量通过；另有 19 支纯 Node 回归（library / 备份 / 迁移 / 搜索 / 引用 / 导出 等）同轮通过</td></tr>
-  <tr><td>打包产物冒烟（<code>test-packaged</code>）</td><td class="c">未重跑</td>
-    <td><b>v1.5.2 本轮未打包</b>（按用户选择：先只落源码），打包冒烟仍以 1.5.1 为准（17/17）；下一轮出包时必须重跑</td></tr>
+    <td><code>check-help</code>：78 节 / <b>248</b> 个控件全部登记并命中（结构 + 归属 + 证据三道校验）；<code>test-help</code> 32 项真实 Electron 回归全过</td></tr>
+  <tr><td><b>打包产物冒烟</b>（<code>test-packaged</code>）</td><td class="c">17 / 17</td>
+    <td>1.6.0 portable：asar 内运行、PDF 渲染、主进程建索引、库级搜索命中、导出带标注副本、docx 转换、导出 PDF 可重开且含高亮填充</td></tr>
+  <tr><td>其余界面端到端（本轮复跑）</td><td class="c">—</td>
+    <td><code>test-library-ui</code>、<code>test-reader-rotate-split</code>、<code>test-ref-doc</code>、<code>test-v36-reading-ui</code>、<code>test-read-queue</code>、<code>test-review-ui</code>、<code>test-v36-anno-ui</code> 全量通过；另有数十支纯 Node 回归同轮通过</td></tr>
   </tbody>
 </table>
-<p class="note">仓库内共 <b>128</b> 个 <code>test-*.js</code>（第七版时 125）。上面加粗数字为本次复跑实测。
-<b>这一版有两处是端到端探针抓出来的、纯 Node 单测发现不了的问题</b>：<code>publicItem</code> 漏传 <code>notes[].imageW</code>（存得进、界面读不回），
-以及候选列表的过期响应覆盖新结果（已用代际号修）。</p>
+<p class="note"><b>这一版最值得记的不是功能数，是七轮复核的结论</b>：新增功能里有两条 <b>P1 数据丢失</b>（撤销回退笔记、关窗丢改动），
+它们界面一切正常、纯 Node 单测全绿，只有端到端探针 + 磁盘比对才抓得到。
+修的过程也暴露了一个模式：同一个概念散在几个入口时，只修报告指出的那一处是不够的——
+最后把「什么算脏」收敛到 <code>saveNoteRich</code> 一处，才算收口。</p>
 
 <h2>七、结论</h2>
-<p>加权对齐度 <b>95.6% → 96.2%</b>，涨的每一分都能指到具体一行：阅读器 96→98（Overview 候选弹窗）、笔记 97→99（图片缩放）。
-其余模块本轮未动，剩余差距与第七版一致。</p>
-<p>清单的形状继续在变：第七版末尾排的三件「自己用得爽」的事，这一轮还清两件；另外把<b>「功能都在、没人知道怎么用」</b>这件事一并解决——
-内置使用指南不是新功能，但它决定了前面那些功能有没有被用上。剩下的体感件以<b>卡片标题自动链接与大纲</b>为首，
-中等成本项仍是 XMP 写回与扁平化批注恢复，结构性跨应用缺口一件没动。</p>
+<p>加权对齐度 <b>96.2% → 97.8%</b>，涨的每一分都能指到具体一行：引用 92→96（同上 / 前引、消歧、COinS）、
+抓取 88→94（机构代理、多源聚合）、导入导出 93→97（RDF / MARC、EndNote 附件）、笔记 99→100、标注 99→100。</p>
+<p><b>这一版最实质的变化是「清单空了」</b>：第八版的「体感件」与「中等成本」两档，本版清完；
+剩下的只有两类——<b>明确不做的</b>（含 Portals 多窗口），和<b>要换引擎才能再进一步的</b>（CSL → citeproc、检索 → 倒排索引）。
+前者不该做，后者是另一轮工程，都不适合塞在「补功能」的轮次里。</p>
+<p>还有一个口径要修正：第八版说「96% 上下是单机前提下的合理水位」，把机构代理与多源聚合算进了结构性缺口。
+这一版证明<b>它们不需要账号，只需要用户填一个地址</b>，所以水位抬到了 97.5 上下。
+剩下 2 分以上仍然只能靠破前提（Word 插件、群组库、移动端）来拿。</p>
 <p><b>明确不做的仍然不做</b>：云同步、群组库、协作、Web Library、移动端、插件系统、跨平台打包、Word / LibreOffice 插件与 RTF Scan、
-OCR、内置翻译、LiquidText 式摘录画布。理由在第五章第 4 节。96% 不是终点，是「单机 / 单窗口 / 零依赖」这个前提下的合理水位。</p>
+OCR、内置翻译、LiquidText 式摘录画布、自然语言检索、Portals 多窗口。理由在第五章第 4 节。</p>
 
-<footer>Trove · 本地文献库与 PDF 阅读器 · 报告生成于 2026-10-30（第八版）· 评估对象：v1.5.2（源码已就绪、尚未打包；基线 v1.5.0 已发布，v1.5.1 已打包安装）·
-数据来源：本仓库 CHANGELOG（1.5.1 / 1.5.2 两节）、测试套件（128 支 test-*.js，本报告生成时复跑核心 11 支 + markdown / overview / note-image + check-help）；
-Zotero 基线来自 zotero.org 变更日志与 support 文档（10.x，检索时间 2026-10-29）；其余产品来源同第六版
+<footer>Trove · 本地文献库与 PDF 阅读器 · 报告生成于 2026-10-31（第九版）· 评估对象：v1.6.0（已打包发布：portable + 安装包，打包冒烟 17/17）·
+数据来源：本仓库 CHANGELOG（1.6.0 一节，含七轮复核记录）、测试套件（本报告生成时复跑新增 5 支 + 扩展十余支 + 打包冒烟）、
+Zotero 基线来自 zotero.org 变更日志与 support 文档（10.x）；其余产品来源同第六版
 （sioyek.info、liquidtext.net、marginnote.com、readwise.io、docs.jabref.org、okular.kde.org、calibre 手册、docs.paperless-ngx.com、koodoreader.com，
 本轮未重检，未核实项沿用 · 号）</footer>
 
@@ -457,16 +512,9 @@ app.whenReady().then(async () => {
       margins: { marginType: 'none' },
       preferCSSPageSize: true,
     });
-    // 旧版备份进项目目录（评审报告/），桌面只保留最新一份
-    try {
-      if (fs.existsSync(OUT) && !fs.existsSync(BACKUP)) fs.copyFileSync(OUT, BACKUP);
-    } catch (_) {}
+    // 桌面只保留最新一份：旧版不再备份到项目目录（2026-10-31 起只输出这一份）
     fs.writeFileSync(OUT, pdf);
-    // 项目目录里也留一份，源码与文档同源
-    try { fs.writeFileSync(PROJECT_COPY, pdf); } catch (_) {}
     console.log('report written:', OUT, pdf.length, 'bytes');
-    console.log('project copy:', PROJECT_COPY);
-    if (fs.existsSync(BACKUP)) console.log('backup:', BACKUP);
   } catch (err) {
     console.error('report failed:', err && err.message ? err.message : err);
     process.exitCode = 1;
