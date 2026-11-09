@@ -75,6 +75,73 @@ function check(name, ok, detail) {
   delete process.env.PDFREADER_LIBRARY;
 }
 
+// ---------- A2. G04：迁移要把反向引用（条目 / 笔记）一起搬 ----------
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'trove-anno-refs-'));
+  const store = path.join(tmp, 'library.json');
+  fs.writeFileSync(store, JSON.stringify({
+    version: 8, collections: [], searches: [], tagColors: {}, feeds: [], noteAliases: {},
+    annoTags: {}, annoMeta: {},
+    items: [
+      { key: 'itA', title: '甲', itemType: 'document', creators: [], tags: [], collectionIds: [], annoIds: [] },
+      { key: 'itB', title: '乙', itemType: 'document', creators: [], tags: [], collectionIds: [], annoIds: [] },
+    ],
+  }));
+  process.env.PDFREADER_LIBRARY = store;
+  lib.init(store); lib.resetCache(); lib.resetUndo();
+
+  const OLD = 'abc:1:0';
+  const NEW = 'aSTABLE001';
+  lib.setAnnoTags(OLD, ['方法']);
+  lib.linkAnnoToItem(OLD, 'itA');                 // 条目 → 标注
+  const nt = lib.addNote('itA', { title: '笔记', text: '来自标注', annoIds: [OLD] });
+
+  const r = lib.remapAnnoTags({ [OLD]: NEW });
+  check('G04 迁移报告成功', r.ok && r.remapped === 1, r);
+  let sum = lib.summary();
+  const a = sum.items.find((x) => x.key === 'itA');
+  check('G04 条目 annoIds 指向新 ID', (a.annoIds || []).join(',') === NEW, a.annoIds);
+  check('G04 条目里没有旧 ID', !(a.annoIds || []).includes(OLD), a.annoIds);
+  const note = (a.notes || []).find((x) => x.id === nt.id);
+  check('G04 笔记 annoIds 指向新 ID', !!note && note.annoIds.join(',') === NEW, note && note.annoIds);
+
+  // 统计口径：迁移后仍然只算一个条目有标注
+  const LibStats = require('../src/libstats.js');
+  check('G04 迁移后统计仍为 1 个条目带标注', LibStats.compute(sum.items).withAnnos === 1, LibStats.compute(sum.items).withAnnos);
+
+  // 解除关联：旧条目不能残留旧 ID
+  lib.unlinkAnno(NEW);
+  sum = lib.summary();
+  const a2 = sum.items.find((x) => x.key === 'itA');
+  check('G04 解除关联后条目 annoIds 为空', (a2.annoIds || []).length === 0, a2.annoIds);
+  check('G04 解除关联后统计归零', LibStats.compute(sum.items).withAnnos === 0, LibStats.compute(sum.items).withAnnos);
+
+  // 重新关联到另一个条目：只算一个归属
+  lib.linkAnnoToItem(NEW, 'itB');
+  sum = lib.summary();
+  check('G04 重新关联后只有新条目带标注', LibStats.compute(sum.items).withAnnos === 1, LibStats.compute(sum.items).withAnnos);
+  check('G04 旧条目仍为空', (sum.items.find((x) => x.key === 'itA').annoIds || []).length === 0, sum.items.find((x) => x.key === 'itA').annoIds);
+
+  // 重放：不重复、不新增
+  const r2 = lib.remapAnnoTags({ [OLD]: NEW });
+  sum = lib.summary();
+  check('G04 重复迁移是空操作', r2.ok && r2.remapped === 0, r2);
+  check('G04 重放后 annoIds 不重复', (sum.items.find((x) => x.key === 'itB').annoIds || []).join(',') === NEW,
+    sum.items.find((x) => x.key === 'itB').annoIds);
+
+  // 「旧 meta 键早就没了、只剩旧引用」也要能补（以前会整条跳过）
+  const s2 = lib.load();
+  s2.items.find((x) => x.key === 'itB').annoIds = [OLD];
+  lib.save();
+  const r3 = lib.remapAnnoTags({ [OLD]: NEW });
+  sum = lib.summary();
+  check('G04 只剩旧引用时也能补齐', r3.ok && (sum.items.find((x) => x.key === 'itB').annoIds || []).join(',') === NEW,
+    sum.items.find((x) => x.key === 'itB').annoIds);
+
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  delete process.env.PDFREADER_LIBRARY;
+}
+
 // ---------- B. 探针：真实 app 端到端 ----------
 const { runProbe } = require('./probe-runner');
 const ROOT = path.join(__dirname, '..');

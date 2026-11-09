@@ -17,19 +17,36 @@
       <button type="button" id="btn-library" class="mode-tab" data-mode="library" role="tab" aria-selected="false" title="打开文献库">文献库</button>
     </div>
     <span class="sep"></span>
-    <button id="btn-sidebar" class="tbtn" title="侧栏：目录 / 缩略图 / 批注">
+
+    <!-- 主操作：空白页上唯一强调的动作；阅读中保持中性，不和当前工具的选中底色抢 -->
+    <button id="btn-open" class="tbtn lead" title="打开文档 (Ctrl+O)" aria-label="打开文档">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    </button>
+    <span class="sep"></span>
+
+    <!-- 熟悉的工具用纯图标：悬停有名称与快捷键，点击区不小于 32×32 -->
+    <button id="btn-sidebar" class="tbtn icon" title="侧栏：目录 / 缩略图 / 批注" aria-label="侧栏：目录、缩略图、批注">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
     </button>
     <span class="sep"></span>
-    <button id="btn-open" class="tbtn" title="打开文档（PDF / Word / PPT / Excel / Markdown…）(Ctrl+O)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
-      <span>打开</span>
+
+    <!-- 翻页与页码：阅读时的核心操作，永远留在主栏 -->
+    <button id="btn-prev" class="tbtn icon" title="上一页 (PgUp)" aria-label="上一页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <span id="page-box">
+      <input id="page-input" type="number" min="1" value="" placeholder="—" aria-label="当前页码" /><span id="page-count">—</span>
+    </span>
+    <button id="btn-next" class="tbtn icon" title="下一页 (PgDn)" aria-label="下一页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
     </button>
     <span class="sep"></span>
-    <button id="btn-zoom-out" class="tbtn" title="缩小">
+
+    <!-- 缩放：图标按钮夹着比例下拉，读作一件操作 -->
+    <button id="btn-zoom-out" class="tbtn icon" title="缩小 (Ctrl+-)" aria-label="缩小">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8.2 11h5.6"/></svg>
     </button>
-    <select id="scale-select" title="缩放比例">
+    <select id="scale-select" title="缩放比例" aria-label="缩放比例">
       <option value="page-actual">实际大小</option>
       <option value="page-fit">适应页面</option>
       <option value="page-width" selected>适应宽度</option>
@@ -41,58 +58,101 @@
       <option value="2">200%</option>
       <option value="3">300%</option>
     </select>
-    <button id="btn-zoom-in" class="tbtn" title="放大">
+    <button id="btn-zoom-in" class="tbtn icon" title="放大 (Ctrl+=)" aria-label="放大">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8.2v5.6M8.2 11h5.6"/></svg>
     </button>
     <span class="sep"></span>
-    <button id="btn-prev" class="tbtn" title="上一页">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-    </button>
-    <span id="page-box">
-      <input id="page-input" type="number" min="1" value="1" /><span id="page-count">/ 0</span>
+
+    <input id="search-box" type="search" placeholder="搜索全文，回车" title="文档内全文搜索 (Enter)" aria-label="文档内全文搜索" />
+    <span class="sep"></span>
+
+    <!-- 页面排列：三种方式直接常驻主栏，不再有下拉菜单 —— 点一下就切，选中态常亮。
+         分屏对照也常驻低频区旁边；旋转 / 重排 / 标尺走命令面板 Ctrl+K、页面右键菜单和快捷键。
+         下面这个隐藏容器保留它们原来的 id：命令面板、快捷键与帮助定位调用的仍是同一份逻辑。 -->
+    <span class="vm-quick" role="group" aria-label="页面排列">
+      <button id="btn-vm-scroll" class="tbtn icon vm-quick-btn" type="button" data-view-mode="scroll"
+        title="连续滚动" aria-label="连续滚动" aria-pressed="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M8.5 8h7M8.5 12h7M8.5 16h4"/></svg>
+      </button>
+      <button id="btn-vm-page" class="tbtn icon vm-quick-btn" type="button" data-view-mode="page"
+        title="单页翻页" aria-label="单页翻页" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="1"/></svg>
+      </button>
+      <button id="btn-spread" class="tbtn icon vm-quick-btn" type="button" data-view-mode="spread"
+        title="双页对开 (Ctrl+Shift+D)" aria-label="双页对开" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="8" height="14" rx="1"/><rect x="13" y="5" width="8" height="14" rx="1"/></svg>
+      </button>
     </span>
-    <button id="btn-next" class="tbtn" title="下一页">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
-    </button>
-    <button id="btn-spread" class="tbtn" title="双页对开：像书一样左右两页（Ctrl+Shift+D）">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="8" height="14" rx="1"/><rect x="13" y="5" width="8" height="14" rx="1"/></svg>
-    </button>
-    <span class="sep"></span>
-    <input id="search-box" type="search" placeholder="搜索全文，回车" title="文档内全文搜索 (Enter)" />
-    <span class="sep"></span>
-    <button id="btn-speak" class="tbtn" title="朗读当前页（再点暂停 / 继续）">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h3l5 4V5L7 9z"/><path d="M16 8.5a4.5 4.5 0 0 1 0 7"/><path d="M18.5 6a8 8 0 0 1 0 12"/></svg>
-    </button>
-    <button id="btn-speak-stop" class="tbtn" title="停止朗读" disabled>
-      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
-    </button>
-    <button id="btn-print" class="tbtn" title="打印当前文档 (Ctrl+P)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="7" rx="1.5"/><path d="M7 16h10v4H7z"/></svg>
-    </button>
-    <span class="sep"></span>
-    <button id="btn-rotate-left" class="tbtn compact" title="逆时针旋转 90° (Ctrl+[)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9a8 8 0 1 1 2.3 6.7"/><path d="M4 4v5h5"/></svg>
-    </button>
-    <button id="btn-rotate-right" class="tbtn compact" title="顺时针旋转 90° (Ctrl+])">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 9a8 8 0 1 0-2.3 6.7"/><path d="M20 4v5h-5"/></svg>
-    </button>
-    <button id="btn-split" class="tbtn compact" title="分屏参考视图：右侧只读显示另一页">
+    <button id="btn-split" class="tbtn icon" title="分屏参考视图" aria-label="分屏参考视图" aria-pressed="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M12 5v14"/></svg>
     </button>
-    <button id="btn-reflow" class="tbtn compact" title="重排阅读：把 PDF 的文字重新排成可调宽度/字号的连续文本 (Ctrl+Shift+R)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 11h12"/><path d="M4 16h16"/><path d="M4 21h9"/></svg>
+    <button id="btn-spread-zoom" class="tbtn icon" hidden aria-pressed="false"
+      title="双页独立缩放：滚轮只放大鼠标所指的那一页" aria-label="双页独立缩放">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="7" height="12" rx="1"/><rect x="14" y="8.5" width="7.5" height="7" rx="1"/><path d="M11 12h2"/></svg>
     </button>
-    <button id="btn-ruler" class="tbtn compact" title="阅读标尺：跟随鼠标的一条横带，长段落不串行 (Ctrl+Shift+L)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9h18v6H3z"/><path d="M7 9v3M11 9v3M15 9v3M19 9v3"/></svg>
+    <span id="tb-reading-extras" hidden>
+      <button id="btn-rotate-left" class="tbtn compact" title="逆时针旋转 90° (Ctrl+[)">向左旋转 90°</button>
+      <button id="btn-rotate-right" class="tbtn compact" title="顺时针旋转 90° (Ctrl+])">向右旋转 90°</button>
+      <button id="btn-reflow" class="tbtn compact" title="重排阅读：把 PDF 的文字重新排成可调宽度 / 字号的连续文本 (Ctrl+Shift+R)">重排阅读</button>
+      <button id="btn-ruler" class="tbtn compact" title="阅读标尺：跟随鼠标的一条横带，长段落不串行 (Ctrl+Shift+L)">阅读标尺</button>
+    </span>
+    <span class="sep"></span>
+    <!-- 播放控制只在朗读开始后出现，平时不占主栏 -->
+    <button id="btn-speak" class="tbtn icon" title="朗读当前页（再点暂停 / 继续）" aria-label="朗读当前页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h3l5 4V5L7 9z"/><path d="M16 8.5a4.5 4.5 0 0 1 0 7"/><path d="M18.5 6a8 8 0 0 1 0 12"/></svg>
     </button>
-    <button id="btn-refimport" class="tbtn compact" title="参考文献表批量入库：把本文末尾的参考文献解析成库条目（命令面板里叫「参考文献表批量入库」）">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 10h11"/><path d="M4 15h8"/><path d="M17 12v6"/><path d="M14.5 15.5 17 18l2.5-2.5"/></svg>
+    <button id="btn-speak-stop" class="tbtn icon" title="停止朗读" aria-label="停止朗读" hidden disabled>
+      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
     </button>
-    <button id="btn-help" class="tbtn compact" title="使用指南：每个功能怎么用（F1）">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.5 2.3c-.7.35-1.1.9-1.1 1.7v.3"/><path d="M12 17h.01"/></svg>
+    <span class="sep"></span>
+
+    <!-- 导入文献库：阅读界面只放一个入口，点开后选「当前文档」或「本文的参考文献表」。
+         带短名称：纯图标的入库按钮一直没人找得到，而这是从阅读走向整理的关键一步。 -->
+    <button id="btn-to-lib" class="tbtn import-lib-btn" title="导入文献库" aria-label="导入文献库" aria-haspopup="dialog" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M10 4h8.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H10"/><path d="M15 10.5v5M12.5 13h5"/></svg>
+      <span>导入文献库</span>
     </button>
+
+    <!-- 「输出」改叫「导出」：这个组里每个动作都是「另存一份」，名字应当直说 -->
+    <div class="dd-wrap" data-menu="tb-output" id="tb-output-wrap">
+      <button type="button" id="tb-output-btn" class="tbtn dd-btn" data-menu-btn
+        title="导出" aria-label="导出" data-ov-label="导出" aria-haspopup="true" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="tb-output-pop" class="dd-pop dd-menu tb-menu" data-menu-pop hidden>
+        <div class="dd-cap">都是「另存一份」，不改原文件</div>
+        <button id="btn-save" class="tbtn accent dd-item" title="导出带标注 PDF：把标注写进一份新的 PDF 副本 (Ctrl+S)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg><span>导出带标注 PDF</span>
+        </button>
+        <button id="btn-archive" class="tbtn dd-item" title="导出可编辑批注包：原文档 + 标注数据 + 可读清单打成一个 zip">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l8-4 8 4v10l-8 4-8-4z"/><path d="M4 7l8 4 8-4"/><path d="M12 11v10"/></svg><span>导出可编辑批注包</span>
+        </button>
+        <div class="dd-rule"></div>
+        <button id="btn-print" class="tbtn dd-item" title="打印当前文档 (Ctrl+P)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="7" rx="1.5"/><path d="M7 16h10v4H7z"/></svg><span>打印当前文档</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 窄窗口时「页面布局 / 导出」搬进这里，主栏仍是一行 -->
+    <div class="dd-wrap" data-menu="tb-overflow" id="tb-overflow-wrap" hidden>
+      <button type="button" id="tb-overflow-btn" class="tbtn dd-btn" data-menu-btn
+        title="更多" aria-label="更多" aria-haspopup="true" aria-expanded="false"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+      <div id="tb-overflow-pop" class="dd-pop dd-menu tb-menu tb-overflow-pop" data-menu-pop hidden></div>
+    </div>
+
     <span class="grow"></span>
-    <button id="file-name" class="filename" title="点击切换文档（当前标签 / 最近打开 / 文献库）">未打开文档</button>
+    <!-- 全局帮助：每个主界面只有一个，固定在右端，F1 调同一个入口。
+         入口保留「帮助」两个字：纯问号图标在这么淡的工具栏里认不出来，
+         用户找不到的东西等于没有（文献库那边的 ? 帮助 也是带字的）。 -->
+    <span class="sep"></span>
+    <button id="btn-help" class="tbtn help-btn" title="使用指南 (F1)" aria-label="使用指南">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.5 2.3c-.7.35-1.1.9-1.1 1.7v.3"/><path d="M12 17h.01"/></svg>
+      <span>帮助</span>
+    </button>
+  </div>
+    <!-- 文件名挪到状态栏：工具栏不再为它换行，切换交给标签页与「打开」 -->
   </div>
 
   <!-- 多标签页（v12）：点标签切换，× 关闭；不关底层 PDF，只关阅读会话 -->
@@ -103,50 +163,54 @@
 
   <!-- 标注工具栏：常用工具常驻一排，罕见工具收进「更多」（选完不自动收起，可连点几个） -->
   <div id="notetools">
-    <button class="ntool tbtn" data-tool="select" title="选择 / 浏览 (Esc)">
+    <button class="ntool tbtn" data-tool="select" title="选择 / 浏览 (Esc)" aria-label="选择 / 浏览">
       <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 3l12 8-5.2.8 3.1 5.6-2.3 1.3-3.1-5.7L6 18z"/></svg>
     </button>
-    <button class="ntool tbtn" data-tool="image" title="看图：点页面里的图片查看原图 (V)；放大任意区域用右键菜单">
+    <button class="ntool tbtn" data-tool="image" title="看图 (V)" aria-label="看图">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m4 17 5-4 4 3 3-2 4 3"/></svg>
     </button>
     <span class="nsep"></span>
-    <button class="ntool tbtn" data-tool="pen" title="画笔 (P)">
+    <button class="ntool tbtn" data-tool="pen" title="画笔 (P)" aria-label="画笔">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg>
     </button>
-    <button class="ntool tbtn" data-tool="highlight" title="荧光笔 (H)">
+    <button class="ntool tbtn" data-tool="highlight" title="荧光笔 (H)" aria-label="荧光笔">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6-8 8H6v-6z"/><path d="M4 20h11"/></svg>
     </button>
-    <button class="ntool tbtn" data-tool="text" title="文字 (T)">
+    <button class="ntool tbtn" data-tool="text" title="文字 (T)" aria-label="文字">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19l6-13 6 13"/><path d="M8.6 13.5h6.8"/></svg>
     </button>
-    <button class="ntool tbtn" data-tool="note" title="便签（点击页面落一个气泡便签）(N)">
+    <button class="ntool tbtn" data-tool="note" title="便签 (N)" aria-label="便签">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v10l-6 6H5z"/><path d="M13 20v-6h6"/></svg>
     </button>
-    <div class="dd-wrap">
-      <button id="more-btn" class="dd-btn tbtn" title="更多工具：直线 / 矩形 / 箭头 / 橡皮" aria-haspopup="true" aria-expanded="false">
-        <span>更多</span>
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div id="more-pop" class="dd-pop" hidden>
-        <div class="dd-tools">
-          <button class="ntool tbtn" data-tool="line" title="直线 (L)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/></svg>
-          </button>
-          <button class="ntool tbtn" data-tool="rect" title="矩形 (R)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg>
-          </button>
-          <button class="ntool tbtn" data-tool="arrow" title="箭头 (A)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M12 5h7v7"/></svg>
-          </button>
-          <button class="ntool tbtn" data-tool="stamp" title="印章 (S)：点页面盖一个「已阅 / 存疑 / ★ / ✓ / 待办」">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l-1 6h3l1 4H6l1-4h3z"/><path d="M4 17h16v3H4z"/></svg>
-          </button>
-          <button class="ntool tbtn" data-tool="eraser" title="橡皮擦 (E)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5l7-7 6 6-4.5 4.5H8z"/><path d="M4 20.5h16"/></svg>
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- 形状与印章也直接摆在这一排：阅读界面不留「更多」下拉，找不到的东西等于没有。
+         图标相近（直线 / 箭头、矩形 / 印章）靠悬停提示区分，不占文字宽度。 -->
+    <span class="nsep"></span>
+    <button class="ntool tbtn" data-tool="line" title="直线 (L)" aria-label="直线">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/></svg>
+    </button>
+    <button class="ntool tbtn" data-tool="rect" title="矩形 (R)" aria-label="矩形">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg>
+    </button>
+    <button class="ntool tbtn" data-tool="arrow" title="箭头 (A)" aria-label="箭头">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19L19 5"/><path d="M12 5h7v7"/></svg>
+    </button>
+    <!-- 形状工具与「一笔成型」取代了印章：椭圆、三角形、手绘自动吸附。
+         参考 Drawboard 的 ink-to-shape 与 GoodNotes / Notability 的停顿吸附，
+         鼠标上改成抬手即识别，不必按住等一秒。 -->
+    <button class="ntool tbtn" data-tool="ellipse" title="圆 / 椭圆 (O)" aria-label="圆 / 椭圆">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="12" rx="8.5" ry="6.5"/></svg>
+    </button>
+    <button class="ntool tbtn" data-tool="triangle" title="三角形 (D)" aria-label="三角形">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l9 16H3z"/></svg>
+    </button>
+    <button class="ntool tbtn" data-tool="smart" title="一笔成型 (S)：手绘接近圆 / 方 / 三角 / 直线时自动变标准图形" aria-label="一笔成型">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 15.5c1-7 6-11 10-8.5s4 7.5 0 10-8.5-.5-8-3.5"/><path d="M18 3.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg>
+    </button>
+    <button class="ntool tbtn" data-tool="eraser" title="橡皮擦 (E)：擦到哪删到哪；按住 Alt 点一下整条删" aria-label="橡皮擦">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15.5l7-7 6 6-4.5 4.5H8z"/><path d="M4 20.5h16"/></svg>
+    </button>
+    <!-- 印章条保留在 DOM 里但不再出现在工具栏：旧文档里已盖过的章仍要能显示、导出。
+         没有按钮能选到它，只有兼容旧数据的代码路径会用到。 -->
     <span id="stamp-bar" class="stamp-bar" hidden>
       <span class="stamp-lbl">印章</span>
       <button class="stamp-pick active" data-stamp="ok">已阅</button>
@@ -155,31 +219,32 @@
       <button class="stamp-pick" data-stamp="done">✓</button>
       <button class="stamp-pick" data-stamp="todo">待办</button>
     </span>
+    <span id="smart-hint" class="smart-hint" hidden>随手画：接近圆 / 方 / 三角 / 直线，抬手自动变标准图形</span>
+    <!-- 绘制参数：只在选中绘制工具时出现（浏览 / 选择状态不占用这一排）。
+         六色与分工具记忆都保留，只是不在用不着的时候摆出来。 -->
+    <span id="note-params" class="note-params" hidden>
+      <span class="nsep"></span>
+      <label class="nlbl" title="标注颜色（自定义）"><input id="note-color" type="color" value="#e53935" /></label>
+      <span id="note-swatches" class="swatches" role="group" aria-label="常用标注颜色"></span>
+      <label class="nlbl" id="note-width-wrap">粗细
+        <select id="note-width">
+          <option value="1.5">细</option>
+          <option value="3" selected>中</option>
+          <option value="6">粗</option>
+          <option value="14">荧光</option>
+        </select>
+      </label>
+    </span>
     <span class="nsep"></span>
-    <label class="nlbl" title="标注颜色"><input id="note-color" type="color" value="#e53935" /></label>
-    <label class="nlbl">粗细
-      <select id="note-width">
-        <option value="1.5">细</option>
-        <option value="3" selected>中</option>
-        <option value="6">粗</option>
-        <option value="14">荧光</option>
-      </select>
-    </label>
-    <span class="nsep"></span>
-    <button id="btn-undo" class="tbtn" title="撤销 (Ctrl+Z)">
+    <button id="btn-undo" class="tbtn" title="撤销 (Ctrl+Z)" aria-label="撤销">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7L4 11l4 4"/><path d="M4 11h11a4 4 0 0 1 0 8h-3"/></svg>
     </button>
-    <button id="btn-clear-page" class="tbtn" title="清除本页标注">
+    <button id="btn-clear-page" class="tbtn" title="清除本页标注" aria-label="清除本页标注">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M6.5 7l1 12h9l1-12"/></svg>
     </button>
     <span class="grow"></span>
-    <button id="btn-archive" class="tbtn" title="批注归档：把原文档 + 标注数据 + 可读清单打成一个 zip（可以整个带走）">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l8-4 8 4v10l-8 4-8-4z"/><path d="M4 7l8 4 8-4"/><path d="M12 11v10"/></svg>
-    </button>
-    <button id="btn-save" class="tbtn accent" title="把标注导出为一个新的 PDF 副本">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>
-      <span>导出副本</span>
-    </button>
+    <!-- 标注是自动保存的：这里显示真实状态，失败时留着重试入口，不用一个含糊的「保存」按钮 -->
+    <span id="anno-save-state" class="save-state" title="标注随改动自动保存到本机">标注已保存</span>
   </div>
 
   <!-- 首次上手提示（只出现一次，记在本地） -->
@@ -210,7 +275,13 @@
     <div id="doc-view" hidden></div>
     <div id="empty-hint">
       <div class="empty-main">打开或拖拽一个文档开始阅读（PDF / Word / PPT / Excel / Markdown / EPUB…）</div>
-      <div class="empty-help-row">第一次用？<button id="empty-help-btn" class="linkbtn" type="button">打开使用指南（F1）</button>，五分钟看完所有功能。</div>
+      <div class="empty-help-row">第一次使用？<button id="empty-help-btn" class="linkbtn" type="button">三步开始</button></div>
+      <ol class="empty-steps">
+        <li>点击「打开」，选择一份 PDF。</li>
+        <li>选中文字，点击「高亮」标记重点。</li>
+        <li>点击「存入文献库」，方便以后继续阅读。</li>
+      </ol>
+      <div class="empty-more">写笔记、双页对照、导出分享，按需要再学。</div>
     </div>
   </div>
 
@@ -240,6 +311,8 @@
   <div id="statusbar">
     <span id="status-text">就绪</span>
     <span class="grow"></span>
+    <!-- 文档名只是信息，不是按钮：以前它长成按钮、点了却没反应。切换文档交给标签页。 -->
+    <span id="file-name" class="filename" title="当前文档的完整名称；悬停看路径。切换文档用标签页，最近打开的文件在「打开」里">未打开文档</span>
     <button id="portal-cand" class="status-act" hidden title="机器没把握 / 没找到时手动挑一篇（Alt+O）">挑一篇…</button>
     <span id="zoom-text">—</span>
   </div>
@@ -253,8 +326,17 @@
       </div>
       <div id="lib-search-wrap">
         <input id="lib-search" type="search" placeholder="搜索标题 / 作者 / 全文…" />
-        <button id="lib-query-btn" class="tbtn" title="可视化条件构建器：字段 / 排除 / 多条件 AND">☰ 条件</button>
-        <button id="lib-adv-btn" class="tbtn" title="条件检索：字段 + 运算符（包含 / 为空 / 大于）+ 全部或任一，可按标注属性筛选">🎯 条件检索</button>
+        <!-- 一个「筛选」入口承接两种底层能力：名字说清区别，切换时不改写已有查询 -->
+        <div class="dd-wrap" data-menu="lib-filter">
+          <button type="button" id="lib-filter-btn" class="tbtn dd-btn" data-menu-btn
+            title="筛选：常用字段 / 高级条件检索" aria-haspopup="true" aria-expanded="false">筛选 ▾</button>
+          <div id="lib-filter-pop" class="dd-pop dd-menu lib-filter-pop" data-menu-pop hidden>
+            <button id="lib-query-btn" class="dd-item" title="常用字段筛选：按字段找、排除某个词，多条件之间是「且」">常用字段筛选</button>
+            <button id="lib-adv-btn" class="dd-item" title="高级条件检索：运算符（包含 / 为空 / 大于）、全部或任一、条件组、按标注属性筛选">高级条件检索</button>
+            <div class="dd-rule"></div>
+            <div class="dd-cap">常用 = 字段 / 排除 · 高级 = 运算符 / 任一 / 空值 / 标注属性。两种查询语义都保留。</div>
+          </div>
+        </div>
         <div id="lib-query-panel" class="qb-panel" hidden>
           <div id="qb-notice" class="qb-notice" hidden></div>
           <div id="qb-rows"></div>
@@ -301,18 +383,45 @@
         <div class="lib-head-actions">
           <button id="lib-undo" class="tbtn" title="撤销上一步库操作（Ctrl+Z）" disabled>↶</button>
           <button id="lib-redo" class="tbtn" title="重做（Ctrl+Shift+Z / Ctrl+Y）" disabled>↷</button>
-          <button id="lib-dup" class="tbtn" title="按 DOI / 标题+年份查重">查重</button>
-          <button id="lib-import-refs" class="tbtn" title="导入 BibTeX / RIS 题录（不含 PDF）">导入题录</button>
-          <button id="lib-export-refs" class="tbtn" title="导出 BibTeX / RIS">导出文献</button>
-          <button id="lib-bib" class="tbtn" title="按当前筛选 / 选中条目生成参考文献表">参考文献</button>
-          <button id="lib-review" class="tbtn" title="把批注汇总成按主题分组的综述草稿（Markdown，带文内引注与参考文献表）">综述草稿</button>
+          <!-- 主操作 5 个：添加、笔记、输出、资料、更多；小入口（帮助 / 设置）留在两端 -->
+          <div class="dd-wrap" data-menu="lib-add">
+            <button id="lib-add-btn" type="button" class="tbtn dd-btn accent" data-menu-btn
+              title="添加：本地文档 / 导入题录" aria-haspopup="true" aria-expanded="false">添加 ▾</button>
+            <div id="lib-add-pop" class="dd-pop dd-menu" data-menu-pop hidden>
+              <button id="lib-import" class="dd-item" title="添加 PDF / Word / PPT / Excel / Markdown 等本地文件">添加本地文档…</button>
+              <button id="lib-import-refs" class="dd-item" title="导入 BibTeX / RIS 题录（不含 PDF）">导入题录（BibTeX / RIS）</button>
+              <!-- 阅读工具栏原来为这一个动作单开一组「资料 ▾」；入口挪到这里，命令面板里仍可搜到 -->
+              <button id="btn-refimport" class="dd-item" title="参考文献表批量入库：把当前打开文档末尾的参考文献解析成库条目（命令面板里叫「参考文献表批量入库」）">从当前文档解析参考文献表…</button>
+            </div>
+          </div>
           <button id="lib-new-note" class="tbtn" title="新建一条独立笔记（不挂在某篇文献上）">＋ 笔记</button>
-          <button id="lib-import" class="tbtn accent" title="添加 PDF / Word / PPT / Excel / Markdown 等文件">添加文档</button>
+          <div class="dd-wrap" data-menu="lib-output">
+            <button id="lib-output-btn" type="button" class="tbtn dd-btn" data-menu-btn
+              title="导出：导出文献、生成参考文献表" aria-haspopup="true" aria-expanded="false">导出 ▾</button>
+            <div id="lib-output-pop" class="dd-pop dd-menu" data-menu-pop hidden>
+              <button id="lib-export-refs" class="dd-item" title="导出 BibTeX / RIS 题录">导出文献（BibTeX / RIS）</button>
+              <button id="lib-bib" class="dd-item" title="按当前筛选 / 选中条目生成参考文献表">参考文献表…</button>
+            </div>
+          </div>
+          <div class="dd-wrap" data-menu="lib-study">
+            <button id="lib-study-btn" type="button" class="tbtn dd-btn" data-menu-btn
+              title="资料与学习：RSS 订阅、间隔回顾" aria-haspopup="true" aria-expanded="false">资料 ▾</button>
+            <div id="lib-study-pop" class="dd-pop dd-menu" data-menu-pop hidden>
+              <button id="lib-feeds" class="dd-item" title="RSS 期刊订阅：添加订阅源，把新文章收进文献库">RSS 订阅</button>
+              <button id="lib-recall" class="dd-item" title="回顾：把标注按间隔重复推回来复习（忘了 / 模糊 / 记得 / 太简单）">间隔回顾</button>
+            </div>
+          </div>
+          <div class="dd-wrap" data-menu="lib-more">
+            <button id="lib-more-btn" type="button" class="tbtn dd-btn" data-menu-btn
+              title="更多库操作：查重、综述草稿、库统计" aria-haspopup="true" aria-expanded="false">更多 ▾</button>
+            <div id="lib-more-pop" class="dd-pop dd-menu" data-menu-pop hidden>
+              <button id="lib-dup" class="dd-item" title="按 DOI / 标题+年份查重">查重（重复条目）</button>
+              <button id="lib-review" class="dd-item" title="把批注汇总成按主题分组的综述草稿（Markdown，带文内引注与参考文献表）">综述草稿</button>
+              <button id="lib-stats" class="dd-item" title="库统计：类型 / 年份 / 标签分布">库统计</button>
+            </div>
+          </div>
           <button id="lib-empty-trash" class="tbtn danger" hidden>清空回收站</button>
           <span class="sep"></span>
-          <button id="lib-feeds" class="tbtn" title="RSS 期刊订阅：添加订阅源，把新文章收进文献库">📡 订阅</button>
-          <button id="lib-recall" class="tbtn" title="回顾：把标注按间隔重复推回来复习（忘了 / 模糊 / 记得 / 太简单）">🎴 回顾</button>
-          <button id="lib-stats" class="tbtn" title="库统计：类型 / 年份 / 标签分布">📊 统计</button>
           <button id="lib-help" class="tbtn" title="使用指南：每个功能怎么用（F1）">? 帮助</button>
           <button id="lib-settings" class="tbtn" title="设置 / 备份 / 全文索引">⚙ 设置</button>
         </div>
@@ -359,6 +468,12 @@
         <button id="ld-close" class="ld-x" title="关闭详情">✕</button>
       </header>
       <div id="ld-body">
+        <div id="ld-tabs" class="ld-tabs" role="tablist" aria-label="条目详情分组">
+          <button type="button" class="ld-tab active" data-pane-btn="info" role="tab" aria-selected="true" title="题录、标签、附件与继续阅读">信息</button>
+          <button type="button" class="ld-tab" data-pane-btn="notes" role="tab" aria-selected="false" title="这篇文献上的标注与阅读笔记">笔记与标注</button>
+          <button type="button" class="ld-tab" data-pane-btn="cite" role="tab" aria-selected="false" title="引用、引用键、相关条目与相似文献">引用与关联</button>
+        </div>
+        <div class="ld-pane" data-pane="info">
         <label class="ld-row"><span class="ld-lbl">类型</span><select id="ld-type"></select></label>
         <label class="ld-row"><span class="ld-lbl">标题</span><input id="ld-title" type="text" placeholder="条目标题" /></label>
         <div class="ld-row ld-creators-row">
@@ -380,15 +495,52 @@
           <label class="ld-row"><span class="ld-lbl">链接</span><input id="ld-url" type="text" placeholder="https://" /></label>
         </div>
         <div id="ld-fetch-row" class="ld-fetch-row">
-          <button id="ld-fetch" class="ld-mini">从 DOI / arXiv 抓取元数据</button>
-          <button id="ld-fetch-pdf" class="ld-mini" title="按 arXiv / Unpaywall / doi.org 依次尝试下载开放获取的 PDF 全文">抓 PDF 全文</button>
-          <button id="ld-snapshot" class="ld-mini" title="把条目网址保存成本地网页快照，原链接失效后还能回看">网页快照</button>
+          <!-- 补全只留一个入口：来源与「只补空字段」写在菜单里 -->
+          <div class="dd-wrap" data-menu="ld-complete">
+            <button type="button" id="ld-complete-btn" class="ld-mini dd-btn" data-menu-btn
+              title="补全文献信息：联网按 DOI / arXiv，或读 PDF 首页识别；只补空字段，不覆盖已填内容"
+              aria-haspopup="true" aria-expanded="false">补全文献信息 ▾</button>
+            <div id="ld-complete-pop" class="dd-pop dd-menu ld-menu" data-menu-pop hidden>
+              <button id="ld-fetch" class="dd-item" title="按 DOI / arXiv 联网抓取元数据，只补空着的字段">联网补全（DOI / arXiv）</button>
+              <button id="ld-complete-file" class="dd-item" title="读 PDF 首页的 DOI / arXiv 识别题录，只补空着的字段">从文件识别补全</button>
+              <div class="dd-cap">两种来源都只填空着的字段，已经写过的内容不会被覆盖。</div>
+            </div>
+          </div>
+          <button id="ld-fetch-pdf" class="ld-mini" hidden title="按 arXiv / Unpaywall / doi.org 依次尝试下载开放获取的 PDF 全文">抓 PDF 全文</button>
+          <button id="ld-snapshot" class="ld-mini" hidden title="把条目网址保存成本地网页快照，原链接失效后还能回看">网页快照</button>
           <button id="ld-snapshot-open" class="ld-mini" hidden>打开快照</button>
-          <button id="ld-pdf-meta" class="ld-mini" title="把题录（标题 / 作者 / 摘要 / 关键词 / DOI）写进 PDF 自身，另存为一份副本，原文件不动">写入 PDF 元数据</button>
+          <button id="ld-pdf-meta" class="ld-mini" hidden title="把题录写进 PDF 自身，另存为副本，原文件不动">写入 PDF 元数据</button>
           <span id="ld-fetch-status" class="ld-hint"></span>
         </div>
         <label class="ld-row"><span class="ld-lbl">摘要</span><textarea id="ld-abstract" rows="3" placeholder="摘要 / 备注信息"></textarea></label>
 
+        <div class="ld-sec">
+          <div class="ld-sec-title">标签</div>
+          <div id="ld-tags" class="ld-tags"></div>
+          <div class="ld-inline">
+            <input id="ld-tag-input" type="text" placeholder="输入标签，回车添加" />
+            <button id="ld-tag-add" class="ld-mini">添加</button>
+          </div>
+        </div>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">收藏集 <span class="ld-hint">可同时属于多个</span></div>
+          <div id="ld-colls" class="ld-colls"></div>
+        </div>
+
+        <div class="ld-sec" data-ld-sec="readstatus">
+          <div class="ld-sec-title">阅读状态 <span class="ld-hint">待读 / 在读会出现在左侧「阅读队列」</span></div>
+          <div id="ld-readstatus" class="ld-readstatus"></div>
+        </div>
+
+        <div class="ld-sec">
+          <div class="ld-sec-title">附件</div>
+          <div id="ld-attach" class="ld-attach"></div>
+        </div>
+
+        <div id="ld-dates" class="ld-dates"></div>
+        </div>
+        <div class="ld-pane" data-pane="notes" hidden>
         <div class="ld-sec" data-ld-sec="annos">
           <div class="ld-sec-title">标注 <span class="ld-hint">这篇文献上的高亮 / 批注，可跳到原页编辑</span></div>
           <div id="ld-annos" class="ld-annos"></div>
@@ -400,6 +552,8 @@
           <button id="ld-note-add" class="ld-mini">＋ 新建一条笔记</button>
         </div>
 
+        </div>
+        <div class="ld-pane" data-pane="cite" hidden>
         <div class="ld-sec" data-ld-sec="cite">
           <div class="ld-sec-title">引用 <span class="ld-hint">一键复制到剪贴板</span></div>
           <div class="ld-inline">
@@ -453,31 +607,7 @@
           </div>
         </div>
 
-        <div class="ld-sec">
-          <div class="ld-sec-title">标签</div>
-          <div id="ld-tags" class="ld-tags"></div>
-          <div class="ld-inline">
-            <input id="ld-tag-input" type="text" placeholder="输入标签，回车添加" />
-            <button id="ld-tag-add" class="ld-mini">添加</button>
-          </div>
         </div>
-
-        <div class="ld-sec">
-          <div class="ld-sec-title">收藏集 <span class="ld-hint">可同时属于多个</span></div>
-          <div id="ld-colls" class="ld-colls"></div>
-        </div>
-
-        <div class="ld-sec" data-ld-sec="readstatus">
-          <div class="ld-sec-title">阅读状态 <span class="ld-hint">待读 / 在读会出现在左侧「阅读队列」</span></div>
-          <div id="ld-readstatus" class="ld-readstatus"></div>
-        </div>
-
-        <div class="ld-sec">
-          <div class="ld-sec-title">附件</div>
-          <div id="ld-attach" class="ld-attach"></div>
-        </div>
-
-        <div id="ld-dates" class="ld-dates"></div>
       </div>
       <footer id="ld-foot">
         <span id="ld-status" class="ld-status"></span>
@@ -517,7 +647,7 @@
       </select>
       <button id="nv-meta-toggle" class="tbtn" title="笔记元数据（状态 / 标签 / 字数 / 来源）" aria-pressed="false">元数据</button>
       <button id="nv-preview-toggle" class="tbtn" title="显示 / 隐藏实时预览" aria-pressed="true">预览</button>
-      <button id="nv-save" class="tbtn" title="保存（Ctrl+S）">保存</button>
+      <button id="nv-save" class="tbtn" title="立即保存笔记（Ctrl+S）：正文会自动保存，这里是显式落一次盘；真实状态显示在标题旁">保存</button>
     </header>
 
     <!-- 笔记级元数据（v1.6）：状态 / 标签 / 字数 / 来源条目 -->
@@ -546,62 +676,73 @@
     </div>
 
     <!-- Markdown 工具栏（移植自博客 PostToolbar：data-action 由 insertMdSnippet 处理） -->
+    <!-- 主栏 9 个入口：标题、粗体、斜体、列表、引用、公式、插入、提示框、扩展。
+         旧 31 个格式一个不删，全在对应分组里；公式在学术笔记里仍是一点直达。 -->
     <div id="nv-toolbar" class="post-toolbar" role="toolbar" aria-label="Markdown 编辑工具栏">
+      <div class="dd-wrap" data-menu="nv-heading">
+        <button type="button" id="nv-heading-btn" class="toolbar-btn dd-btn" data-menu-btn title="标题：二级 / 三级" aria-haspopup="true" aria-expanded="false">H ▾</button>
+        <div id="nv-heading-pop" class="dd-pop dd-menu nv-menu" data-menu-pop hidden>
+          <button type="button" class="toolbar-btn dd-item" data-action="heading-2" title="二级标题">H2 二级标题</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="heading-3" title="三级标题">H3 三级标题</button>
+        </div>
+      </div>
       <button type="button" class="toolbar-btn" data-action="bold" title="粗体 (Ctrl+B)"><strong>B</strong></button>
       <button type="button" class="toolbar-btn" data-action="italic" title="斜体 (Ctrl+I)"><em>I</em></button>
-      <button type="button" class="toolbar-btn" data-action="strike" title="删除线"><s>S</s></button>
       <span class="toolbar-sep"></span>
-      <button type="button" class="toolbar-btn" data-action="heading-2" title="二级标题">H2</button>
-      <button type="button" class="toolbar-btn" data-action="heading-3" title="三级标题">H3</button>
-      <span class="toolbar-sep"></span>
-      <button type="button" class="toolbar-btn" data-action="link" title="链接">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1M8 13h8v-2H8v2m9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>
-      </button>
-      <span class="toolbar-sep"></span>
-      <button type="button" class="toolbar-btn" data-action="code-inline" title="行内代码"><code style="font-size:0.8em">{ }</code></button>
-      <button type="button" class="toolbar-btn" data-action="code-block" title="代码块">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
-      </button>
-      <span class="toolbar-sep"></span>
-      <button type="button" class="toolbar-btn" data-action="formula-inline" title="行内公式"><span style="font-family:serif">ƒ</span></button>
-      <button type="button" class="toolbar-btn" data-action="formula-block" title="块级公式"><span style="font-family:serif;font-size:1.1em">∑</span></button>
-      <button type="button" class="toolbar-btn" data-action="derivation" title="插入推导容器"><span style="font-family:serif;font-size:0.85em">推导</span></button>
-      <span class="toolbar-sep"></span>
-      <button type="button" class="toolbar-btn" data-action="underline" title="下划线 ++文本++"><u>U</u></button>
-      <button type="button" class="toolbar-btn" data-action="spoiler" title="模糊/剧透 !!文本!!（悬停或点击显示）"><span style="font-size:0.78em">模糊</span></button>
-      <button type="button" class="toolbar-btn" data-action="rainbow" title="彩虹文字 ==文本==">
-        <span style="font-size:0.78em;background:linear-gradient(90deg,#ef5350,#7e57c2,#2196f3,#43a047);-webkit-background-clip:text;background-clip:text;color:transparent">彩虹</span>
-      </button>
-      <button type="button" class="toolbar-btn" data-action="ruby" title="拼音注音 {汉字}(hàn|zì)"><span style="font-size:0.78em">拼音</span></button>
-      <button type="button" class="toolbar-btn" data-action="footnote" title="脚注 [^N]（文末自动生成定义）"><span style="font-size:0.78em">脚注</span></button>
-      <button type="button" class="toolbar-btn" data-action="quote-card" title="引用卡片 :::quote"><span style="font-size:0.78em">引卡</span></button>
-      <button type="button" class="toolbar-btn" data-action="music-card" title="音乐卡片 ::music{id}"><span style="font-size:0.78em">音乐</span></button>
-      <button type="button" class="toolbar-btn" data-action="github-card" title="GitHub 卡片 ::github{repo}"><span style="font-size:0.78em">GH</span></button>
-      <span class="toolbar-sep"></span>
-      <button type="button" class="toolbar-btn" data-action="ul" title="无序列表">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
-      </button>
-      <button type="button" class="toolbar-btn" data-action="ol" title="有序列表">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M2 17h2v.5H3v1h1v.5H2v1h3v-4H2v1zm1-9h1V4H2v1h1v3zm-1 3h1.8L2 13.1v.9h3v-1H3.2L5 10.9V10H2v1zm5-6v2h14V5H7zm0 14h14v-2H7v2zm0-6h14v-2H7v2z"/></svg>
-      </button>
-      <button type="button" class="toolbar-btn" data-action="task" title="任务列表 - [ ]"><span style="font-size:0.78em">任务</span></button>
+      <div class="dd-wrap" data-menu="nv-list">
+        <button type="button" id="nv-list-btn" class="toolbar-btn dd-btn" data-menu-btn title="列表：无序 / 有序 / 任务" aria-haspopup="true" aria-expanded="false">列表 ▾</button>
+        <div id="nv-list-pop" class="dd-pop dd-menu nv-menu" data-menu-pop hidden>
+          <button type="button" class="toolbar-btn dd-item" data-action="ul" title="无序列表">无序列表</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="ol" title="有序列表">有序列表</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="task" title="任务列表 - [ ]">任务列表</button>
+        </div>
+      </div>
       <button type="button" class="toolbar-btn" data-action="blockquote" title="引用">
         <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg>
       </button>
-      <button type="button" class="toolbar-btn" data-action="tip" title="提示框 :::tip">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-6h2v6zm0-8h-2V7h2v4z"/></svg>
-      </button>
-      <button type="button" class="toolbar-btn" data-action="tip-note" title="提示框 :::note"><span style="font-size:0.78em;color:#757575">注意</span></button>
-      <button type="button" class="toolbar-btn" data-action="tip-important" title="提示框 :::important"><span style="font-size:0.78em;color:#4cb3d4">重要</span></button>
-      <button type="button" class="toolbar-btn" data-action="tip-warning" title="提示框 :::warning"><span style="font-size:0.78em;color:#e6a700">警告</span></button>
-      <button type="button" class="toolbar-btn" data-action="tip-caution" title="提示框 :::caution"><span style="font-size:0.78em;color:#e13238">危险</span></button>
-      <button type="button" class="toolbar-btn" data-action="tip-title" title="自定义标题提示框 :::tip[标题]"><span style="font-size:0.78em;color:#009400">提示[…]</span></button>
-      <button type="button" class="toolbar-btn" data-action="table" title="表格">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 4v4h6V8H5m8 0v4h6V8h-6m-8 6v4h6v-4H5m8 0v4h6v-4h-6z"/></svg>
-      </button>
-      <button type="button" class="toolbar-btn" data-action="hr" title="分隔线">
-        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 13H5v-2h14v2z"/></svg>
-      </button>
+      <div class="dd-wrap" data-menu="nv-formula">
+        <button type="button" id="nv-formula-btn" class="toolbar-btn dd-btn" data-menu-btn title="公式：行内 / 块级 / 推导容器" aria-haspopup="true" aria-expanded="false">ƒ 公式 ▾</button>
+        <div id="nv-formula-pop" class="dd-pop dd-menu nv-menu" data-menu-pop hidden>
+          <button type="button" class="toolbar-btn dd-item" data-action="formula-inline" title="行内公式">行内公式</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="formula-block" title="块级公式">块级公式</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="derivation" title="插入推导容器">推导容器</button>
+        </div>
+      </div>
+      <div class="dd-wrap" data-menu="nv-insert">
+        <button type="button" id="nv-insert-btn" class="toolbar-btn dd-btn" data-menu-btn title="插入：链接 / 代码 / 表格 / 分隔线" aria-haspopup="true" aria-expanded="false">插入 ▾</button>
+        <div id="nv-insert-pop" class="dd-pop dd-menu nv-menu" data-menu-pop hidden>
+          <button type="button" class="toolbar-btn dd-item" data-action="link" title="链接">链接</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="code-inline" title="行内代码">行内代码</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="code-block" title="代码块">代码块</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="table" title="表格">表格</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="hr" title="分隔线">分隔线</button>
+        </div>
+      </div>
+      <div class="dd-wrap" data-menu="nv-tip">
+        <button type="button" id="nv-tip-btn" class="toolbar-btn dd-btn" data-menu-btn title="提示框：提示 / 注意 / 重要 / 警告 / 危险 / 自定义 / 引用卡片" aria-haspopup="true" aria-expanded="false">提示框 ▾</button>
+        <div id="nv-tip-pop" class="dd-pop dd-menu nv-menu" data-menu-pop hidden>
+          <button type="button" class="toolbar-btn dd-item" data-action="tip" title="提示框 :::tip">提示</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="tip-note" title="提示框 :::note">注意</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="tip-important" title="提示框 :::important">重要</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="tip-warning" title="提示框 :::warning">警告</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="tip-caution" title="提示框 :::caution">危险</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="tip-title" title="自定义标题提示框 :::tip[标题]">自定义标题</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="quote-card" title="引用卡片 :::quote">引用卡片</button>
+        </div>
+      </div>
+      <div class="dd-wrap" data-menu="nv-extra">
+        <button type="button" id="nv-extra-btn" class="toolbar-btn dd-btn" data-menu-btn title="扩展格式：删除线 / 下划线 / 脚注 / 模糊 / 彩虹 / 拼音 / 音乐 / GitHub" aria-haspopup="true" aria-expanded="false">扩展 ▾</button>
+        <div id="nv-extra-pop" class="dd-pop dd-menu nv-menu" data-menu-pop hidden>
+          <button type="button" class="toolbar-btn dd-item" data-action="strike" title="删除线">删除线</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="underline" title="下划线 ++文本++">下划线</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="footnote" title="脚注 [^N]（文末自动生成定义）">脚注</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="spoiler" title="模糊/剧透 !!文本!!（悬停或点击显示）">模糊 / 剧透</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="rainbow" title="彩虹文字 ==文本==">彩虹文字</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="ruby" title="拼音注音">拼音注音</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="music-card" title="音乐卡片 ::music{id}">音乐卡片</button>
+          <button type="button" class="toolbar-btn dd-item" data-action="github-card" title="GitHub 卡片 ::github{repo}">GitHub 卡片</button>
+        </div>
+      </div>
     </div>
 
     <!-- 左：Markdown 源码；右：实时预览（博客后台三栏里的「编辑器 + 实时预览」两栏） -->
@@ -622,11 +763,23 @@
   <!-- 选中文字后的浮动工具条（v11；v27 增加复制/摘录并附出处） -->
   <div id="sel-bar" hidden>
     <button class="sel-btn" data-sel="copy" title="复制选中文字，自动附出处">复制</button>
-    <button class="sel-btn" data-sel="quote" title="摘录到阅读笔记，并复制带出处的引文">摘录</button>
     <button class="sel-btn" data-sel="highlight">高亮</button>
-    <button class="sel-btn" data-sel="underline" title="在选中文字下面画线（和 Zotero 的下划线标注一致）">下划线</button>
     <button class="sel-btn" data-sel="comment">高亮 + 评论</button>
-    <input id="sel-color" type="color" value="#ffd54f" title="高亮颜色" />
+    <!-- 摘录、下划线与颜色收进「更多」：浮条不遮住下一行，六色和取色器仍一点可达 -->
+    <div class="dd-wrap" data-menu="sel-more">
+      <button type="button" id="sel-more-btn" class="sel-btn dd-btn" data-menu-btn
+        title="更多文字操作：摘录、下划线、高亮颜色" aria-haspopup="true" aria-expanded="false">更多 ▾</button>
+      <div id="sel-more-pop" class="dd-pop dd-menu sel-menu" data-menu-pop hidden>
+        <button class="sel-btn dd-item" data-sel="quote" title="摘录到阅读笔记，并复制带出处的引文">摘录</button>
+        <button class="sel-btn dd-item" data-sel="underline" title="在选中文字下面画线（和 Zotero 的下划线标注一致）">下划线</button>
+        <div class="dd-rule"></div>
+        <div class="dd-cap">高亮颜色（六色 + 自定义）</div>
+        <div class="sel-colors">
+          <span id="sel-swatches" class="swatches" role="group" aria-label="高亮颜色"></span>
+          <input id="sel-color" type="color" value="#ffd54f" title="自定义高亮颜色" />
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 设置 / 备份 / 全文索引 -->
@@ -677,14 +830,20 @@
     </div>
   </div>
   <div id="settings-modal" class="modal" hidden>
-    <div class="modal-card">
+    <div class="modal-card pane-card">
       <header class="modal-head">
         <span>设置</span>
         <span class="grow"></span>
         <button id="settings-close" class="ld-x" title="关闭">✕</button>
       </header>
       <div class="modal-body">
-        <div class="set-grid2">
+        <div id="set-tabs" class="ld-tabs" role="tablist" aria-label="设置分类">
+          <button type="button" class="ld-tab active" data-set-pane="read" role="tab" aria-selected="true" title="主题、阅读方式、笔记外观">阅读与外观</button>
+          <button type="button" class="ld-tab" data-set-pane="citation" role="tab" aria-selected="false" title="引用键模板">文献与引用</button>
+          <button type="button" class="ld-tab" data-set-pane="data" role="tab" aria-selected="false" title="存储位置、备份恢复、全文索引">数据与备份</button>
+          <button type="button" class="ld-tab" data-set-pane="advanced" role="tab" aria-selected="false" title="代理、OpenURL、调试">高级</button>
+        </div>
+        <div data-pane="read" class="set-grid2">
           <label class="ld-row"><span class="ld-lbl">主题</span>
             <select id="set-theme">
               <option value="light">浅色</option>
@@ -708,22 +867,22 @@
             </select>
           </label>
         </div>
-        <label class="set-check"><input id="set-auto-index" type="checkbox" /> 启动时自动建立全文索引</label>
-        <label class="set-check"><input id="set-restore-tabs" type="checkbox" /> 下次启动恢复上次打开的标签页</label>
-        <label class="set-check"><input id="set-split-view" type="checkbox" /> 打开 PDF 时默认显示分屏参考视图</label>
-        <label class="set-check"><input id="set-invert-pages" type="checkbox" /> 深色模式下把页面反色（夜读护眼）</label>
-        <label class="set-check"><input id="set-recall-autolink" type="checkbox" /> 笔记正文里出现回顾卡片标题时自动变成链接</label>
-        <label class="ld-row"><span class="ld-lbl">抓取联系邮箱</span>
+        <label data-pane="data" class="set-check"><input id="set-auto-index" type="checkbox" /> 启动时自动建立全文索引</label>
+        <label data-pane="read" class="set-check"><input id="set-restore-tabs" type="checkbox" /> 下次启动恢复上次打开的标签页</label>
+        <label data-pane="read" class="set-check"><input id="set-split-view" type="checkbox" /> 打开 PDF 时默认显示分屏参考视图</label>
+        <label data-pane="read" class="set-check"><input id="set-invert-pages" type="checkbox" /> 深色模式下把页面反色（夜读护眼）</label>
+        <label data-pane="read" class="set-check"><input id="set-recall-autolink" type="checkbox" /> 笔记正文里出现回顾卡片标题时自动变成链接</label>
+        <label data-pane="advanced" class="ld-row"><span class="ld-lbl">抓取联系邮箱</span>
           <input id="set-fetch-email" type="text" placeholder="可选；填了才能用 Unpaywall 找开放获取全文" />
         </label>
-        <label class="ld-row"><span class="ld-lbl">机构代理</span>
+        <label data-pane="advanced" class="ld-row"><span class="ld-lbl">机构代理</span>
           <input id="set-fetch-proxy" type="text" placeholder="可选；如 https://proxy.univ.edu/login?url= 或 doi-org.proxy.univ.edu" />
         </label>
-        <label class="ld-row"><span class="ld-lbl">链接解析器</span>
+        <label data-pane="advanced" class="ld-row"><span class="ld-lbl">链接解析器</span>
           <input id="set-fetch-openurl" type="text" placeholder="可选；SFX / Alma / 360Link 的 OpenURL 基址，如 https://resolver.univ.edu/openurl" />
         </label>
 
-        <div class="set-sec">
+        <div data-pane="read" class="set-sec">
           <div class="set-title">笔记标题样式 <span class="ld-hint">H1–H6 按倍率整体缩放，预览与导出同步</span></div>
           <label class="ld-row"><span class="ld-lbl">字号倍率</span>
             <input id="set-note-hscale" type="range" min="0.8" max="1.6" step="0.05" />
@@ -737,7 +896,7 @@
           </label>
         </div>
 
-        <div class="set-sec">
+        <div data-pane="citation" class="set-sec">
           <div class="set-title">引用键模板 <span class="ld-hint">详情面板与「导出参考文献」里的 [@key]</span></div>
           <input id="set-citekey" class="set-input" type="text" spellcheck="false"
                  placeholder="[auth:lower][year][veryshorttitle:lower]" />
@@ -755,7 +914,7 @@
             <code>:abbr</code> <code>:数字</code>（截断）。重名自动加 <code>-2</code> 后缀；留空用默认模板。</div>
         </div>
 
-        <div class="set-sec">
+        <div data-pane="data" class="set-sec">
           <div class="set-title">存储位置 <span class="ld-hint">library.json 与全文索引所在目录</span></div>
           <code id="set-data-dir" class="set-path"></code>
           <div class="set-actions">
@@ -764,16 +923,16 @@
           </div>
         </div>
 
-        <div class="set-sec">
+        <div data-pane="data" class="set-sec">
           <div class="set-title">备份与恢复 <span class="ld-hint">包含元数据、收藏集与标注；不含原文档</span></div>
           <div class="set-actions">
-            <button id="set-backup" class="ld-btn primary">一键备份…</button>
+            <button id="set-backup" class="ld-btn primary">备份文献库…</button>
             <button id="set-restore" class="ld-btn">从备份恢复…</button>
           </div>
           <div class="ld-hint">恢复前会自动把当前库快照到 <code>backups/pre-restore-*.json</code>。</div>
         </div>
 
-        <div class="set-sec">
+        <div data-pane="data" class="set-sec">
           <div class="set-title">全文索引 <span id="set-ft-status" class="ld-hint">读取中…</span></div>
           <div class="set-actions">
             <button id="set-index" class="ld-mini">补建索引</button>
@@ -783,7 +942,7 @@
         </div>
 
         <!-- v26：原来挂在「系统」菜单里的两项，放到设置里 -->
-        <div class="set-sec">
+        <div data-pane="advanced" class="set-sec">
           <div class="set-title">其他 <span class="ld-hint">默认打开方式、调试</span></div>
           <div class="set-actions">
             <button id="set-help" class="ld-mini" title="打开内置使用指南（F1）">使用指南…</button>
@@ -1018,7 +1177,7 @@
   <!-- 使用指南（内置说明中心）：左侧分类、右侧正文、顶部搜索。
        正文是 src/help-content.js 里的纯数据；这里只留骨架，避免文案散在 HTML 里。 -->
   <div id="help-modal" class="modal help-modal" hidden>
-    <div class="modal-card help-card">
+    <div class="modal-card help-card pane-card">
       <header class="help-head">
         <div class="help-brand">
           <span class="help-brand-name">使用指南</span>
@@ -1037,9 +1196,9 @@
       <footer class="help-foot">
         <span id="help-progress" class="help-progress"></span>
         <span class="grow"></span>
-        <button id="help-prev" class="ld-btn" title="上一节（↑）">‹ 上一节</button>
-        <button id="help-next" class="ld-btn" title="下一节（↓）">下一节 ›</button>
-        <span class="help-foot-hint">↑↓ 翻节 · / 搜索 · Esc 关闭</span>
+        <button id="help-prev" class="ld-btn" title="上一节（Alt+↑）">‹ 上一节</button>
+        <button id="help-next" class="ld-btn" title="下一节（Alt+↓）">下一节 ›</button>
+        <span class="help-foot-hint">Alt+↑↓ 翻节 · ↑↓ 滚动 · / 搜索 · Esc 关闭</span>
       </footer>
     </div>
   </div>
@@ -1066,6 +1225,10 @@
   <script src="pdfimages.js"></script>
   <script src="lightbox.js"></script>
   <script src="docswitch.js"></script>
+  <!-- 分组下拉：主栏收起低频功能后，行为统一由它管 -->
+  <script src="menus.js"></script>
+  <!-- 悬停提示：纯图标按钮的说明都走它 -->
+  <script src="tips.js"></script>
   <script src="annotations.js"></script>
   <script src="selection.js"></script>
   <script src="native-annos.js"></script>
@@ -1166,6 +1329,27 @@
         <button id="refi-cancel" class="tbtn">关闭</button>
         <button id="refi-go" class="tbtn accent">导入选中</button>
       </footer>
+    </div>
+  </div>
+
+  <!-- 导入文献库：一个入口、两种来路。用选择卡片而不是下拉菜单，鼠标点开就能读懂。 -->
+  <div id="import-lib-modal" class="modal" hidden>
+    <div class="modal-card small">
+      <header class="modal-head"><span>导入文献库</span><span class="grow"></span>
+        <button id="import-lib-x" class="ld-x" title="关闭">✕</button></header>
+      <div class="modal-body import-lib-body">
+        <button id="import-lib-current" class="import-lib-choice" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 12v5M9.5 14.5h5"/></svg>
+          <span class="import-lib-txt"><b>把当前文档存入文献库</b>
+            <small>正在读的这个文件直接建成一条，自动识别 DOI / 题录并查重；已在库里就打开它的条目。</small></span>
+        </button>
+        <button id="import-lib-refs" class="import-lib-choice" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 10h16"/><path d="M4 15h11"/><path d="M4 20h8"/><path d="M18 16v5M15.5 18.5h5"/></svg>
+          <span class="import-lib-txt"><b>从本文的参考文献表批量入库</b>
+            <small>读某篇论文时，把它末尾的参考文献解析成一条条库条目，逐条勾选后再导入。</small></span>
+        </button>
+        <p class="import-lib-note">两种方式都不改动原文件。参考文献解析需要 PDF 有文字层，扫描版读不出来。</p>
+      </div>
     </div>
   </div>
 

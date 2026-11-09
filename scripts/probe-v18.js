@@ -10,16 +10,13 @@ module.exports = `(async () => {
   push('夹具 PDF 已加载（探针前提）', loaded, 'file=' + (window.App ? App.state.fileName : ''));
   if (!loaded) return { checks, stage: 'load' };
 
-  // ---------- 1. 工具带常驻 ----------
-  const tools = $$('#notetools .ntool');
-  const inline = $$('#notetools > .ntool');
-  push('常用工具常驻工具带（≥6 个）', inline.length >= 6, 'n=' + inline.length);
-  const want = ['select', 'image', 'pen', 'highlight', 'text', 'note'];
+  // ---------- 1. 工具带常驻（全部平铺，无「更多」） ----------
+  const inline = $('#notetools > .ntool');
+  push('全部工具常驻工具带（≥13 个）', inline.length >= 13, 'n=' + inline.length);
+  const want = ['select', 'image', 'pen', 'highlight', 'text', 'note', 'line', 'rect', 'arrow', 'ellipse', 'triangle', 'smart', 'eraser'];
   const have = inline.map((b) => b.dataset.tool);
-  push('常用工具都在工具带上', want.every((w) => have.indexOf(w) >= 0), have.join(','));
-  const moreTools = $$('#more-pop .ntool').map((b) => b.dataset.tool);
-  push('罕见工具收进「更多」浮层', moreTools.length >= 4 && moreTools.indexOf('line') >= 0, moreTools.join(','));
-  push('「更多」按钮存在', !!$('#more-btn'));
+  push('常用工具与形状工具都在工具带上', want.every((w) => have.indexOf(w) >= 0), have.join(','));
+  push('没有「更多」下拉', !$('#more-btn') && !$('#more-pop'));
   push('颜色/粗细直接摆在工具带上', !!$('#note-color') && !!$('#note-width'));
 
   // ---------- 2. 工具快捷键 ----------
@@ -33,7 +30,7 @@ module.exports = `(async () => {
   key('Escape'); await sleep(80);
   push('按 Esc 回到选择', document.body.classList.contains('tool-select'), document.body.className);
   // 点按钮也能切
-  const rectBtn = $('#notetools .ntool[data-tool="rect"]') || $('#more-pop .ntool[data-tool="rect"]');
+  const rectBtn = $('#notetools .ntool[data-tool="rect"]');
   if (rectBtn) rectBtn.click();
   await sleep(80);
   push('点工具按钮即切换', document.body.classList.contains('tool-rect'), document.body.className);

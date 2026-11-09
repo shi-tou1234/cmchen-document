@@ -35,6 +35,7 @@
 
   --r: 3px;                /* 统一的极小圆角 */
   --r-2: 5px;
+  --r-btn: 6px;            /* 按钮 / 菜单项的统一圆角：比输入框稍圆，靠形状区分「可点」 */
 
   /* v27：全软件统一一套无衬线字体。保留三个变量名是为了不动几十处引用；
      它们现在指向同一个栈，衬线/等宽只作为 CSS 语义名存在。 */
@@ -95,30 +96,66 @@ b, strong { font-weight: 600; }
   border-bottom: 1px solid var(--rule);
   user-select: none; flex: 0 0 auto; flex-wrap: wrap;
 }
+/* 纯图标按钮的悬停提示：300ms 出现，位置按按钮算，不挡工具栏。
+   不做淡入动画：窗口在后台时 CSS 过渡会停住，提示会「逻辑上显示了、画面上透明」。 */
+#tip-layer {
+  position: fixed; z-index: 400; pointer-events: none;
+  max-width: 280px; padding: 5px 9px; border-radius: 5px;
+  background: var(--ink); color: var(--surface);
+  font-size: 11.5px; line-height: 1.45; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(20, 16, 10, .28);
+}
+
 /* 视图切换控件贴着工具栏顶边，和文献库侧栏里的那份严格对齐 */
 #toolbar .mode-switch { align-self: flex-start; }
 #notetools { background: var(--surface-3); gap: 6px; }
 
 .tbtn {
   background: transparent; border: 1px solid transparent; color: var(--ink-2);
-  border-radius: var(--r); padding: 5px 9px; cursor: pointer;
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12.5px; font-family: inherit; line-height: 1.3;
-  transition: background .12s ease, color .12s ease, border-color .12s ease;
+  border-radius: var(--r-btn); padding: 6px 8px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 13px; font-family: inherit; line-height: 1.25;
+  min-height: 30px;
+  transition: background .12s ease, color .12s ease, border-color .12s ease, box-shadow .12s ease;
 }
 .tbtn:hover { background: var(--surface-2); color: var(--ink); }
 .tbtn:active { background: var(--rule); }
-.tbtn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-.tbtn svg { width: 17px; height: 17px; display: block; flex: 0 0 auto; }
-/* 旋转 / 分屏是纯图标按钮，收窄内边距，避免默认宽度下把文件名挤到第二行 */
-#toolbar .tbtn.compact { padding: 5px 6px; }
+/* 键盘焦点要压得住选中底色：2px 外圈，不靠 1px 边线 */
+.tbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tbtn svg { width: 18px; height: 18px; display: block; flex: 0 0 auto; }
+/* 纯图标按钮：点击区不小于 30×30，图标居中；名称与快捷键由 title / aria-label 提供 */
+.tbtn.icon { padding: 6px; min-width: 30px; justify-content: center; }
+/* 主操作（打开）：只在「还没打开文档」时用强调色，阅读中回到中性，避免整条工具栏都在抢眼 */
+.tbtn.lead { font-weight: 600; }
+body:not(.has-doc) .tbtn.lead {
+  background: var(--accent-soft); color: var(--accent-2);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+body:not(.has-doc) .tbtn.lead:hover { background: var(--accent); color: var(--ink-inv); }
+/* 工具栏上的收窄按钮（旋转 / 分屏 / 独立缩放这类文案已在菜单里） */
+#toolbar .tbtn.compact { padding: 6px; }
 .ntool { padding: 6px; }
-.ntool.active { background: var(--ink); color: var(--surface); }
-.ntool.active:hover { background: var(--ink); color: var(--surface); }
+/* 当前生效的切换按钮（双页、分屏、标尺、朗读、画笔画笔…）：
+   浅强调底 + 明确轮廓，和「鼠标悬停」区分开；不靠颜色单独表意。 */
+.tbtn.active, .tbtn[aria-pressed="true"] {
+  background: var(--accent-soft); color: var(--accent-2);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tbtn.active:hover, .tbtn[aria-pressed="true"]:hover {
+  background: var(--accent-soft); color: var(--accent-2);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 1px var(--accent-soft);
+}
 button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
 .tbtn.accent:hover { background: var(--accent-soft); color: var(--accent-2); }
 .tbtn.danger { color: var(--danger); }
 .tbtn.danger:hover { background: var(--danger-soft); color: var(--danger); }
+/* 当前文档做不到的动作：弱化但仍可点（点了会说明原因），别让界面「点了没反应」 */
+.tbtn.is-disabled { opacity: .45; }
+.tbtn:disabled { opacity: .45; cursor: default; }
+.tbtn.busy { opacity: .6; pointer-events: none; }
+/* 帮助入口：唯一带字的按钮，放在最右端当「安全出口」；字太小会和图标一起糊掉 */
+.help-btn { gap: 6px; font-size: 12.5px; }
+.help-btn svg { width: 16px; height: 16px; }
 
 /* ---------- 阅读 / 文献库 视图切换 ---------- */
 /* 两处控件（阅读器工具栏首位 / 文献库侧栏顶部）用同一套内边距，
@@ -133,7 +170,7 @@ button.accent, .tbtn.accent { color: var(--accent); font-weight: 600; }
   position: relative; z-index: 1;
   border: 0; background: transparent; color: var(--ink-3);
   font: inherit; font-size: 12px; line-height: 1.3;
-  padding: 4px 10px; border-radius: var(--r); cursor: pointer;
+  padding: 4px 8px; border-radius: var(--r-btn); cursor: pointer;
   transition: color .16s ease, font-weight .16s ease;
 }
 .mode-switch .mode-tab:hover { color: var(--ink); }
@@ -181,6 +218,9 @@ body.view-page #viewer { padding: 16px 20px; }
 /* ---- 双页对开：当前页 + 搭档页并排（.is-current 由 applyPageVisibility 成对标记） ---- */
 body.view-spread .page { display: none; }
 body.view-spread .page.is-current { display: flex; }
+/* 页宽由脚本写的内联尺寸决定，禁止 flex 压缩：否则「只放大左边那一页」时
+   浏览器会把右边那页挤窄来腾地方，看起来像两页一起缩了。 */
+body.view-page .page.is-current, body.view-spread .page.is-current { flex: 0 0 auto; }
 body.view-spread #pages {
   flex-direction: row;
   flex-wrap: nowrap;
@@ -358,7 +398,7 @@ body.theme-dark.invert-pages .page .textlayer { filter: invert(1) hue-rotate(180
 #notetools .nlbl { margin: 0 4px; }
 #notetools #note-width { padding: 3px 4px; }
 .dd-wrap { position: relative; display: inline-flex; }
-.dd-btn { padding: 5px 8px; gap: 4px; font-size: 12px; }
+.dd-btn { padding: 6px 7px; gap: 3px; font-size: 12px; }
 .dd-btn .chev { width: 13px; height: 13px; opacity: .55; margin-left: -2px; }
 .dd-btn.open { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule-2); }
 .dd-pop {
@@ -367,8 +407,44 @@ body.theme-dark.invert-pages .page .textlayer { filter: invert(1) hue-rotate(180
   box-shadow: var(--shadow-pop); padding: 8px; width: 196px;
 }
 .dd-pop[hidden] { display: none; }
-.dd-tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
-.dd-tools .ntool { justify-content: center; padding: 8px 0; }
+/* 视口不高时菜单会长到屏幕外：menus.js 按剩余空间给 max-height，超出在菜单内滚动。
+   这里只补两件 CSS 做不了的事——向上展开，和滚动不把整页带着跑。 */
+.dd-pop.is-up { top: auto; bottom: calc(100% + 5px); }
+.dd-pop { overscroll-behavior: contain; scrollbar-width: thin; }
+.dd-pop::-webkit-scrollbar { width: 9px; }
+.dd-pop::-webkit-scrollbar-thumb { background: var(--rule-2); border-radius: 9px; }
+.dd-pop::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
+/* 工具按钮：纯图标，名称交给悬停提示（靠文字区分会把这排挤成两行） */
+.ntool { gap: 5px; border-radius: var(--r-btn); }
+#notetools .ntool.active { box-shadow: inset 0 0 0 1.5px var(--accent); }
+/* 竖向菜单（库工具栏的「更多」）：一行一个动作，左对齐 */
+.dd-pop.dd-menu { width: 176px; padding: 4px; }
+.dd-item {
+  display: block; width: 100%; text-align: left; font: inherit; font-size: 12.5px;
+  color: var(--ink); background: transparent; border: 0; border-radius: var(--r);
+  padding: 7px 9px; cursor: pointer; white-space: nowrap;
+}
+.dd-item:hover { background: var(--surface-2); }
+.dd-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* 库工具栏在窗口右侧，「更多」往左展开才不会顶出边界 */
+#lib-more-pop { right: 0; left: auto; }
+
+/* 常用标注色板（标注工具栏 / 选区浮动条共用）：一圈小圆点，点一下即换色 */
+.swatches { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.swatches .sw {
+  width: 15px; height: 15px; padding: 0; border-radius: 50%; cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, .18);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .45);
+  transition: transform .1s ease;
+}
+.swatches .sw:hover { transform: scale(1.18); }
+.swatches .sw.active { box-shadow: 0 0 0 2px var(--accent), inset 0 0 0 1px rgba(255, 255, 255, .6); }
+/* 选区浮条空间紧，圆点小一圈 */
+#sel-bar .swatches { gap: 3px; margin-left: 2px; }
+#sel-bar .sw { width: 14px; height: 14px; }
+
+/* 阅读方式按钮的当前状态：双页 / 独立缩放开着时高亮，避免「点了到底有没有生效」看不出来 */
+#btn-spread.active, #btn-spread-zoom.active { color: var(--accent); background: var(--accent-soft); }
 
 /* 首次上手提示条 */
 #hint-bar {
@@ -390,7 +466,7 @@ body.theme-dark.invert-pages .page .textlayer { filter: invert(1) hue-rotate(180
 }
 #toolbar select:hover, #notetools select:hover { border-color: var(--ink-3); }
 
-.sep, .nsep { width: 1px; height: 18px; background: var(--rule); margin: 0 7px; }
+.sep, .nsep { width: 1px; height: 18px; background: var(--rule); margin: 0 6px; }
 .grow { flex: 1 1 auto; }
 .nlbl { font-size: 11px; color: var(--ink-3); display: inline-flex; align-items: center; gap: 5px; margin: 0 2px; }
 #note-color { width: 24px; height: 24px; padding: 0; border: 1px solid var(--rule-2); border-radius: var(--r); background: var(--surface); cursor: pointer; }
@@ -854,7 +930,7 @@ body.has-doc #empty-hint { display: none; }
 
 /* ---------- 搜索 ---------- */
 #search-box {
-  width: 158px; padding: 5px 9px; font-size: 12.5px; font-family: inherit; color: var(--ink);
+  width: 96px; padding: 5px 9px; font-size: 12.5px; font-family: inherit; color: var(--ink);
   border: 1px solid var(--rule-2); border-radius: var(--r); background: var(--surface); outline: none;
 }
 #search-box:focus { border-color: var(--accent); }
@@ -867,7 +943,13 @@ body.has-doc #empty-hint { display: none; }
 
 /* ---------- 文本层与高亮 ---------- */
 .page .textlayer { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: auto; }
-.page .textlayer span { position: absolute; color: transparent; white-space: pre; cursor: text; }
+/* 行高必须锁 1：继承 body 的 1.5 会让每个隐形 span 比行距还高，
+   相邻行的盒子互相压住 —— 点这一行会命中下一行，选区整块错位。
+   transform-origin 0 0 是给 scaleX 贴齐字宽用的（从行首向右拉伸）。 */
+.page .textlayer span {
+  position: absolute; color: transparent; white-space: pre; cursor: text;
+  line-height: 1; transform-origin: 0 0;
+}
 .page .textlayer ::selection { background: rgba(140, 59, 46, .26); }
 body.tool-pen .textlayer, body.tool-highlight .textlayer, body.tool-line .textlayer,
 body.tool-rect .textlayer, body.tool-arrow .textlayer, body.tool-note .textlayer,
@@ -1049,6 +1131,22 @@ body.theme-dark .page .speech-layer .speech-hl {
 }
 .modal-card.wide { width: 720px; }
 .modal-card.small { width: 460px; }
+/* 设置与使用指南属于同一类「管理面板」：共用一个尺寸，来回打开时窗口不跳。
+   最小高度也不能顶破视口：应用允许 640×400 的外窗，固定 420px 会把标题和关闭按钮
+   顶到屏幕外面去（412 的正文视口只剩 364）。 */
+.pane-card {
+  width: min(960px, 92vw);
+  height: min(76vh, 720px);
+  min-height: min(420px, calc(100vh - 48px));
+}
+/* 矮窗口：面板贴近全屏，省掉外边的留白，保证标题 / 搜索 / 关闭与页脚都留在屏幕里 */
+@media (max-height: 520px) {
+  .modal { padding: 6px; }
+  .pane-card {
+    width: calc(100vw - 12px); max-width: 960px;
+    height: calc(100vh - 12px); min-height: 0; max-height: none;
+  }
+}
 .modal-head {
   display: flex; align-items: center; gap: 8px; padding: 13px 18px; border-bottom: 1px solid var(--rule);
   font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2);
@@ -1079,12 +1177,11 @@ body.theme-dark .page .speech-layer .speech-hl {
 .filename {
   font-family: var(--font-serif); font-size: 13px; color: var(--ink-2);
   max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 5px 9px; border: 1px solid transparent; border-radius: var(--r);
-  background: transparent; cursor: pointer; font-family: var(--font-serif);
+  padding: 5px 9px; border: 1px solid transparent; border-radius: var(--r-btn);
+  background: transparent; cursor: default;
   transition: background .12s ease, color .12s ease, border-color .12s ease;
 }
 .filename:hover { background: var(--surface-2); color: var(--ink); border-color: var(--rule-2); }
-.filename:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .dsw {
   position: fixed; top: 44px; right: 14px; z-index: 110;
@@ -2152,6 +2249,21 @@ body.theme-dark.invert-pages .doc-page { filter: invert(1) hue-rotate(180deg); }
   border: 1px solid var(--accent); border-radius: 10px; padding: 1px 7px;
 }
 .adv-bar-desc { color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adv-bar-desc.adv-bar-chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  overflow: visible; white-space: normal; text-overflow: clip;
+}
+.adv-bar-chip {
+  display: inline-flex; align-items: center; gap: 3px; max-width: 220px;
+  background: var(--surface); border: 1px solid var(--rule-2); border-radius: 999px;
+  padding: 1px 4px 1px 8px; font-size: 11px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.adv-bar-chip > button {
+  border: 0; background: transparent; color: var(--ink-3); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 0 2px;
+}
+.adv-bar-chip > button:hover { color: var(--danger); }
 .adv-bar-count { color: var(--ink-2); }
 
 /* 标注回复：嵌在父批注下面，左侧缩进 + 一条竖线，扫一眼能看出从属关系 */
@@ -2282,6 +2394,10 @@ body.theme-dark #read-ruler { background: rgba(207, 122, 99, .16); }
 .refi-empty { padding: 26px 18px; font-size: 12.5px; color: var(--ink-3); text-align: center; }
 
 /* 印章预设条：只有选中印章工具时才出现，颜色跟印章本身一致 */
+.smart-hint {
+  font-size: 11.5px; color: var(--ink-2); padding: 4px 9px;
+  background: var(--accent-soft); border: 1px solid var(--rule-2); border-radius: var(--r-btn);
+}
 .stamp-bar { display: inline-flex; align-items: center; gap: 5px; padding: 0 4px; }
 .stamp-lbl { font-size: 10.5px; color: var(--ink-3); margin-right: 1px; }
 .stamp-pick {
@@ -2322,12 +2438,14 @@ body.theme-dark .stamp-pick[data-stamp="todo"] { color: #b48ad0; }
    只在需要「指给你看」时用强调色（定位闪烁 / 当前节）。
    ========================================================= */
 .help-modal { z-index: 120; }              /* 高于其它弹窗：从设置里打开也压得住 */
-.help-card { width: min(1000px, 96vw); height: min(78vh, 780px); min-height: 420px; }
+/* 卡片尺寸与设置面板共用 .pane-card：两个「管理面板」一样大，来回切换不跳。 */
 .help-head {
   display: flex; align-items: center; gap: 14px; flex: 0 0 auto;
   padding: 12px 16px; border-bottom: 1px solid var(--rule); background: var(--surface-3);
 }
 .help-brand { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; }
+/* 关闭按钮必须贴在右上角：搜索框有 max-width，不加 auto 会停在中间，看着像飘着 */
+#help-x { margin-left: auto; }
 .help-brand-name { font-size: 14px; font-weight: 600; letter-spacing: .02em; }
 .help-ver { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); }
 .help-search { position: relative; flex: 1 1 auto; display: flex; align-items: center; max-width: 460px; }
@@ -2377,6 +2495,35 @@ body.theme-dark .stamp-pick[data-stamp="todo"] { color: #b48ad0; }
 .help-act.primary { background: var(--accent); border-color: var(--accent); color: var(--ink-inv); font-weight: 600; }
 .help-act.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
 .help-steps { list-style: none; margin: 0 0 6px; padding: 0; counter-reset: hs; }
+/* 适用条件与完成结果：条件出现在动手之前，结果跟在最后一步后面 */
+.help-need, .help-done {
+  display: flex; align-items: baseline; gap: 8px; margin: 0 0 14px;
+  font-size: 12.5px; line-height: 1.7; color: var(--ink-2);
+  background: var(--surface-3); border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-2); border-radius: var(--r-btn); padding: 8px 12px;
+}
+.help-need-h, .help-done-h {
+  flex: 0 0 auto; font-size: 10.5px; letter-spacing: .04em; color: var(--ink-3);
+  font-family: var(--font-mono); padding-top: 1px;
+}
+.help-done { border-left-color: var(--accent); margin: 12px 0 0; }
+.help-done .help-done-h { color: var(--accent); }
+/* 定位做不成时的解释：留在教程里，配一个「先去完成它」的下一步 */
+.help-notice {
+  font-size: 12.5px; line-height: 1.7; color: var(--ink);
+  background: var(--accent-soft); border: 1px solid var(--accent);
+  border-radius: var(--r-btn); padding: 10px 12px; margin: 0 0 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+.help-notice b { color: var(--accent-2); }
+.help-nav-tip { font-size: 11.5px; line-height: 1.6; color: var(--ink-3); padding: 0 8px 10px; }
+/* 窄窗口没有左侧目录时，正文里的「全部主题」列表接管导航 */
+.help-browse-all { display: grid; gap: 14px; margin: 4px 0 18px; }
+.help-browse-h {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px; font-weight: 600; color: var(--ink);
+  padding-bottom: 6px; border-bottom: 1px solid var(--rule); margin-bottom: 4px;
+}
+.help-browse-h span { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); font-weight: 400; }
 .help-steps > li { display: flex; gap: 11px; padding: 9px 0; border-top: 1px solid var(--rule); }
 .help-steps > li:first-child { border-top: 0; padding-top: 2px; }
 .help-step-n {
@@ -2522,3 +2669,205 @@ body.theme-dark .stamp-pick[data-stamp="todo"] { color: #b48ad0; }
   line-height: 1.5; opacity: 0; transition: opacity .12s ease; pointer-events: none;
 }
 .note-img-wrap.resizing .note-img-size { opacity: 1; }
+
+/* =========================================================
+   v1.6.3 · 按场景收拢：分组下拉 / 参数随工具出现 / 任务化帮助 / 面板分组
+   收起功能不是删功能：菜单要能读懂，定位要能展开，参数要用得上时才出现。
+   ========================================================= */
+
+/* ---- 分组菜单：一行一个动作，图标与文字左对齐 ---- */
+.dd-pop.dd-menu.tb-menu { width: 238px; }
+.dd-pop.dd-menu.nv-menu { width: 176px; }
+.dd-pop.dd-menu.ld-menu { width: 198px; }
+.dd-pop.dd-menu.sel-menu { width: 214px; }
+.dd-pop.dd-menu.lib-filter-pop { width: 240px; }
+.dd-cap {
+  font-size: 10.5px; line-height: 1.55; color: var(--ink-3);
+  padding: 6px 9px 4px; white-space: normal;
+}
+.dd-rule { height: 1px; background: var(--rule); margin: 5px 6px; }
+
+/* ---- 页面排列：图形分段控件（连续滚动 / 单页 / 双页）----
+   形状先说话，文字补充；当前项一直亮着，不用「点一下看页面变没变」来猜。 */
+.vm-seg {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+  padding: 2px 4px 6px;
+}
+.vm-seg-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 8px 4px 6px; min-height: 52px; cursor: pointer;
+  font: inherit; font-size: 11.5px; line-height: 1.2; color: var(--ink-2);
+  background: transparent; border: 1px solid var(--rule); border-radius: var(--r-btn);
+  transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.vm-seg-btn svg { width: 20px; height: 20px; }
+.vm-seg-btn:hover { background: var(--surface-2); color: var(--ink); }
+.vm-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.vm-seg-btn.active, .vm-seg-btn[aria-pressed="true"] {
+  background: var(--accent-soft); color: var(--accent-2);
+  border-color: var(--accent); font-weight: 600;
+}
+.vm-seg-btn.is-disabled { opacity: .55; }
+/* 页面排列常驻主栏：三个小图标一组，选中态沿用 .tbtn.active，不再有下拉 */
+.vm-quick {
+  display: inline-flex; align-items: center; gap: 1px;
+  padding: 0; border: 0; border-radius: var(--r-btn);
+}
+.vm-quick-btn { padding: 5px 4px; min-width: 26px; }
+.vm-quick-btn svg { width: 17px; height: 17px; }
+/* 导入文献库：唯一的文字按钮之一，放在工具栏右侧，颜色与「帮助」同级别 */
+.import-lib-btn { gap: 6px; }
+.import-lib-btn span { font-size: 12.5px; }
+.import-lib-body { gap: 10px; }
+.import-lib-choice {
+  display: flex; align-items: flex-start; gap: 12px; width: 100%; text-align: left;
+  padding: 12px 14px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--rule-2); border-radius: var(--r-2); cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.import-lib-choice:hover { background: var(--surface-2); border-color: var(--accent); }
+.import-lib-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.import-lib-choice > svg { width: 22px; height: 22px; flex: 0 0 auto; color: var(--accent); margin-top: 2px; }
+.import-lib-txt { display: flex; flex-direction: column; gap: 4px; }
+.import-lib-txt b { font-size: 13.5px; font-weight: 600; }
+.import-lib-txt small { font-size: 11.5px; line-height: 1.55; color: var(--ink-3); }
+.import-lib-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.55; color: var(--ink-3); }
+.dd-pop.dd-menu .tbtn.dd-item,
+.dd-pop.dd-menu .toolbar-btn.dd-item,
+.dd-pop.dd-menu .sel-btn.dd-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  white-space: normal; line-height: 1.4; padding: 7px 9px;
+}
+.dd-pop.dd-menu .dd-item svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.dd-pop.dd-menu .tbtn.dd-item.active { color: var(--accent); background: var(--accent-soft); }
+#nv-toolbar .dd-wrap { display: inline-flex; }
+#nv-toolbar .dd-btn { min-width: 0; height: 28px; padding: 0 6px; font-size: .8rem; gap: 3px; }
+#nv-toolbar .dd-btn .chev { width: 11px; height: 11px; }
+#sel-bar .dd-wrap { display: inline-flex; }
+#sel-bar .sel-btn.dd-btn { border-radius: 4px; }
+.sel-colors { display: flex; align-items: center; gap: 8px; padding: 6px 9px 9px; }
+.sel-colors .swatches { flex-wrap: wrap; }
+
+/* 窄窗口搬到「⋯」里的分组：子菜单内联展开，不再叠一层浮层 */
+/* 还没有文档时，跟文档相关的控件先弱化：仍可点（点了会说明原因），
+   但不要让人点下去才发现做不了。打开文档后自动恢复。 */
+body:not(.has-doc) #notetools .tbtn,
+body:not(.has-doc) #tb-output-btn,
+body:not(.has-doc) #btn-to-lib { opacity: .5; }
+body:not(.has-doc) #notetools .tbtn:hover,
+body:not(.has-doc) #tb-output-btn:hover { opacity: .8; }
+#page-input::placeholder { color: var(--ink-3); }
+
+/* 搬家用的占位 span 不该占 gap；窄窗口再收一点搜索框，主栏仍是一行 */
+.tb-slot { display: none !important; }
+/* 量宽度用的临时状态：不换行、不压缩，scrollWidth 才能反映真实内容宽 */
+#toolbar.tb-measuring { flex-wrap: nowrap !important; }
+#toolbar.tb-measuring > * { flex: 0 0 auto !important; }
+#statusbar .filename { max-width: 240px; font-size: 12px; padding: 2px 8px; }
+@media (max-width: 1020px) { #toolbar #search-box { width: 96px; } }
+#tb-overflow-pop { width: 220px; left: auto; right: 0; }   /* 贴右端向左展开，别顶出窗口 */
+/* 收进「更多」后一行只剩图标，菜单项读不懂：这里补名称、把箭头转成「有子项」的方向。
+   主栏里不加字（那是另一套取舍），只在这层浮层生效。 */
+#tb-overflow-pop > .dd-wrap > .dd-btn { width: 100%; justify-content: flex-start; gap: 7px; padding: 7px 9px; }
+#tb-overflow-pop > .dd-wrap > .dd-btn::after {
+  content: attr(data-ov-label);
+  font-size: 12.5px; color: var(--ink); white-space: nowrap;
+}
+#tb-overflow-pop > .dd-wrap > .dd-btn .chev { order: 3; margin-left: auto; transform: rotate(-90deg); }
+#tb-overflow-pop > .dd-wrap { display: block; width: 100%; margin-bottom: 4px; }
+#tb-overflow-pop > .dd-wrap > .dd-btn { width: 100%; justify-content: flex-start; }
+#tb-overflow-pop > .dd-wrap > .dd-pop.dd-menu {
+  position: static; width: 100%; box-shadow: none; border: 0;
+  border-left: 2px solid var(--rule-2); border-radius: 0;
+  padding: 0 0 0 6px; margin: 2px 0 6px;
+}
+
+/* ---- 标注：绘制参数只在用得上时出现；自动保存状态常驻可见 ---- */
+.note-params { display: inline-flex; align-items: center; gap: 2px; }
+.note-params[hidden], #note-width-wrap[hidden] { display: none !important; }
+.save-state {
+  display: none; font-size: 11.5px; color: var(--ink-3);
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+body.has-doc .save-state { display: inline-flex; align-items: center; }
+.save-state.is-saving { color: var(--ink-2); background: var(--surface-2); }
+.save-state.is-error { color: #fff; background: var(--danger); cursor: pointer; }
+
+/* ---- 详情 / 设置：分组页签（切页不重建 DOM，未保存的值不丢） ---- */
+.ld-tabs {
+  display: flex; flex-wrap: wrap; gap: 4px; flex: 0 0 auto;
+  border-bottom: 1px solid var(--rule); padding: 0 0 8px; margin-bottom: 10px;
+}
+.ld-tab {
+  font: inherit; font-size: 12px; color: var(--ink-2); background: transparent;
+  border: 1px solid transparent; border-radius: var(--r); padding: 5px 10px; cursor: pointer;
+}
+.ld-tab:hover { background: var(--surface-2); color: var(--ink); }
+.ld-tab.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.ld-pane { min-width: 0; }
+#set-tabs { margin-top: 2px; }
+
+/* ---- 空阅读页：真正的三步 ---- */
+.empty-steps { margin: 10px 0 0; padding-left: 20px; text-align: left; font-size: 13px; line-height: 1.9; color: var(--ink-2); }
+.empty-more { margin-top: 8px; font-size: 12px; color: var(--ink-3); }
+
+/* ---- 帮助首页：先回答「我现在要做什么」 ---- */
+.help-home { max-width: 780px; }
+.help-task-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0 22px; }
+.help-task-card { position: relative; min-width: 0; }
+.help-task {
+  display: block; width: 100%; height: 100%; text-align: left; font: inherit; cursor: pointer;
+  color: var(--ink); background: var(--surface); border: 1px solid var(--rule-2);
+  border-radius: var(--r-2); padding: 14px 34px 14px 14px;
+}
+.help-task:hover { border-color: var(--accent); background: var(--accent-soft); }
+.ht-t { display: block; font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+.ht-d { display: block; font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+.help-task-go {
+  position: absolute; right: 8px; top: 8px; width: 24px; height: 24px;
+  border: 0; background: transparent; color: var(--ink-3); cursor: pointer;
+  border-radius: var(--r); font-size: 15px;
+}
+.help-task-go:hover { background: var(--surface-2); color: var(--accent); }
+.help-home-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.help-home-hint { font-size: 11.5px; color: var(--ink-3); }
+.help-home-warn {
+  margin-top: 18px; padding: 10px 12px; border-left: 3px solid var(--danger);
+  background: var(--danger-soft); font-size: 12px; line-height: 1.7; color: var(--ink-2);
+}
+.help-back {
+  display: block; width: 100%; text-align: left; font: inherit; font-size: 12px;
+  color: var(--accent); background: transparent; border: 0; border-radius: var(--r);
+  padding: 6px 8px; cursor: pointer;
+}
+.help-back:hover { background: var(--surface-2); }
+.help-nav-gap { margin-top: 14px; }
+.help-fold { margin-bottom: 4px; }
+.help-fold > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 600; color: var(--ink-2); padding: 6px 8px; border-radius: var(--r);
+}
+.help-fold > summary::-webkit-details-marker { display: none; }
+.help-fold > summary::before { content: '\25B8'; font-size: 10px; color: var(--ink-3); }
+.help-fold[open] > summary::before { content: '\25BE'; }
+.help-fold-n { margin-left: auto; font-weight: 400; color: var(--ink-3); }
+.help-fold-body { padding: 0 0 6px 8px; }
+.help-more { margin-top: 16px; border-top: 1px solid var(--rule); padding-top: 10px; }
+.help-more > summary { cursor: pointer; font-size: 12px; color: var(--accent); padding: 4px 0; }
+.help-crumbs { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink-3); margin-bottom: 12px; }
+.help-crumbs .help-back { display: inline; width: auto; padding: 0; font-size: 11px; }
+.help-result { position: relative; padding-right: 30px; }
+.hni-title { display: block; }
+.hni-locate {
+  position: absolute; right: 6px; top: 6px; border: 0; background: transparent;
+  color: var(--ink-3); cursor: pointer; font-size: 13px;
+}
+.hni-locate:hover { color: var(--accent); }
+.help-results { margin-top: 12px; }
+.help-result-row { display: flex; gap: 14px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--rule); }
+.help-result-row > div:first-child { flex: 1 1 auto; min-width: 0; }
+.help-result-row b { font-size: 13px; }
+.help-result-row span { font-size: 10.5px; color: var(--ink-3); margin-left: 8px; }
+.help-result-row p { margin: 4px 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-2); }
+.help-result-acts { display: flex; gap: 6px; flex: 0 0 auto; }
+@media (max-width: 760px) { .help-task-grid { grid-template-columns: 1fr; } }

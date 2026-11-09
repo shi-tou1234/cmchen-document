@@ -49,7 +49,11 @@ function loadBookmarkToggle() {
   const end = src.indexOf('App.bookmarkToggle = bookmarkToggle;');
   if (start < 0 || end < 0 || end <= start) throw new Error('无法从 renderer.js 提取 bookmarkToggle');
   const block = src.slice(start, end);
-  return new Function('App', 'pdfBridge', 'hasDoc', 'toast', 'renderBookmarks', 'initialSeq', 'window', `
+  // annoDocAtPath / annoSessionId 是「这份路径是否属于当前文档」与「当前文档会话 id」
+  // （改名前的旧路径也算，见 J03）。这里作为依赖注入，默认实现与引入它们之前的行为等价：
+  // 路径等于当前文档路径就算自己的，且不带会话 id。
+  return new Function('App', 'pdfBridge', 'hasDoc', 'toast', 'renderBookmarks', 'initialSeq', 'window',
+    'annoDocAtPath', 'annoSessionId', `
     let loadSeq = initialSeq;
     ${block}
     return { toggle: bookmarkToggle, setSeq: (n) => { loadSeq = n; }, seq: () => loadSeq };
@@ -72,7 +76,9 @@ function bookmarkEnv(opts) {
   const toasts = [];
   const pdfBridge = { bookmarksSave: o.save };
   const factory = loadBookmarkToggle();
-  const env = factory(app, pdfBridge, hasDoc, (t) => toasts.push(t), () => {}, o.seq || 1, { pdfBridge });
+  const env = factory(app, pdfBridge, hasDoc, (t) => toasts.push(t), () => {}, o.seq || 1, { pdfBridge },
+    o.annoDocAtPath || ((p) => app.state.filePath === p),
+    o.annoSessionId || (() => ''));
   return { app, toasts, env };
 }
 
@@ -461,10 +467,39 @@ function libStats() {
   ok('B12 老文献今天导入：出版更早 / 入库今年', pub['更早'] === 1 && cre[String(y)] === 2, JSON.stringify({ pub, cre }));
 }
 
+async function saveQueueIdentity() {
+  const src = fs.readFileSync(path.join(ROOT, 'src/renderer/renderer.js'), 'utf8');
+  const start = src.indexOf('let annoSaveQueue = Promise.resolve();');
+  const end = src.indexOf('// force =', start);
+  if (start < 0 || end < 0) throw new Error('无法提取保存队列');
+  const factory = new Function('annoDoc', 'saveAnnosNowInner', src.slice(start, end)
+    + '; return { save: saveAnnosNow, switchDoc: (doc) => { annoDoc = doc; } };');
+  for (const switched of [false, true]) {
+    let release;
+    const calls = [];
+    const doc = { path: 'A.pdf' };
+    const env = factory(doc, (force) => {
+      calls.push(force);
+      return calls.length === 1 ? new Promise((resolve) => { release = resolve; }) : true;
+    });
+    const first = env.save(true);
+    await tick();
+    const second = env.save(true);
+    if (switched) env.switchDoc({ path: 'B.pdf' });
+    else doc.path = 'Renamed.pdf';
+    release(true);
+    const replies = await Promise.all([first, second]);
+    eq('K04 ' + (switched ? '换文档取消排队强制写入' : '同文档改名仍可保存'),
+      calls.length, switched ? 1 : 2);
+    eq('K04 排队结果反映文档归属 ' + switched, replies, [true, !switched]);
+  }
+}
+
 async function main() {
   const before = results.length;
   await sectionAsync('bookmarks', bookmarks);
   ok('书签时序用例确实执行了（R04）', results.length > before, 'checks=' + (results.length - before));
+  await sectionAsync('saveQueueIdentity', saveQueueIdentity);
   section('mergeFeeds', mergeFeeds);
   section('endnoteXml', endnoteXml);
   section('queryBuilder', queryBuilder);

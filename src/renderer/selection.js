@@ -157,6 +157,7 @@ window.SelectionUI = (function () {
       if (!p) { hideBar(); return; }
       pending = p;
       const bar = $('sel-bar');
+      if (window.GroupMenus) GroupMenus.close('sel-more');   // 每次新选区从收起状态开始
       bar.hidden = false;          // 先显示，offsetWidth 才有值
       bar.style.display = 'flex';
       barPos(p.rect);
@@ -217,11 +218,50 @@ window.SelectionUI = (function () {
     if (cb) cb(v);
   }
 
+  // 高亮色板：常用 6 色点一下即换，取色器留给自定义。
+  // 色板里的颜色和标注工具栏共用同一份（Anno.PALETTE），两处不会给出两套颜色。
+  function syncSwatch(color) {
+    const box = $('sel-swatches');
+    if (!box) return;
+    const c = String(color || '').toLowerCase();
+    for (const b of box.querySelectorAll('[data-color]')) {
+      b.classList.toggle('active', String(b.dataset.color).toLowerCase() === c);
+    }
+  }
+
+  function buildSwatches() {
+    const box = $('sel-swatches');
+    if (!box || box._done) return;
+    box._done = true;
+    const colors = (window.Anno && Anno.PALETTE) || ['#ffd54f'];
+    for (const c of colors) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'sw';
+      b.dataset.color = c;
+      b.dataset.menuKeep = '';   // 换色后浮条里的「更多」保持打开，方便连着试几种颜色
+      b.style.background = c;
+      b.title = '高亮颜色';
+      box.appendChild(b);
+    }
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-color]');
+      if (!b) return;
+      const c = b.dataset.color;
+      const inp = $('sel-color');
+      if (inp) inp.value = c;
+      if (pending) pending.color = c;
+      syncSwatch(c);
+    });
+  }
+
   function init() {
     if (inited) return;
     inited = true;
     const viewer = $('viewer');
     if (!viewer) return;
+    buildSwatches();
+    syncSwatch($('sel-color') && $('sel-color').value);
     viewer.addEventListener('mouseup', onMouseUp);
     document.addEventListener('mousedown', (e) => {
       const bar = $('sel-bar');
@@ -271,7 +311,10 @@ window.SelectionUI = (function () {
         openComment('', (v) => commitMarks(v), { title: '高亮 + 评论', quote: text });
       }
     });
-    $('sel-color').addEventListener('input', () => { if (pending) pending.color = $('sel-color').value; });
+    $('sel-color').addEventListener('input', () => {
+      if (pending) pending.color = $('sel-color').value;
+      syncSwatch($('sel-color').value);
+    });
 
     $('comment-save').addEventListener('click', saveComment);
     $('comment-cancel').addEventListener('click', closeComment);

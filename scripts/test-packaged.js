@@ -76,6 +76,8 @@ function ok(name, cond, detail) {
     PDFREADER_NO_AUTO_INDEX: '1',
   });
   delete env.ELECTRON_RUN_AS_NODE;
+  // 打包产物不认 NODE_OPTIONS（会被 Node 自己的 shim 注入），带上它主进程会在启动时抛错
+  delete env.NODE_OPTIONS;
 
   const child = spawn(EXE, ['--no-sandbox', '--disable-gpu', '--user-data-dir=' + udd], {
     cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,

@@ -46,6 +46,8 @@ window.LibraryUI = (function () {
   let ftTimer = null;
   let ftIndexTimer = null;      // 增量索引广播的合并计时器（建索引很密集，别每个文件刷一次界面）
   let ftIndexPending = 0;       // 上一批里还没跑完的文件数，只用来显示「索引中 +N」
+  let unsubFtChanged = null;    // 索引 change / idle 的取消订阅函数（preload 返回）
+  let unsubFtIdle = null;
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
@@ -2389,6 +2391,56 @@ window.LibraryUI = (function () {
     return window.Creators ? window.Creators.normalizeCreators(out) : out;
   }
 
+  /* ---------- 详情 / 设置分组（v1.6.3） ----------
+     只切 hidden，不重建 DOM：切到「引用」再回来，表单里没保存的改动还在。
+     记住用户主动选过的分组；默认给出首屏最需要的内容（题录 / 标签 / 附件）。 */
+  const LS_DETAIL_PANE = 'trove.detail.pane';
+  const LS_SET_PANE = 'trove.settings.pane';
+  let detailPane = 'info', settingsPane = 'read';
+  try { detailPane = localStorage.getItem(LS_DETAIL_PANE) || 'info'; } catch (_) {}
+  try { settingsPane = localStorage.getItem(LS_SET_PANE) || 'read'; } catch (_) {}
+
+  function applyDetailPane() {
+    const body = $('ld-body');
+    if (!body) return;
+    for (const p of body.querySelectorAll('.ld-pane[data-pane]')) p.hidden = p.dataset.pane !== detailPane;
+    for (const b of body.querySelectorAll('[data-pane-btn]')) {
+      const on = b.dataset.paneBtn === detailPane;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+  }
+  function applySettingsPane() {
+    const body = document.querySelector('#settings-modal .modal-body');
+    if (!body) return;
+    for (const node of body.querySelectorAll('[data-pane]')) node.hidden = node.dataset.pane !== settingsPane;
+    for (const b of body.querySelectorAll('[data-set-pane]')) {
+      const on = b.dataset.setPane === settingsPane;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+  }
+  function initPanes() {
+    const lb = $('ld-body');
+    if (lb) lb.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pane-btn]');
+      if (!b) return;
+      detailPane = b.dataset.paneBtn;
+      try { localStorage.setItem(LS_DETAIL_PANE, detailPane); } catch (_) {}
+      applyDetailPane();
+    });
+    const sb = document.querySelector('#settings-modal .modal-body');
+    if (sb) sb.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-set-pane]');
+      if (!b) return;
+      settingsPane = b.dataset.setPane;
+      try { localStorage.setItem(LS_SET_PANE, settingsPane); } catch (_) {}
+      applySettingsPane();
+    });
+    applyDetailPane();
+    applySettingsPane();
+  }
+
   function renderDetail() {
     const it = selectedItem();
     if (!it) { el.detail.hidden = true; return; }
@@ -2455,6 +2507,7 @@ window.LibraryUI = (function () {
       (it.page > 1 ? ' · 已读至第 ' + it.page + ' 页' : '');
     el.ld.status.textContent = state.flash || '';
     state.flash = '';
+    applyDetailPane();
   }
 
   // ---------- 引用（v14） ----------
@@ -2688,30 +2741,58 @@ window.LibraryUI = (function () {
     el.ld.readStatus.innerHTML = html;
   }
 
+  // 附件按状态收敛主操作：正常只留「继续阅读 / 文件操作」，失联突出找回，
+  // 无附件突出下载全文，有网址突出网页快照。重新下载、替换、重命名仍从「文件操作」可达。
   function renderAttach(it, trashed) {
-    if (!it.attachment) {
-      el.ld.attach.innerHTML = '<span class="ld-hint">无附件</span>';
+    const hasAtt = !!it.attachment;
+    const missing = hasAtt && !it.hasFile;
+    const isPdf = /\.pdf$/i.test(String((it.attachment && it.attachment.path) || ''));
+    const hasUrl = !!it.url;
+    const hasSnap = !!(it.snapshot && it.snapshot.path && it.snapshot.hasFile !== false);
+    const show = (id, on) => { const b = $(id); if (b) b.hidden = !on; };
+    show('ld-fetch-pdf', !hasAtt || missing);
+    show('ld-snapshot', hasUrl && !hasSnap);
+    show('ld-snapshot-open', hasSnap);
+    show('ld-pdf-meta', false);
+
+    if (!hasAtt) {
+      el.ld.attach.innerHTML = '<div class="ld-hint">还没有附件。上面可以下载开放获取全文' +
+        (hasUrl ? '或保存网页快照' : '') + '；也可以把本地文件拖进文献库。</div>';
       return;
     }
     const name = it.attachment.name || it.attachment.path;
-    const missing = !it.hasFile;
-    const isPdf = /\.pdf$/i.test(String(it.attachment.path || ''));
-    el.ld.attach.innerHTML =
-      '<div class="ld-fname">' + esc(name) + '</div>' +
+    const head = '<div class="ld-fname">' + esc(name) + '</div>' +
       '<div class="ld-fpath' + (missing ? ' ld-missing' : '') + '">' + esc(it.attachment.path) +
-        (missing ? ' · 文件已移动或删除' : '') + '</div>' +
-      '<div class="ld-attach-actions">' +
-        (it.page > 0 && !missing ? '<button class="ld-mini" data-ld-resume="1" title="从上次读到的位置继续（第 ' + esc(it.page) + ' 页'
-          + (it.pageTotal ? ' / ' + esc(it.pageTotal) : '') + '）">继续阅读' + (it.pageTotal ? ' · ' + Math.min(100, Math.max(1, Math.round(it.page / it.pageTotal * 100))) + '%' : '') + '</button>' : '') +
-        '<button class="ld-mini" data-ld-reveal="1"' + (missing ? ' disabled' : '') + '>在文件夹中显示</button>' +
-        '<button class="ld-mini" data-ld-relink="1"' + (trashed ? ' disabled' : '') + '>重新定位…</button>' +
-        (missing ? '<button class="ld-mini" data-ld-scan="1"' + (trashed ? ' disabled' : '')
-          + ' title="扫描一个文件夹，按文件指纹找回所有失联的附件">扫描文件夹找回…</button>' : '') +
-        (isPdf ? '<button class="ld-mini" data-ld-identify="1"' + (trashed || missing ? ' disabled' : '')
-          + ' title="读 PDF 首页的 DOI / arXiv，自动补全空着的题录字段（不覆盖已填内容）">从文件补全题录</button>' : '') +
-        '<button class="ld-mini" data-ld-rename="1"' + (trashed || missing ? ' disabled' : '')
-          + ' title="按「作者 - 年份 - 标题」重命名文件，标注与全文索引会一起跟着搬">按条目重命名</button>' +
-      '</div>';
+      (missing ? ' · 文件已移动或删除' : '') + '</div>';
+
+    let actions;
+    if (missing) {
+      actions = '<div class="ld-attach-actions">' +
+        '<button class="ld-mini primary" data-ld-relink="1" title="手动指定文件的新位置">重新定位…</button>' +
+        '<button class="ld-mini" data-ld-scan="1" title="扫描一个文件夹，按文件指纹找回所有失联附件">扫描文件夹找回…</button>' +
+        '</div>';
+    } else {
+      const resume = it.page > 0
+        ? '<button class="ld-mini primary" data-ld-resume="1" title="从上次读到的位置继续（第 ' + esc(it.page) + ' 页'
+            + (it.pageTotal ? ' / ' + esc(it.pageTotal) : '') + '）">继续阅读'
+            + (it.pageTotal ? ' · ' + Math.min(100, Math.max(1, Math.round(it.page / it.pageTotal * 100))) + '%' : '') + '</button>'
+        : '<button class="ld-mini primary" data-ld-open="1" title="打开这份附件开始阅读">打开文档</button>';
+      actions = '<div class="ld-attach-actions">' + resume +
+        '<div class="dd-wrap" data-menu="ld-files">' +
+          '<button type="button" class="ld-mini dd-btn" data-menu-btn' +
+            ' title="文件操作：定位、重命名、重新下载、快照、写入元数据" aria-haspopup="true" aria-expanded="false">文件操作 ▾</button>' +
+          '<div class="dd-pop dd-menu ld-menu" data-menu-pop hidden>' +
+            '<button class="dd-item" data-ld-reveal="1">在文件夹中显示</button>' +
+            '<button class="dd-item" data-ld-relink="1">重新定位…</button>' +
+            '<button class="dd-item" data-ld-redownload="1" title="重新尝试下载开放获取全文">重新下载全文</button>' +
+            (hasUrl ? '<button class="dd-item" data-ld-snapshot="1">网页快照</button>' : '') +
+            '<button class="dd-item" data-ld-rename="1" title="按「作者 - 年份 - 标题」重命名文件，标注与全文索引一起跟着搬">按条目重命名</button>' +
+            (isPdf ? '<button class="dd-item" data-ld-pdfmeta="1" title="把题录写进 PDF 自身，另存为副本，原文件不动">写入 PDF 元数据</button>' : '') +
+          '</div>' +
+        '</div></div>';
+    }
+    el.ld.attach.innerHTML = head + actions;
+    if (window.GroupMenus) GroupMenus.bind(el.ld.attach);
   }
 
   function readDetailForm() {
@@ -3162,9 +3243,20 @@ window.LibraryUI = (function () {
     if (!active) { el.advBar.hidden = true; el.advBar.innerHTML = ''; return; }
     const desc = AdvSearch.describe(active.spec);
     const n = Number(state.visibleCount) || 0;
+    // 生效条件按条展示成标签：临时查询可以单独摘掉一条，不必整批清除重来
+    let conds = [];
+    try { conds = AdvSearch.normalize(active.spec).conditions || []; } catch (_) {}
+    const chips = conds.map((c, i) => {
+      let label = '';
+      try { label = AdvSearch.describeCondition(c, 0); } catch (_) {}
+      return '<span class="adv-bar-chip" title="' + esc(label || ('条件 ' + (i + 1))) + '">' +
+        esc(label || ('条件 ' + (i + 1))) +
+        (active.saved ? '' : '<button type="button" data-adv-drop="' + i + '" title="移除这一条条件">×</button>') +
+        '</span>';
+    }).join('');
     el.advBar.hidden = false;
     el.advBar.innerHTML = '<span class="adv-bar-tag">条件检索</span>' +
-      '<span class="adv-bar-desc">' + esc(desc || '（无条件）') + '</span>' +
+      '<span class="adv-bar-desc adv-bar-chips">' + (chips || esc(desc || '（无条件）')) + '</span>' +
       '<span class="adv-bar-count">' + n + ' 条</span>' +
       '<span class="grow"></span>' +
       '<button class="ld-mini" data-adv-edit="1">' + (active.saved ? '查看条件' : '修改') + '</button>' +
@@ -3222,6 +3314,7 @@ window.LibraryUI = (function () {
     }
     if (el.setDataDir) el.setDataDir.textContent = state.settings.dataDir || '（默认 userData）';
     setSettingsStatus('');
+    applySettingsPane();
     el.settingsModal.hidden = false;
     refreshFtStatus();
   }
@@ -4878,6 +4971,7 @@ window.LibraryUI = (function () {
   }
 
   function bind() {
+    initPanes();
     el = {
       root: $('library'), search: $('lib-search'), collections: $('lib-collections'),
       qbBtn: $('lib-query-btn'), qbPanel: $('lib-query-panel'), qbRows: $('qb-rows'),
@@ -5299,6 +5393,7 @@ window.LibraryUI = (function () {
       }
     });
     if (el.dup) el.dup.addEventListener('click', openDuplicates);
+    // 「更多」等分组下拉统一由 menus.js 管：选完收起、Esc 关、帮助定位能展开父菜单
     if (el.importRefs) el.importRefs.addEventListener('click', importRefs);
     if (el.exportRefs) el.exportRefs.addEventListener('click', exportRefs);
     if (el.newNote) el.newNote.addEventListener('click', newNoteItem);
@@ -5684,7 +5779,16 @@ window.LibraryUI = (function () {
     if (el.advBar) {
       el.advBar.addEventListener('click', (e) => {
         if (e.target.closest('[data-adv-off]')) { advOff(); return; }
-        if (e.target.closest('[data-adv-edit]')) openAdv();
+        if (e.target.closest('[data-adv-edit]')) { openAdv(); return; }
+        const drop = e.target.closest('[data-adv-drop]');
+        if (!drop || !state.adv) return;
+        const i = Number(drop.dataset.advDrop);
+        const rest = (state.adv.conditions || []).slice();
+        if (!Number.isInteger(i) || i < 0 || i >= rest.length) return;
+        rest.splice(i, 1);
+        state.adv = rest.length ? AdvSearch.normalize({ match: state.adv.match, conditions: rest }) : null;
+        if (!state.adv && state.scope.type === 'search') state.scope = { type: 'all' };
+        render();
       });
     }
 
@@ -5792,6 +5896,26 @@ window.LibraryUI = (function () {
 
     // 详情：DOI/arXiv 抓取
     if (el.ld.fetch) el.ld.fetch.addEventListener('click', fetchMetadata);
+    // 「补全文献信息」里的第二种来源：读 PDF 首页识别，和原来的按钮走同一条实现
+    const completeFile = $('ld-complete-file');
+    if (completeFile) completeFile.addEventListener('click', async () => {
+      const it = selectedItem();
+      if (!it || it.deletedAt) return;
+      el.ld.status.textContent = '正在读首页找 DOI…';
+      try {
+        const r = await L().identifyItem(it.key);
+        if (r && r.ok) {
+          await refresh();
+          el.ld.status.textContent = (r.filled && r.filled.length)
+            ? ('已补全：' + r.filled.join('、') + '（' + r.source + '）')
+            : (r.message || '题录已经完整');
+        } else {
+          el.ld.status.textContent = '识别失败：' + ((r && r.error) || '未知错误');
+        }
+      } catch (err) {
+        el.ld.status.textContent = '识别失败：' + ((err && err.message) || err);
+      }
+    });
     if (el.ld.fetchPdf) el.ld.fetchPdf.addEventListener('click', fetchPdfFull);
     if (el.ld.pdfMeta) el.ld.pdfMeta.addEventListener('click', writePdfMeta);
     if (el.ld.snapshot) el.ld.snapshot.addEventListener('click', snapshotPage);
@@ -6138,7 +6262,16 @@ window.LibraryUI = (function () {
     // 详情附件动作（内容是动态渲染的，用委托）
     el.ld.attach.addEventListener('click', async (e) => {
       const it = selectedItem(); if (!it) return;
-      if (e.target.closest('[data-ld-resume]')) {
+      // 「文件操作」里的动作：转发给原有实现，行为与旧按钮完全一致
+      if (e.target.closest('[data-ld-open]')) {
+        openItem(it.key);
+      } else if (e.target.closest('[data-ld-redownload]')) {
+        if (el.ld.fetchPdf) el.ld.fetchPdf.click();
+      } else if (e.target.closest('[data-ld-snapshot]')) {
+        if (el.ld.snapshot) el.ld.snapshot.click();
+      } else if (e.target.closest('[data-ld-pdfmeta]')) {
+        if (el.ld.pdfMeta) el.ld.pdfMeta.click();
+      } else if (e.target.closest('[data-ld-resume]')) {
         // 从上次读到的页继续（页码存在条目 page 字段，openItem 会转成 startPage）
         openItem(it.key, it.page);
       } else if (e.target.closest('[data-ld-reveal]')) {
@@ -6149,7 +6282,8 @@ window.LibraryUI = (function () {
         if (r && r.renamed) {
           await refresh();
           el.ld.status.textContent = '已重命名：' + ((r.changes[0] || {}).newPath || '');
-        } else if (r && r.ok) {
+        } else if (r && r.ok && !(r.errors || []).length) {
+          // renamed=0 且没有错误：要么名字已符合规则，要么没附件 —— 不算异常
           el.ld.status.textContent = '文件名已经是这个规则了，不用改';
         } else {
           window.App && window.App.toast && window.App.toast('重命名失败：' + ((r && r.errors && r.errors[0] && r.errors[0].error) || '未知错误'));
@@ -6422,8 +6556,13 @@ window.LibraryUI = (function () {
     }
     // 增量索引：worker 每建好一个文件广播一次。密集时合并成一次界面刷新，
     // 不然批量导入几十个 PDF 会把设置面板 / 搜索面板刷爆。
-    if (window.pdfBridge && window.pdfBridge.onFtIndexChanged) {
-      window.pdfBridge.onFtIndexChanged((info) => {
+    // 注意订阅位置：preload 把这两个事件挂在 pdfBridge.lib 下（I03）。
+    // 以前写成 pdfBridge.onFtIndexChanged，判断永远为假，整段监听从未注册，
+    // 索引完成后当前查询也不会自动重跑。这里改为统一走 lib 入口，并保留
+    // 返回的取消订阅函数（init 只跑一次，不会重复注册）。
+    const libBridge = window.pdfBridge && window.pdfBridge.lib;
+    if (libBridge && libBridge.onFtIndexChanged) {
+      unsubFtChanged = libBridge.onFtIndexChanged((info) => {
         ftIndexPending = (info && typeof info.pending === 'number') ? info.pending : 0;
         if (!isOpen()) return;
         clearTimeout(ftIndexTimer);
@@ -6436,8 +6575,8 @@ window.LibraryUI = (function () {
     }
     // 整批建完：把「索引中」收掉，并把当前正在看的检索结果重跑一遍——
     // 用户搜的时候文档可能还没进索引，建完不重跑就会一直显示「没有命中」。
-    if (window.pdfBridge && window.pdfBridge.onFtIndexIdle) {
-      window.pdfBridge.onFtIndexIdle(() => {
+    if (libBridge && libBridge.onFtIndexIdle) {
+      unsubFtIdle = libBridge.onFtIndexIdle(() => {
         ftIndexPending = 0;
         if (!isOpen()) return;
         updateFtIndexBadge();
@@ -6454,5 +6593,14 @@ window.LibraryUI = (function () {
 
   // annoMarkdown 暴露出来：回归脚本要能直接验「标注 → 笔记」的排版
   // openNoteEditor 暴露出来：回归要能按 key 直接进编辑器（界面上是从列表卡片点进去的）
-  return { init, show, hide, refresh, isOpen, openDetail, closeDetail, openSettings, annoMarkdown, loadAnnos, openNoteEditor, flushPendingSaves, pendingNoteSaves, _setNoteSaveImpl: setNoteSaveImpl };
+  // 解绑索引事件（组件销毁 / 独立窗口退出时用）。init 只跑一次，正常界面不会重复注册，
+  // 这里保留 preload 返回的取消订阅函数，避免将来重开面板时越绑越多（I03 建议）。
+  function dispose() {
+    if (typeof unsubFtChanged === 'function') unsubFtChanged();
+    if (typeof unsubFtIdle === 'function') unsubFtIdle();
+    unsubFtChanged = null;
+    unsubFtIdle = null;
+  }
+
+  return { init, show, hide, refresh, dispose, isOpen, openDetail, closeDetail, openSettings, annoMarkdown, loadAnnos, openNoteEditor, flushPendingSaves, pendingNoteSaves, _setNoteSaveImpl: setNoteSaveImpl };
 })();

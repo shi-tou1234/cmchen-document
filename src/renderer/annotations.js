@@ -12,6 +12,66 @@ const Anno = window.Anno = (() => {
     stamp: 'ok',           // v36：当前印章预设 id
   };
 
+  // ---- 颜色：色板 + 分工具记忆 ----
+  // 用户最常见的诉求是「荧光笔想换几种颜色」（重点 / 疑问 / 结论各一色），
+  // 而取色器每次都要点开、拖、确认，所以给一排常用色；取色器保留给自定义。
+  const PALETTE = ['#ffd54f', '#a5d6a7', '#90caf9', '#f8bbd0', '#ffcc80', '#ce93d8'];
+  const PALETTE_NAME = {
+    '#ffd54f': '黄', '#a5d6a7': '绿', '#90caf9': '蓝',
+    '#f8bbd0': '粉', '#ffcc80': '橙', '#ce93d8': '紫',
+  };
+  // 分两桶：荧光笔一桶，其余（画笔 / 直线 / 文字…）一桶。
+  // 只分两桶是因为「画红线」和「画蓝框」是同一个意图下的两种颜色，
+  // 按工具各存一份反而每次换工具都要重新调色。
+  const COLOR_BUCKET = {
+    pen: 'ink', line: 'ink', rect: 'ink', arrow: 'ink', text: 'ink', note: 'ink',
+    ellipse: 'ink', triangle: 'ink', smart: 'ink',
+    highlight: 'hl',
+  };
+  const bucketColor = { ink: '#e53935', hl: '#ffd54f' };
+
+  function bucketOf(tool) { return COLOR_BUCKET[tool] || ''; }
+
+  // 把 state.color 同步到取色器和色板的高亮状态（两处控件永远不打架）
+  function syncColor() {
+    const inp = document.getElementById('note-color');
+    if (inp && /^#[0-9a-f]{6}$/i.test(state.color || '')) inp.value = state.color;
+    const box = document.getElementById('note-swatches');
+    if (box) {
+      for (const b of box.querySelectorAll('[data-color]')) {
+        b.classList.toggle('active', String(b.dataset.color).toLowerCase() === String(state.color).toLowerCase());
+      }
+    }
+  }
+
+  function setColor(hex) {
+    const c = String(hex || '').trim();
+    if (!/^#[0-9a-f]{6}$/i.test(c)) return;
+    state.color = c;
+    const b = bucketOf(state.tool);
+    if (b) bucketColor[b] = c;
+    syncColor();
+  }
+
+  function buildSwatches() {
+    const box = document.getElementById('note-swatches');
+    if (!box || box._done) return;
+    box._done = true;
+    for (const c of PALETTE) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'sw';
+      b.dataset.color = c;
+      b.style.background = c;
+      b.title = (PALETTE_NAME[c] || '') + '色';
+      box.appendChild(b);
+    }
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-color]');
+      if (b) setColor(b.dataset.color);
+    });
+  }
+
   // 印章（借鉴 Okular）：点一下就落一个带框的标记，不拖不画。
   // 预设里放的是「审阅时最常盖的那几个」，颜色各自固定 —— 印章的含义靠颜色区分，
   // 跟着取色器变色会让「已阅」变成红色，反而读不出来。
@@ -60,6 +120,64 @@ const Anno = window.Anno = (() => {
       { x: b.x - len * Math.cos(ang - s), y: b.y - len * Math.sin(ang - s) },
       { x: b.x - len * Math.cos(ang + s), y: b.y - len * Math.sin(ang + s) },
     ];
+  }
+
+  // ---- 几何图形的公共骨架 ----
+  // 所有「画出来的形状」都只存 a / b 两个角（和矩形一致），渲染、导出、橡皮擦
+  // 都从这两个角推导出轮廓，新增形状不用再各写一份坐标换算。
+  const GEOM_TOOLS = new Set(['line', 'rect', 'arrow', 'ellipse', 'triangle']);
+
+  function cornersOf(sh) {
+    const x1 = Math.min(sh.a.x, sh.b.x), y1 = Math.min(sh.a.y, sh.b.y);
+    const x2 = Math.max(sh.a.x, sh.b.x), y2 = Math.max(sh.a.y, sh.b.y);
+    return { x1, y1, x2, y2, cx: (x1 + x2) / 2, cy: (y1 + y2) / 2 };
+  }
+  function rectCorners(sh) {
+    const c = cornersOf(sh);
+    return [{ x: c.x1, y: c.y1 }, { x: c.x2, y: c.y1 }, { x: c.x2, y: c.y2 }, { x: c.x1, y: c.y2 }];
+  }
+  function ellipsePoints(sh, n) {
+    const c = cornersOf(sh), rx = Math.max(1, (c.x2 - c.x1) / 2), ry = Math.max(1, (c.y2 - c.y1) / 2);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const t = 2 * Math.PI * i / n;
+      out.push({ x: c.cx + rx * Math.cos(t), y: c.cy + ry * Math.sin(t) });
+    }
+    return out;
+  }
+  function trianglePoints(sh) {
+    const c = cornersOf(sh);
+    return [{ x: c.cx, y: c.y1 }, { x: c.x2, y: c.y2 }, { x: c.x1, y: c.y2 }];
+  }
+
+  // 按住 Shift 时把拖拽框约束成「正」的：
+  // 矩形 / 圆 / 椭圆 → 正方形；三角形 → 高度 = 底边 × √3/2（真正的等边三角）。
+  // 旧版一律套正方形，画出来的是腰比底长的等腰三角形，和帮助里写的「正三角」对不上（B08）。
+  function constrainBox(tool, a, p) {
+    const dx = p.x - a.x, dy = p.y - a.y;
+    if (tool === 'triangle') {
+      const w = Math.max(Math.abs(dx), Math.abs(dy) * 2 / Math.sqrt(3));
+      return {
+        x: a.x + (dx < 0 ? -w : w),
+        y: a.y + (dy < 0 ? -w * Math.sqrt(3) / 2 : w * Math.sqrt(3) / 2),
+      };
+    }
+    const s = Math.max(Math.abs(dx), Math.abs(dy));
+    return { x: a.x + (dx < 0 ? -s : s), y: a.y + (dy < 0 ? -s : s) };
+  }
+  // 一条形状可以拆成几条折线（箭头有分叉的箭头尖，所以不止一条）
+  function shapePolylines(sh) {
+    switch (sh.tool) {
+      case 'line': return [[sh.a, sh.b]];
+      case 'rect': { const p = rectCorners(sh); return [[p[0], p[1], p[2], p[3], p[0]]]; }
+      case 'ellipse': { const p = ellipsePoints(sh, 32); return [p.concat([p[0]])]; }
+      case 'triangle': { const p = trianglePoints(sh); return [[p[0], p[1], p[2], p[0]]]; }
+      case 'arrow': {
+        const h = arrowHead(sh.a, sh.b, sh.width);
+        return [[sh.a, sh.b], [sh.b, h[0]], [sh.b, h[1]]];
+      }
+      default: return [];
+    }
   }
 
   // ---- 渲染整页（从模型重绘，供 commit/undo/eraser 用） ----
@@ -120,12 +238,23 @@ const Anno = window.Anno = (() => {
         break;
       }
       case 'pen':
+      case 'smart':   // 没识别成功的一笔成型会退回手绘；旧数据也能照常显示
         top.appendChild(inkNode(sh)); break;
       case 'line':
         mk('line', Object.assign({ x1: sh.a.x, y1: sh.a.y, x2: sh.b.x, y2: sh.b.y }, stroke)); break;
       case 'rect': {
         const x = Math.min(sh.a.x, sh.b.x), y = Math.min(sh.a.y, sh.b.y);
         mk('rect', Object.assign({ x, y, width: Math.abs(sh.b.x - sh.a.x), height: Math.abs(sh.b.y - sh.a.y) }, stroke)); break;
+      }
+      case 'ellipse': {
+        const c = cornersOf(sh);
+        mk('ellipse', Object.assign({
+          cx: c.cx, cy: c.cy, rx: Math.abs(c.x2 - c.x1) / 2, ry: Math.abs(c.y2 - c.y1) / 2,
+        }, stroke)); break;
+      }
+      case 'triangle': {
+        const t = trianglePoints(sh);
+        mk('polygon', Object.assign({ points: t.map((q) => q.x + ',' + q.y).join(' ') }, stroke)); break;
       }
       case 'arrow': {
         mk('line', Object.assign({ x1: sh.a.x, y1: sh.a.y, x2: sh.b.x, y2: sh.b.y }, stroke));
@@ -271,6 +400,7 @@ const Anno = window.Anno = (() => {
 
   // 结束当前手势。drop=true 时丢弃未完成笔迹，否则提交（用户确实画完了）。
   function releaseGesture(drop) {
+    flushEraseGesture();   // 橡皮：整段手势合成一个撤销点（擦除已写进模型，取消也要提交）
     if (!ctx) { drawing = null; return; }
     const { n } = ctx;
     const keep = drawing && !drop && drawing.tool !== 'eraser';
@@ -309,9 +439,14 @@ const Anno = window.Anno = (() => {
     try { svg.setPointerCapture(e.pointerId); pointerId = e.pointerId; }
     catch (_) { /* 合成事件或失效的 pointerId：不影响，move/up 已在 window 上兜住 */ }
     ctx = { n, svg };
-    if (tool === 'eraser') { drawing = { tool: 'eraser' }; eraseAt(n, p); return; }
+    if (tool === 'eraser') {
+      drawing = { tool: 'eraser', whole: !!e.altKey };
+      beginEraseGesture(n, p, !!e.altKey);
+      return;
+    }
     const sh = { tool, color: state.color, width: state.width };
-    if (tool === 'pen' || tool === 'highlight') sh.pts = [p];
+    // 「一笔成型」先按手绘收集点，抬手时才决定要不要换成标准图形
+    if (tool === 'pen' || tool === 'highlight' || tool === 'smart') sh.pts = [p];
     else { sh.a = p; sh.b = p; }
     drawing = sh;
   }
@@ -320,12 +455,18 @@ const Anno = window.Anno = (() => {
     if (!drawing || !ctx) return;
     const { n, svg } = ctx;
     const p = toUnit(svg, e.clientX, e.clientY);
-    if (drawing.tool === 'eraser') { eraseAt(n, p); return; }
+    if (drawing.tool === 'eraser') { eraseAt(n, p, drawing.whole); return; }
     if (drawing.pts) {
       const last = drawing.pts[drawing.pts.length - 1];
       if (Math.hypot(p.x - last.x, p.y - last.y) < MIN_STEP) return; // 太近的点丢弃
       drawing.pts.push(p);
-    } else drawing.b = p;
+    } else {
+      drawing.b = p;
+      // 按住 Shift 画方 / 正圆 / 正三角：把拖出来的框约束成正方形（三角形按等边算）
+      if (e.shiftKey && GEOM_TOOLS.has(drawing.tool) && drawing.tool !== 'line' && drawing.tool !== 'arrow') {
+        drawing.b = constrainBox(drawing.tool, drawing.a, p);
+      }
+    }
     preview(n, drawing);
   }
 
@@ -379,9 +520,14 @@ const Anno = window.Anno = (() => {
     const stroke = { stroke: sh.color, fill: 'none', 'stroke-width': sh.width, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
     const mk = (tag, attrs) => group.appendChild(el(tag, attrs));
     if (sh.tool === 'highlight') group.appendChild(inkNode(sh, 0.4));
-    else if (sh.tool === 'pen') group.appendChild(inkNode(sh));
+    else if (sh.tool === 'pen' || sh.tool === 'smart') group.appendChild(inkNode(sh));
     else if (sh.tool === 'line') mk('line', Object.assign({ x1: sh.a.x, y1: sh.a.y, x2: sh.b.x, y2: sh.b.y }, stroke));
     else if (sh.tool === 'rect') mk('rect', Object.assign({ x: Math.min(sh.a.x, sh.b.x), y: Math.min(sh.a.y, sh.b.y), width: Math.abs(sh.b.x - sh.a.x), height: Math.abs(sh.b.y - sh.a.y) }, stroke));
+    else if (sh.tool === 'ellipse') {
+      const c = cornersOf(sh);
+      mk('ellipse', Object.assign({ cx: c.cx, cy: c.cy, rx: Math.abs(c.x2 - c.x1) / 2, ry: Math.abs(c.y2 - c.y1) / 2 }, stroke));
+    }
+    else if (sh.tool === 'triangle') mk('polygon', Object.assign({ points: trianglePoints(sh).map((q) => q.x + ',' + q.y).join(' ') }, stroke));
     else if (sh.tool === 'arrow') {
       mk('line', Object.assign({ x1: sh.a.x, y1: sh.a.y, x2: sh.b.x, y2: sh.b.y }, stroke));
       const h = arrowHead(sh.a, sh.b, sh.width);
@@ -391,34 +537,318 @@ const Anno = window.Anno = (() => {
   }
   function clearPreview(n) { removeTemp(); }
 
-  function commit(n, sh) {
-    if (sh.pts) {
-      // 误点判定：没有实际拖动的落点（包围盒极小）不生成标注，避免留下小圆点污迹
-      if (sh.pts.length < 2) return;
-      let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
-      for (const p of sh.pts) {
-        if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
-        if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
-      }
-      if (maxx - minx < 1.5 && maxy - miny < 1.5) return;
-    } else if (!sh.a || (Math.abs(sh.a.x - sh.b.x) < 1 && Math.abs(sh.a.y - sh.b.y) < 1)) {
-      return;
+  // ---- 一笔成型（ink-to-shape） ----
+  // 参考 Drawboard 的 Smart ink、GoodNotes / Notability 的「画完停一下吸附」：
+  // 鼠标没有「停住」这个动作，所以改成抬手即判定；认不出来的原样留成手绘，
+  // 绝不擅自改掉用户画的东西。判定只看几何，不联网、不引入识别库。
+  function bboxOf(pts) {
+    let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    for (const q of pts) {
+      if (q.x < minx) minx = q.x; if (q.x > maxx) maxx = q.x;
+      if (q.y < miny) miny = q.y; if (q.y > maxy) maxy = q.y;
     }
-    sh.id = newAnnoId();      // v8：稳定 id 在形状落地时就定下来
-    shapesOf(n).push(sh);
-    undoStack.push({ type: 'add', n, shape: sh });
+    return { minx, maxx, miny, maxy };
+  }
+  function pathLen(pts) {
+    let n = 0;
+    for (let i = 1; i < pts.length; i++) n += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    return n;
+  }
+  // 按弧长把闭合笔迹重采样成等距点：手写速度不均时，拐角计数才不会被采样密度带偏
+  function resampleClosed(pts, count) {
+    const loop = pts.concat([pts[0]]);
+    const cum = [0];
+    let total = 0;
+    for (let i = 1; i < loop.length; i++) {
+      total += Math.hypot(loop[i].x - loop[i - 1].x, loop[i].y - loop[i - 1].y);
+      cum.push(total);
+    }
+    if (total <= 0) return [pts[0]];
+    const out = [];
+    for (let k = 0; k < count; k++) {
+      const target = total * k / count;
+      let i = 1;
+      while (i < cum.length - 1 && cum[i] < target) i++;
+      const t = (target - cum[i - 1]) / Math.max(1e-6, cum[i] - cum[i - 1]);
+      out.push({
+        x: loop[i - 1].x + (loop[i].x - loop[i - 1].x) * t,
+        y: loop[i - 1].y + (loop[i].y - loop[i - 1].y) * t,
+      });
+    }
+    return out;
+  }
+  // 数「明显拐弯」的地方：圆几乎数不到，三角 3 个，矩形 4 个
+  function cornerCount(points) {
+    const n = points.length, win = Math.max(2, Math.round(n / 16));
+    const turns = [];
+    for (let i = 0; i < n; i++) {
+      const a = points[(i - win + n) % n], b = points[i], c = points[(i + win) % n];
+      const a1 = Math.atan2(b.y - a.y, b.x - a.x), a2 = Math.atan2(c.y - b.y, c.x - b.x);
+      let d = a2 - a1;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      turns.push(Math.abs(d));
+    }
+    const used = new Array(n).fill(false);
+    let count = 0;
+    for (const [v, i] of turns.map((v, i) => [v, i]).sort((x, y) => y[0] - x[0])) {
+      if (v < 0.7) break;                 // 约 40°，滤掉手抖
+      if (used[i]) continue;
+      count++;
+      for (let k = -win; k <= win; k++) used[(i + k + n) % n] = true;
+    }
+    return count;
+  }
+  function geomShape(sh, tool, a, b) {
+    const o = { tool, color: sh.color, width: sh.width, a, b };
+    if (sh.comment) o.comment = sh.comment;
+    return o;
+  }
+  function recognizeStroke(sh) {
+    const pts = sh.pts || [];
+    const keepPen = () => Object.assign({}, sh, { tool: 'pen' });
+    if (pts.length < 6) return keepPen();
+    const box = bboxOf(pts);
+    const w = box.maxx - box.minx, h = box.maxy - box.miny;
+    const diag = Math.hypot(w, h), len = pathLen(pts);
+    if (diag < 18 || len < 20) return keepPen();
+    const first = pts[0], last = pts[pts.length - 1];
+    const closed = Math.hypot(last.x - first.x, last.y - first.y) < diag * 0.30 && len > diag * 1.8;
+    if (!closed) {
+      // 开放笔迹：只认「基本是直的」，其余保留手绘
+      let dev = 0;
+      for (const q of pts) dev = Math.max(dev, distToSeg(q, first, last));
+      if (dev / Math.max(1, len) < 0.05) {
+        return geomShape(sh, 'line', { x: first.x, y: first.y }, { x: last.x, y: last.y });
+      }
+      return keepPen();
+    }
+    const corners = cornerCount(resampleClosed(pts, 48));
+    const a = { x: box.minx, y: box.miny }, b = { x: box.maxx, y: box.maxy };
+    if (corners <= 2) {
+      // 闭合又没尖角 → 圆。以较长边为直径，落在笔画的重心附近
+      const cx = (box.minx + box.maxx) / 2, cy = (box.miny + box.maxy) / 2;
+      const r = Math.max(w, h) / 2;
+      return geomShape(sh, 'ellipse', { x: cx - r, y: cy - r }, { x: cx + r, y: cy + r });
+    }
+    if (corners === 3) return geomShape(sh, 'triangle', a, b);
+    if (corners === 4 || corners === 5) return geomShape(sh, 'rect', a, b);
+    return keepPen();
   }
 
-  // ---- 橡皮：命中测试删除 ----
-  function eraseAt(n, p) {    const arr = shapesOf(n);
-    for (let i = arr.length - 1; i >= 0; i--) {
-      if (hit(arr[i], p)) {
-        const [rm] = arr.splice(i, 1);
-        undoStack.push({ type: 'del', n, shape: rm });
-        renderPage(n);
-        return;
+  function commit(n, sh) {
+    let out = sh;
+    if (sh.tool === 'smart') {
+      out = recognizeStroke(sh);
+      const said = { line: '已拉直为直线', ellipse: '已吸附为标准圆', rect: '已吸附为矩形', triangle: '已吸附为三角形' };
+      if (said[out.tool] && App.toast) App.toast(said[out.tool], 1800);
+    }
+    if (out.pts) {
+      // 误点判定：没有实际拖动的落点（包围盒极小）不生成标注，避免留下小圆点污迹
+      if (out.pts.length < 2) return;
+      const box = bboxOf(out.pts);
+      if (box.maxx - box.minx < 1.5 && box.maxy - box.miny < 1.5) return;
+    } else if (!out.a || (Math.abs(out.a.x - out.b.x) < 1 && Math.abs(out.a.y - out.b.y) < 1)) {
+      return;
+    }
+    out.id = newAnnoId();      // v8：稳定 id 在形状落地时就定下来
+    shapesOf(n).push(out);
+    undoStack.push({ type: 'add', n, shape: out });
+  }
+
+  // ---- 橡皮：局部擦除（默认） / 整条删除（按住 Alt） ----
+  // 参考 Xodo「擦到哪删到哪」与 Drawboard 的 Partial / Whole Erase：
+  // 笔迹和所有几何形状都按「擦头圆与线段的交点」切开，只留下没被碰到的那几段，
+  // 而不是把整条直线 / 整个矩形一起删掉（这是 1.7.0 之前的老行为）。
+  // 擦出来的碎片统一变成笔迹：它们还能继续被局部擦、被撤销，也不会破坏导出。
+  const ERASE_R = 7;   // 单位坐标（=scale-1 视口像素）半径
+
+  function canSplitShape(sh) {
+    if ((sh.tool === 'pen' || sh.tool === 'highlight') && Array.isArray(sh.pts) && sh.pts.length > 1) return true;
+    if (sh.tool === 'mark') return Array.isArray(sh.rects) && sh.rects.length > 0;
+    return GEOM_TOOLS.has(sh.tool) && !!(sh.a && sh.b);
+  }
+
+  /*
+   * 一次橡皮手势 = 一个撤销点。
+   * 旧实现在每次采样命中时压一条撤销记录，一次拖拽横跨三条线就要按三次 Ctrl+Z（B07）。
+   * 现在手势期间只往 eraserGesture.steps 里攒「这一步改了什么」，抬手时合成一个复合记录。
+   * 擦除一旦发生就已经写进模型了，所以 pointercancel / 失焦也照样提交，
+   * 否则用户会得到一个「擦了但撤不回」的半状态。
+   */
+  let eraserGesture = null;
+
+  function pushEraseStep(step) {
+    if (eraserGesture) eraserGesture.steps.push(step);
+    else undoStack.push(step);
+  }
+
+  /*
+   * 单个采样点上的擦除；只改模型，不渲染、不入栈（由外层统一收尾）。
+   *
+   * 以前命中一条就 return，叠在一起的两条笔迹只擦得到上层，下层整条留在那儿（R04）。
+   * 现在先把「这个采样点命中的所有原始形状」拍个快照再逐个处理：
+   *   · 快照里没有本轮刚切出来的碎片，所以不会同一个点反复切自己；
+   *   · 形状被前一步整条删掉时 indexOf 找不到，直接跳过；
+   *   · 从下往上改，splice 之后剩下的索引仍然有效。
+   */
+  function eraseOnce(n, p, whole) {
+    const arr = shapesOf(n);
+    const targets = arr.filter((sh) => sh && hit(sh, p));
+    if (!targets.length) return false;
+    let changed = false;
+    for (const sh of targets) {
+      const i = arr.indexOf(sh);
+      if (i < 0) continue;
+      if (!whole && canSplitShape(sh)) {
+        const parts = sh.tool === 'mark' ? splitMark(sh, p, ERASE_R) : splitShape(sh, p, ERASE_R);
+        if (parts.length === 1 && parts[0] === sh) continue;   // 只是命中框偏宽，实际没擦到
+        arr.splice(i, 1, ...parts);
+        pushEraseStep({ type: 'erase', n, index: i, before: sh, after: parts });
+      } else {
+        arr.splice(i, 1);
+        pushEraseStep({ type: 'del', n, index: i, shape: sh });
+      }
+      changed = true;
+    }
+    return changed;
+  }
+
+  /*
+   * 连续扫掠：指针事件是稀疏的（画快了 / 掉帧时一次移动可能跨几十个单位），
+   * 只在事件点擦会留下中间一段没擦到的「大桥」（B06，实测 140→260 中间 106 单位还在）。
+   * 这里按擦头半径的 0.6 倍插值，把整段路径都过一遍；上限 400 步，避免一次疯狂拖动
+   * 变成上万次判定。
+   */
+  function eraseSweep(n, from, to, whole) {
+    if (!from) return eraseOnce(n, to, whole);
+    const d = Math.hypot(to.x - from.x, to.y - from.y);
+    const stepLen = Math.max(1.5, ERASE_R * 0.6);
+    const steps = Math.min(400, Math.max(1, Math.ceil(d / stepLen)));
+    let changed = false;
+    for (let i = 1; i <= steps; i++) {
+      if (eraseOnce(n, lerpPt(from, to, i / steps), whole)) changed = true;
+    }
+    return changed;
+  }
+
+  function eraseAt(n, p, whole) {
+    if (eraserGesture && eraserGesture.n === n) {
+      const from = eraserGesture.last;
+      eraserGesture.last = p;
+      if (eraseSweep(n, from, p, whole)) renderPage(n);
+      return;
+    }
+    if (eraseSweep(n, null, p, whole)) renderPage(n);
+  }
+
+  function beginEraseGesture(n, p, whole) {
+    eraserGesture = { n, last: p, steps: [] };
+    if (eraseOnce(n, p, whole)) renderPage(n);
+  }
+
+  function flushEraseGesture() {
+    const g = eraserGesture;
+    eraserGesture = null;
+    if (!g || !g.steps.length) return;
+    if (g.steps.length === 1) undoStack.push(g.steps[0]);
+    else undoStack.push({ type: 'compound', n: g.n, steps: g.steps });
+  }
+
+  const lerpPt = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+  // 一条线段被圆擦掉中间一截时，返回圆外的 t 区间（[0,1] 表示整段都留着）
+  function outsideParts(a, b, p, R) {
+    const dx = b.x - a.x, dy = b.y - a.y, fx = a.x - p.x, fy = a.y - p.y;
+    const A = dx * dx + dy * dy;
+    if (A < 1e-9) return (fx * fx + fy * fy > R * R) ? [[0, 1]] : [];
+    const B = 2 * (fx * dx + fy * dy), C = fx * fx + fy * fy - R * R;
+    const D = B * B - 4 * A * C;
+    if (D <= 0) return [[0, 1]];
+    const sq = Math.sqrt(D);
+    const t1 = (-B - sq) / (2 * A), t2 = (-B + sq) / (2 * A);
+    if (t2 <= 0 || t1 >= 1) return [[0, 1]];
+    const lo = Math.max(0, t1), hi = Math.min(1, t2);
+    const out = [];
+    if (lo > 0) out.push([0, lo]);
+    if (hi < 1) out.push([hi, 1]);
+    return out;
+  }
+
+  // 折线按圆切成若干段；相邻且没被擦到的段会重新接成一条，不会碎成一堆小形状
+  function splitPolyline(pts, p, R) {
+    const runs = [];
+    let cur = null, cut = false;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const parts = outsideParts(a, b, p, R);
+      const full = parts.length === 1 && parts[0][0] === 0 && parts[0][1] === 1;
+      if (full) {
+        if (!cur) cur = [a];
+        cur.push(b);
+        continue;
+      }
+      cut = true;
+      for (const [lo, hi] of parts) {
+        const s = lerpPt(a, b, lo), e = lerpPt(a, b, hi);
+        if (Math.hypot(e.x - s.x, e.y - s.y) < 1.2) {          // 碎渣不留，也算一个断口
+          if (cur && cur.length >= 2) runs.push(cur);
+          cur = null;
+          continue;
+        }
+        if (lo <= 1e-6 && cur) cur.push(e);                     // 和上一段连着，别切成两截
+        else {
+          if (cur && cur.length >= 2) runs.push(cur);
+          cur = [s, e];
+        }
+        if (hi < 0.999999) {                                    // 到圆周为止，后面的段另起一条
+          if (cur.length >= 2) runs.push(cur);
+          cur = null;
+        }
       }
     }
+    if (cur && cur.length >= 2) runs.push(cur);
+    return { cut, runs };
+  }
+
+  function splitShape(sh, p, R) {
+    const isInk = sh.tool === 'pen' || sh.tool === 'highlight';
+    const polys = isInk ? [sh.pts] : shapePolylines(sh);
+    const pieces = [];
+    let cut = false;
+    for (const poly of polys) {
+      const r = splitPolyline(poly, p, R);
+      if (r.cut) cut = true;
+      for (const pts of r.runs) if (pts && pts.length >= 2) pieces.push(pts);
+    }
+    if (!cut) return [sh];
+    if (!pieces.length) return [];                 // 整条都被擦光了
+    return pieces.map((pts, k) => {
+      const id = k === 0 ? (sh.id || newAnnoId()) : newAnnoId();
+      if (isInk) return Object.assign({}, sh, k === 0 ? { pts } : { pts, id });
+      const o = { tool: 'pen', color: sh.color, width: sh.width || 2, pts, id };
+      if (sh.comment) o.comment = sh.comment;
+      return o;
+    });
+  }
+
+  // 文字高亮：按横向切一刀，保留左右两截（窄于 1.5 的碎渣不留）
+  function splitMark(sh, p, R) {
+    const out = [];
+    let cut = false;
+    for (const r of sh.rects) {
+      // 纵向没覆盖到这一行就不动它，否则擦一行会顺带削掉上下行
+      if (p.y < r.y - R || p.y > r.y + r.h + R) { out.push(r); continue; }
+      const leftW = Math.max(0, Math.min(r.w, (p.x - R) - r.x));
+      const rightW = Math.max(0, Math.min(r.w, (r.x + r.w) - (p.x + R)));
+      if (leftW + rightW >= r.w - 0.5) { out.push(r); continue; }   // 没切到
+      cut = true;
+      if (leftW >= 1.5) out.push({ x: r.x, y: r.y, w: leftW, h: r.h });
+      if (rightW >= 1.5) out.push({ x: r.x + r.w - rightW, y: r.y, w: rightW, h: r.h });
+    }
+    if (!cut) return [sh];
+    if (!out.length) return [];                 // 整条都被擦掉了
+    return [Object.assign({}, sh, { rects: out })];
   }
 
   function hit(sh, p) {
@@ -434,14 +864,15 @@ const Anno = window.Anno = (() => {
       const b = stampBox(sh);
       return p.x >= b.x - r && p.x <= b.x + b.w + r && p.y >= b.y - r && p.y <= b.y + b.h + r;
     }
-    if (sh.tool === 'rect') {
-      const x1 = Math.min(sh.a.x, sh.b.x) - r, y1 = Math.min(sh.a.y, sh.b.y) - r;
-      const x2 = Math.max(sh.a.x, sh.b.x) + r, y2 = Math.max(sh.a.y, sh.b.y) + r;
-      // 命中边框附近：点在框内但在内框外
-      const ix1 = x1 + 2 * r, iy1 = y1 + 2 * r, ix2 = x2 - 2 * r, iy2 = y2 - 2 * r;
-      const inside = p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;
-      const inner = p.x > ix1 && p.x < ix2 && p.y > iy1 && p.y < iy2;
-      return inside && !inner;
+    // 几何形状按真实轮廓命中：矩形只在边框附近算（框内空白不算），
+    // 箭头连两个箭头尖也算，圆 / 三角按折线近似算 —— 橡皮才能只擦到经过的那一段。
+    if (GEOM_TOOLS.has(sh.tool)) {
+      for (const poly of shapePolylines(sh)) {
+        for (let i = 0; i < poly.length - 1; i++) {
+          if (distToSeg(p, poly[i], poly[i + 1]) < r) return true;
+        }
+      }
+      return false;
     }
     if (sh.tool === 'mark') {
       for (const q of (sh.rects || [])) {
@@ -490,8 +921,9 @@ const Anno = window.Anno = (() => {
     ed.value = '';
     ed.hidden = false;
     // v9：输入框和最终排出来的文字用同一套字号/行高/字体，并且跟着页面缩放 ——
-    // 以前输入框固定 13px、缩放 150% 时最终文字大一圈，用户看到的就是「输入时和正式的不一致」
-    const zs = App.state.scale || 1;
+    // 以前输入框固定 13px、缩放 150% 时最终文字大一圈，用户看到的就是「输入时和正式的不一致」。
+    // 双页独立缩放时按「这一页」的缩放算，不能用全局 scale。
+    const zs = (App.pageScale ? App.pageScale(n) : (App.state.scale || 1)) || 1;
     const zsize = (state.textHeight || 14) * zs;
     ed.style.font = zsize + 'px/1.25 "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", sans-serif';
     ed.style.width = Math.max(170, Math.round(190 * zs)) + 'px';
@@ -553,6 +985,7 @@ const Anno = window.Anno = (() => {
   // （clear 类操作会把上一份文档的形状整批写进新文档，并被自动保存到新文档的标注文件）。
   function reset() {
     undoStack.length = 0;
+    eraserGesture = null;
   }
   function undo() {
     const op = undoStack.pop();
@@ -561,10 +994,32 @@ const Anno = window.Anno = (() => {
     if (op.type === 'add') {
       const i = arr.indexOf(op.shape); if (i >= 0) arr.splice(i, 1);
     } else if (op.type === 'del') {
-      arr.push(op.shape);
+      // 放回原来的位置：擦掉中间一条再撤销，不该把它挪到末尾
+      arr.splice(Math.min(op.index == null ? arr.length : op.index, arr.length), 0, op.shape);
     } else if (op.type === 'edit') {
       // 改写便签/文字：撤销回原来的内容
       op.shape.text = op.before;
+    } else if (op.type === 'erase') {
+      // 局部擦除：先把擦出来的碎片摘掉，再把原形状放回它原来的位置
+      for (const piece of (op.after || [])) {
+        const i = arr.indexOf(piece);
+        if (i >= 0) arr.splice(i, 1);
+      }
+      arr.splice(Math.min(op.index, arr.length), 0, op.before);
+    } else if (op.type === 'compound') {
+      // 逐步倒放（后发生的先撤），这样中途产生的碎片 / 索引都能对上
+      for (let i = op.steps.length - 1; i >= 0; i--) {
+        const st = op.steps[i];
+        if (st.type === 'erase') {
+          for (const piece of (st.after || [])) {
+            const k = arr.indexOf(piece);
+            if (k >= 0) arr.splice(k, 1);
+          }
+          arr.splice(Math.min(st.index, arr.length), 0, st.before);
+        } else if (st.type === 'del') {
+          arr.splice(Math.min(st.index == null ? arr.length : st.index, arr.length), 0, st.shape);
+        }
+      }
     } else if (op.type === 'clear') {
       App.state.annos.set(op.n, op.shapes.slice());
     }
@@ -613,13 +1068,35 @@ const Anno = window.Anno = (() => {
   }
 
   // ---- 工具切换 + 「更多」浮层 ----
+  // 绘制参数只在真要落笔时出现：浏览 / 看图 / 橡皮 / 印章不必常年摆着六个色点。
+  // 六色与分工具记忆都还在，只是收进了「用得上的时候」。
+  const COLOR_TOOLS = new Set(['pen', 'highlight', 'line', 'rect', 'arrow', 'text', 'note', 'ellipse', 'triangle', 'smart']);
+  const WIDTH_TOOLS = new Set(['pen', 'highlight', 'line', 'rect', 'arrow', 'ellipse', 'triangle', 'smart']);
+  function syncParams() {
+    const box = document.getElementById('note-params');
+    if (box) box.hidden = !COLOR_TOOLS.has(state.tool);
+    const w = document.getElementById('note-width-wrap');
+    if (w) w.hidden = !WIDTH_TOOLS.has(state.tool);
+  }
+
   function setTool(t) {
+    // 切工具时把当前颜色存回旧工具那一桶、取出新工具那一桶：
+    // 于是「荧光笔上次用的绿」和「画笔上次用的红」互不干扰。
+    const prevBucket = bucketOf(state.tool);
+    if (prevBucket) bucketColor[prevBucket] = state.color;
     state.tool = t;
-    document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image', 'tool-stamp');
+    const nextBucket = bucketOf(t);
+    if (nextBucket) state.color = bucketColor[nextBucket];
+    document.body.classList.remove('tool-select', 'tool-pen', 'tool-highlight', 'tool-line', 'tool-rect', 'tool-arrow', 'tool-text', 'tool-eraser', 'tool-note', 'tool-image', 'tool-stamp',
+      'tool-ellipse', 'tool-triangle', 'tool-smart');
     document.body.classList.add('tool-' + t);
     for (const b of document.querySelectorAll('.ntool')) b.classList.toggle('active', b.dataset.tool === t);
     const bar = document.getElementById('stamp-bar');
     if (bar) bar.hidden = t !== 'stamp';
+    const hint = document.getElementById('smart-hint');
+    if (hint) hint.hidden = t !== 'smart';
+    syncColor();
+    syncParams();
     if (t === 'image' && !hintShown) {
       // 同一条提示只弹一次，不然每次按 V 都闪一下
       hintShown = true;
@@ -627,44 +1104,15 @@ const Anno = window.Anno = (() => {
     }
   }
 
-  // 「更多」浮层：选完工具**不自动收起**（可以连着点几个），点外部或 Esc 才关
-  function setPop(open) {
-    const pop = document.getElementById('more-pop');
-    const btn = document.getElementById('more-btn');
-    if (!pop || !btn) return;
-    pop.hidden = !open;
-    btn.classList.toggle('open', open);
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
-  function popOpen() {
-    const pop = document.getElementById('more-pop');
-    return !!(pop && !pop.hidden);
-  }
-
+  // 所有工具都在一排里：点一下就切，没有需要先展开的浮层
   function init() {
     bindGlobalPointer();
-    // 工具按钮：点一下就切（浮层里的也不会收起浮层）
     for (const b of document.querySelectorAll('.ntool')) {
       b.addEventListener('click', () => setTool(b.dataset.tool));
     }
-    // 「更多」开关
-    const moreBtn = document.getElementById('more-btn');
-    if (moreBtn) moreBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const pop = document.getElementById('more-pop');
-      setPop(pop ? pop.hidden : false);
-    });
-    // 点浮层外部 / 按 Esc 关闭
-    document.addEventListener('click', (e) => {
-      if (!popOpen()) return;
-      const pop = document.getElementById('more-pop');
-      const wrap = pop.closest('.dd-wrap');
-      if (wrap && !wrap.contains(e.target)) setPop(false);
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && popOpen()) { e.preventDefault(); setPop(false); }
-    });
-    document.getElementById('note-color').addEventListener('input', (e) => { state.color = e.target.value; });
+    document.getElementById('note-color').addEventListener('input', (e) => setColor(e.target.value));
+    buildSwatches();
+    syncColor();
     document.getElementById('note-width').addEventListener('change', (e) => { state.width = parseFloat(e.target.value) || 3; });
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-clear-page').addEventListener('click', clearPage);
@@ -682,5 +1130,12 @@ const Anno = window.Anno = (() => {
     setTool('select');
   }
 
-  return { init, attachPage, setTool, undo, clearPage, renderPage, addShape, updateShape, reset, newAnnoId, get state() { return state; } };
+  return {
+    init, attachPage, setTool, undo, clearPage, renderPage, addShape, updateShape, reset,
+    newAnnoId, setColor, PALETTE, recognizeStroke,
+    // 导出要按「真实的三个顶点」逐点换算，不能再从包围框重建（B05）
+    trianglePoints,
+    shapePolylines,
+    get state() { return state; },
+  };
 })();

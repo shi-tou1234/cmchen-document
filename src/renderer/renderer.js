@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 const TOOL_KEYS = {
   v: 'image', p: 'pen', h: 'highlight', l: 'line',
   r: 'rect', a: 'arrow', t: 'text', n: 'note', e: 'eraser',
-  s: 'stamp',   // v36：印章（S = Stamp）
+  o: 'ellipse', d: 'triangle', s: 'smart',   // 圆 / 三角 / 一笔成型；印章已从工具栏退役
 };
 
 const App = window.App = {
@@ -30,7 +30,9 @@ const App = window.App = {
     unitMaxW: 1, unitMaxH: 1,
     fileName: '',
     filePath: '',
-    viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页
+    viewMode: 'scroll',    // v22：scroll 连续滚动 / page 单页翻页 / spread 双页对开
+    perPageZoom: false,    // 双页模式下两页各自缩放（只缩放鼠标所指的那一页）
+    pageZoom: new Map(),   // pageNum -> 页级缩放倍数（仅对开 + perPageZoom 时有效）
     rotation: 0,           // v34：整篇文档的视图旋转 0/90/180/270（只改显示，不改原文件）
     split: false,          // v34：分屏参考视图（用户偏好，富文档时自动隐藏）
     refPage: 1,            // v34：参考视图页码
@@ -42,6 +44,7 @@ const App = window.App = {
     rendered: new Map(), // pageNum -> bool
     visible: new Set(),  // 当前视口内的页
     textCache: new Map(), // pageNum -> TextItem[]
+    styleCache: new Map(), // pageNum -> textContent.styles（取 ascent / fontFamily 用）
     search: { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 }, // rects: pageNum -> [{x,y,w,h}]
     sj: { byPage: new Map(), builtTo: 0 },  // 智能跳转：按页存的跨页行缓存 page → [{page,text,x,y,w,h,idx}]
     bookmarks: [],   // 用户书签 [{page, at, label}]，存标注 sidecar
@@ -111,6 +114,28 @@ function clientToUnit(pageEl, clientX, clientY) {
 App.clientToUnit = clientToUnit;
 App.unitToSlotOffset = (pageEl, ux, uy) => unitToSlotOffset(pageEl, ux, uy);
 
+// ---------- 页级缩放（双页各自放大） ----------
+// 全局 scale 是「按窗口算出来的基准」，pageZoom 是「这一页在基准上再乘多少」。
+// 单页 / 连续模式一律当 1，只有「双页对开 + 独立缩放」时才会出现非 1 的值。
+function pageZoomOf(n) {
+  const z = App.state.pageZoom.get(n);
+  return Number.isFinite(z) && z > 0 ? z : 1;
+}
+function pageScale(n) { return (App.state.scale || 1) * pageZoomOf(n); }
+App.pageScale = pageScale;
+App.pageZoomOf = pageZoomOf;
+
+function perPageZoomActive() {
+  const s = App.state;
+  return !!s.perPageZoom && s.mode !== 'rich' && effectiveViewMode() === 'spread';
+}
+App.perPageZoomActive = perPageZoomActive;
+
+function clearPageZoom() {
+  if (App.state.pageZoom.size) App.state.pageZoom.clear();
+}
+App.clearPageZoom = clearPageZoom;
+
 function computeScale() {
   const s = App.state;
   if (!hasDoc(s)) return 1;
@@ -141,29 +166,36 @@ function applyLayout() {
     App.els.zoom.textContent = Math.round(s.scale * 100) + '%';
     return;
   }
+  const mode = effectiveViewMode();
   for (let n = 1; n <= s.numPages; n++) {
     const el = App.pageEl(n);
     if (!el) continue;
     const u = el._unit;
     const d = effDims(u.w, u.h, s.rotation);
-    const w = Math.round(d.w * s.scale), h = Math.round(d.h * s.scale);
+    // 页级缩放：双页独立缩放时两页可以各是各的大小，所以尺寸必须逐页算
+    const ps = pageScale(n);
+    const w = Math.round(d.w * ps), h = Math.round(d.h * ps);
     // 外层 .page = 旋转后的布局槽；内层 .page-rot = 未旋转的页面本体
     el.style.width = w + 'px';
     el.style.height = h + 'px';
     const rotEl = el.querySelector('.page-rot');
     if (rotEl) {
-      rotEl.style.width = Math.round(u.w * s.scale) + 'px';
-      rotEl.style.height = Math.round(u.h * s.scale) + 'px';
+      rotEl.style.width = Math.round(u.w * ps) + 'px';
+      rotEl.style.height = Math.round(u.h * ps) + 'px';
       rotEl.style.transform = 'translate(-50%, -50%) rotate(' + normRot(s.rotation) + 'deg)';
     }
     const base = el.querySelector('.anno-base'), anno = el.querySelector('.anno');
-    for (const svg of [base, anno]) { if (svg) { svg.style.width = Math.round(u.w * s.scale) + 'px'; svg.style.height = Math.round(u.h * s.scale) + 'px'; } }
+    for (const svg of [base, anno]) { if (svg) { svg.style.width = Math.round(u.w * ps) + 'px'; svg.style.height = Math.round(u.h * ps) + 'px'; } }
     // 文本层 / 搜索高亮层 / 朗读高亮层与 SVG 同策略：内部用单位坐标，外层用 scale 拉伸
     for (const cls of ['.textlayer', '.hl-layer', '.speech-layer', '.sj-layer']) {
       const ly = el.querySelector(cls);
-      if (ly) { ly.style.width = u.w + 'px'; ly.style.height = u.h + 'px'; ly.style.transform = 'scale(' + s.scale + ')'; }
+      if (ly) { ly.style.width = u.w + 'px'; ly.style.height = u.h + 'px'; ly.style.transform = 'scale(' + ps + ')'; }
     }
-    if (s.rendered.get(n)) renderPageNum(n);
+    // 单页 / 对开模式只重渲染「正在显示」的页：给几百个隐藏页重排位图既慢又没意义
+    // （隐藏页真要显示时由 scrollToPage 的 ensurePageRendered 按需补渲染）
+    if (s.rendered.get(n) && (mode === 'scroll' || el.classList.contains('is-current'))) {
+      if (Math.abs((el._renderScale || 0) - ps) > 1e-4) renderPageNum(n);
+    }
   }
   App.els.zoom.textContent = Math.round(s.scale * 100) + '%';
 }
@@ -179,7 +211,8 @@ function renderPageNum(n) {
   const el = App.pageEl(n);
   if (!el || !el._pdfPage) return;
   const dpr = window.devicePixelRatio || 1;
-  const viewport = el._pdfPage.getViewport({ scale: s.scale });
+  const ps = pageScale(n);
+  const viewport = el._pdfPage.getViewport({ scale: ps });
   const canvas = el.querySelector('canvas');
   canvas.width = Math.floor(viewport.width * dpr);
   canvas.height = Math.floor(viewport.height * dpr);
@@ -200,6 +233,7 @@ function renderPageNum(n) {
     el._task = null;
     activeRenders.delete(n);
     s.rendered.set(n, true);
+    el._renderScale = ps;   // 记下这张位图是按多大的缩放画的，缩放变了要重画
     buildTextLayer(n);   // 首次渲染后铺设可选中文本层（幂等）
     paintSearchHl(n);    // 若该页有搜索命中，画高亮
   }).catch((err) => {
@@ -218,7 +252,17 @@ function freePage(n) {
   activeRenders.delete(n);
   const canvas = el.querySelector('canvas');
   if (canvas) { canvas.width = 0; canvas.height = 0; }
+  el._renderScale = 0;
   App.state.rendered.set(n, false);
+}
+
+// 「这一页现在以正确尺寸渲染好了吗」：位图被释放过、或缩放变了（页级缩放各不相同），
+// 都要补一次。只看 rendered 标志会留下「切回双页时这一页还是旧的清晰度」的空白/糊字。
+function ensurePageRendered(n) {
+  const el = App.pageEl(n);
+  if (!el || !el._pdfPage) return;
+  const ps = pageScale(n);
+  if (!App.state.rendered.get(n) || Math.abs((el._renderScale || 0) - ps) > 1e-4) renderPageNum(n);
 }
 
 // 两个观察器分工明确，不能混用：
@@ -475,9 +519,11 @@ async function loadPdf(data, fileName, smoke, meta) {
     s.citation = m.citation || '';
     s.annos = new Map();
     s.rendered = new Map();
+    s.pageZoom = new Map();   // 页级缩放属于上一份文档，不能跨文档
     activeRenders.clear();   // 上一份文档的渲染任务随 pdfDoc 作废，别留在回收名单里
     s.visible = new Set();
     s.textCache = new Map();
+    s.styleCache = new Map();
     s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
     s.sj = { byPage: new Map(), builtTo: 0 };   // 智能跳转行缓存随文档作废
     s.bookmarks = [];
@@ -524,6 +570,8 @@ async function loadPdf(data, fileName, smoke, meta) {
     if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide(); // 进入阅读，收起库覆盖层
+    updateViewModeUI();  // 阅读方式按钮的激活态 / 双页独立缩放是否可用
+    updateToLibButton(); // 这份文档在不在库里
     startAnnoRestore(s.filePath);   // 恢复该文件上次保存的标注（异步，不阻塞首屏）
     // v29：PDF 自带的批注不自动写入，只提示一次；用户点「导入 PDF 批注」才合并
     if (window.NativeAnnos) NativeAnnos.hint().catch(() => {});
@@ -604,9 +652,11 @@ function loadRichDoc(payload) {
     s.citation = payload.citation || '';
     s.annos = new Map();
     s.rendered = new Map();
+    s.pageZoom = new Map();
     activeRenders.clear();   // 上一份文档的渲染任务随 pdfDoc 作废，别留在回收名单里
     s.visible = new Set();
     s.textCache = new Map();
+    s.styleCache = new Map();
     s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
     searchSeq++;
     pageImageCache = new Map();
@@ -658,6 +708,8 @@ function loadRichDoc(payload) {
     if (start > 1) toast(`已回到上次阅读的第 ${start} 页`);
     if (start > 1 && window.pdfBridge.reportPage) window.pdfBridge.reportPage(s.filePath, start);
     if (window.LibraryUI) window.LibraryUI.hide();
+    updateViewModeUI();  // 富文档没有对开：把双页按钮弱化、藏起独立缩放
+    updateToLibButton();
     startAnnoRestore(s.filePath);   // 富文档的标注也按文件路径存取，和 PDF 一致
     refreshSidebar();
     syncActiveTab({ page: start, fileName: s.fileName, filePath: s.filePath });
@@ -778,6 +830,12 @@ function closeDocument() {
   // 标签已经没了，正文却重新出现（R-v1.6d-03）。代际一加，所有在途的加载都会在
   // 下一个 await 检查点自行退出。
   loadSeq++;
+  // 关掉文档：会话一并注销，之后的在途请求不再被解析到任何路径上；
+  // 凭据也一起清空，免得「已经关掉的文档」还能被当成当前文档放行保存。
+  dropAnnoSession(annoRestore);
+  dropAnnoSession(annoDoc);
+  annoDoc = { path: '', gen: -1, sid: '', paths: null };
+  annoRestore = { gen: -1, path: '', sid: '', paths: null, promise: null };
   s.annoState = { status: 'unknown', annoPath: '', error: '' };
   s.annoBrokenNotified = false;
   if (s.pdfDoc) { try { s.pdfDoc.destroy(); } catch (_) {} }
@@ -795,7 +853,7 @@ function closeDocument() {
   s.mode = 'pdf'; s.richPages = null; s.itemKey = ''; s.item = null; s.citation = '';
   s.fileName = ''; s.filePath = ''; s.startPage = 1;
   s.rotation = 0; s.refPage = 1;
-  s.annos = new Map(); s.rendered = new Map(); activeRenders.clear(); s.visible = new Set(); s.textCache = new Map();
+  s.annos = new Map(); s.rendered = new Map(); s.pageZoom = new Map(); activeRenders.clear(); s.visible = new Set(); s.textCache = new Map(); s.styleCache = new Map();
   s.search = { query: '', results: [], rects: new Map(), hits: [], hitIndex: -1 };
   if (App.els.pages) { App.els.pages.innerHTML = ''; App.els.pages.hidden = false; }
   const rv = $('doc-view');
@@ -818,6 +876,8 @@ function closeDocument() {
   if (App.els.fileName) App.els.fileName.textContent = '';
   if (App.els.zoom) App.els.zoom.textContent = '—';
   syncSplitPane({ relayout: false });   // 没有文档了，参考视图收起（偏好保留）
+  updateViewModeUI();
+  updateToLibButton();
   setStatus('就绪');
   renderTabs();
   if (window.LibraryUI && window.pdfBridge.isApp) window.LibraryUI.show();
@@ -999,12 +1059,20 @@ async function getTextContent(n) {
   const tc = await pg.getTextContent();
   const items = (tc && tc.items) || [];
   s.textCache.set(n, items);
+  // styles 里带 ascent（字体上升高度，比例）与 fontFamily：文本层要按它摆盒子，不然盒子会和字错位
+  if (s.styleCache) s.styleCache.set(n, (tc && tc.styles) || {});
   return items;
 }
 
 // 铺设可选中文本：span 用单位坐标定位在 .textlayer 里（层本身被 scale 拉伸），
 // color 透明 → 平时不挡视觉，浏览器原生选中/Ctrl+C 直接可用。
 // 返回 Promise：朗读需要等文本层就绪后按 span 建 Range 做句级高亮。
+//
+// 几何必须和 PDF 里真实字宽/基线对齐（v36）：
+// 只设 font-size 时，回退字体的字宽和 PDF 记录的 advance 能差 10% 以上——span 的盒子
+// 要么探出正文，要么只盖住一行的前半段。鼠标按在没有盒子的那半行上，浏览器就当成
+// 「按在空白处」，把选区锚点丢到文档开头，于是拖选变成「从第一行一路选到光标处」。
+// 所以：宽度用 item.width 反算 scaleX 贴齐，顶边用字体 ascent 摆基线，行高锁 1。
 function buildTextLayer(n) {
   const el = App.pageEl(n);
   if (!el || !el._pdfPage) return Promise.resolve();
@@ -1017,24 +1085,43 @@ function buildTextLayer(n) {
       const vp = el._pdfPage.getViewport({ scale: 1 });
       let items;
       try { items = await getTextContent(n); } catch (_) { items = []; }
+      const styles = (App.state.styleCache && App.state.styleCache.get(n)) || {};
       const frag = document.createDocumentFragment();
+      const made = [];   // 插进 DOM 之后才量得出自然宽度，先攒着
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
         if (!item || !item.str) continue;
         const tx = window.pdfjsLib.Util.transform(vp.transform, item.transform);
         const fh = Math.hypot(tx[2], tx[3]);
         if (!fh || !isFinite(fh)) continue;
+        const st = styles[item.fontName];
         const span = document.createElement('span');
         span.textContent = item.str;
         span.dataset.item = String(i);   // 朗读按 item 序号回查 span
+        if (st && st.fontFamily) span.style.fontFamily = st.fontFamily;
         span.style.left = tx[4] + 'px';
-        span.style.top = (tx[5] - fh) + 'px';
+        // 基线 → 盒子顶：有 ascent 就用字体的（pdf.js 给的是比例，0.72 这种；
+        // 个别版本给千分比 718，两种都认），拿不到按 0.8 估
+        let ascent = 0.8;
+        if (st && isFinite(st.ascent) && st.ascent > 0) ascent = st.ascent > 1.5 ? st.ascent / 1000 : st.ascent;
+        span.style.top = (tx[5] - fh * ascent) + 'px';
         span.style.fontSize = fh + 'px';
-        const ang = Math.atan2(tx[1], tx[0]);
-        if (Math.abs(ang) > 0.001) span.style.transform = 'rotate(' + ang + 'rad)';
+        span._pdfW = Math.max(0, +item.width || 0);       // PDF 记录的字宽（单位坐标）
+        span._ang = Math.atan2(tx[1], tx[0]) || 0;
         frag.appendChild(span);
+        made.push(span);
       }
       host.appendChild(frag);
+      for (const span of made) {
+        const target = span._pdfW;
+        const nat = span.offsetWidth;
+        const sx = target > 0.5 && nat > 0.5 ? target / nat : 1;
+        const ang = span._ang;
+        const parts = [];
+        if (Math.abs(ang) > 0.001) parts.push('rotate(' + ang + 'rad)');
+        if (Math.abs(sx - 1) > 0.002) parts.push('scaleX(' + sx.toFixed(4) + ')');
+        if (parts.length) span.style.transform = parts.join(' ');
+      }
     } catch (_) { /* 文本层失败不应阻断渲染；朗读会把它当无文字处理 */ }
   })();
   return el._textPromise;
@@ -1844,7 +1931,9 @@ function refiRender() {
   const list = $('refi-list');
   if (!list) return;
   if (!refi.entries.length) {
-    list.innerHTML = '<div class="refi-empty">没认出条目。这张 PDF 的参考文献可能是图片（扫描版），或者标题不叫 References。</div>';
+    list.innerHTML = '<div class="refi-empty">没认出条目。可能是：① 参考文献是图片（扫描版 PDF，没有文字层）；'
+      + '② 标题不叫 References / 参考文献（程序认不出从哪开始）；'
+      + '③ 文末确实没有参考文献表。</div>';
   } else {
     list.innerHTML = refi.entries.map(refiRowHtml).join('');
   }
@@ -1860,10 +1949,15 @@ function refiRender() {
   }
 }
 
-function refiDefaultPick(entries) {
-  // 默认只勾「库里没有、并且认得出」的：既不会重复入库，也不会把切错的残句塞进去
+function refiDefaultPick(entries, confident) {
+  // 默认只勾「库里没有、并且认得出」的：既不会重复入库，也不会把切错的残句塞进去。
+  // 标题行没找到时（confident=false）整节的可信度不够，只勾「有 DOI / arXiv」的那些——
+  // 没有编号可核对的条目让用户自己挑，别替他做主。
   for (const e of entries) {
-    if (e.status === 'new' && e.confidence !== 'weak') refi.picked.add(e.no);
+    if (e.status !== 'new') continue;
+    if (e.confidence === 'weak') continue;
+    if (!confident && e.confidence !== 'id' && e.confidence !== 'meta') continue;
+    refi.picked.add(e.no);
   }
 }
 
@@ -1908,9 +2002,14 @@ async function openRefImport() {
   refi.entries = r.entries || [];
   refi.info = r;
   refi.picked = new Set();
-  refiDefaultPick(refi.entries);
+  const confident = !!(scan.found || r.heading);
+  refiDefaultPick(refi.entries, confident);
   const hint = [];
-  if (!scan.found && !r.heading) hint.push('没找到「参考文献」标题，这是最后几页的解析结果，请逐条核对。');
+  if (!confident) {
+    hint.push('没找到「参考文献 / References」标题，这是文末几页的解析结果，'
+      + '只勾了带 DOI / arXiv 的条目，其余请逐条核对。');
+  }
+  if (r.dropped) hint.push('已略过 ' + r.dropped + ' 段不像参考文献的文字。');
   if (r.truncated) hint.push('条目太多，只解析了前 ' + refi.entries.length + ' 条。');
   refiSetStatus((hint.length ? hint.join(' ') + ' ' : '') + '（第 ' + scan.page + ' 页起）', hint.length ? 'refi-warn' : '');
   refiRender();
@@ -1957,6 +2056,107 @@ async function refiGo() {
     if (el) el.title = r.failures.map((f) => (f.title || '') + ' → ' + (f.doi || '')).join('\n');
   }
 }
+
+// ---------- 当前文档直接入库 ----------
+/*
+ * 场景：在阅读器里读一篇临时打开的 PDF，想把它收进库里，原来的路径是
+ * 「回文献库 → 添加文档 → 在文件对话框里再找一遍这个文件」——同一份文件找了两次。
+ * 现在工具栏一个按钮就够：把当前路径交给主进程走同一条导入链（识别 DOI / 题录、查重）。
+ */
+function updateToLibButton() {
+  const b = $('btn-to-lib');
+  if (!b) return;
+  const s = App.state;
+  const hasFile = !!s.filePath;
+  const inLib = !!s.itemKey;
+  b.dataset.state = inLib ? 'in' : (hasFile ? 'out' : 'none');
+  b.classList.toggle('is-disabled', !hasFile);
+  // 提示要短：这是「选一种导入方式」的入口，具体做什么在弹窗里说
+  b.title = !hasFile ? '导入文献库（先打开文档）'
+    : inLib ? '已在文献库中，点开条目'
+      : '导入文献库';
+}
+App.updateToLibButton = updateToLibButton;
+
+// ---------- 导入文献库（阅读界面一个入口，两种来路） ----------
+// 之前「存入文献库」是纯图标、藏在顶栏里，「参考文献表批量入库」又埋在文献库的
+// 添加菜单里，读着论文想顺手收进来得来回找。现在一个按钮给两张选择卡，
+// 点进去再决定：收当前这篇，还是把它的参考文献一批收进来。
+const importLib = { open: false, opener: null };
+
+function openImportLib() {
+  const box = $('import-lib-modal');
+  if (!box || importLib.open) return;
+  importLib.open = true;
+  importLib.opener = document.activeElement;
+  box.hidden = false;
+  const btn = $('btn-to-lib');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  setTimeout(() => { const first = $('import-lib-current'); if (first) first.focus(); }, 30);
+}
+function closeImportLib() {
+  const box = $('import-lib-modal');
+  if (!box || !importLib.open) return;
+  importLib.open = false;
+  box.hidden = true;
+  const btn = $('btn-to-lib');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  const back = importLib.opener;
+  importLib.opener = null;
+  if (back && back.focus) { try { back.focus(); } catch (_) {} }
+}
+App.openImportLib = openImportLib;
+
+function initImportLib() {
+  const box = $('import-lib-modal');
+  if (!box) return;
+  $('import-lib-x') && $('import-lib-x').addEventListener('click', closeImportLib);
+  box.addEventListener('click', (e) => { if (e.target === box) closeImportLib(); });
+  const current = $('import-lib-current');
+  if (current) current.addEventListener('click', () => {
+    closeImportLib();
+    // 已在库里就直接打开条目，不用再选一次
+    saveCurrentToLibrary();
+  });
+  const refs = $('import-lib-refs');
+  if (refs) refs.addEventListener('click', () => {
+    closeImportLib();
+    openRefImport();          // 下面会自己检查「是不是 PDF / 有没有文字层」
+  });
+}
+
+async function saveCurrentToLibrary() {
+  const s = App.state;
+  if (s.itemKey) {
+    // 已在库中：直接打开条目详情，别让人自己去库里翻
+    if (window.LibraryUI) {
+      window.LibraryUI.show();
+      if (LibraryUI.openDetail) LibraryUI.openDetail(s.itemKey);
+    }
+    return;
+  }
+  if (!s.filePath) { toast('这份文档还没保存到本地，先另存再入库', 3000); return; }
+  if (!window.pdfBridge || !pdfBridge.lib || !pdfBridge.lib.addPdf) { toast('当前环境不支持入库'); return; }
+  const btn = $('btn-to-lib');
+  if (btn) btn.classList.add('busy');
+  let r = null;
+  try { r = await window.pdfBridge.lib.addPdf(s.filePath, { dedupe: true }); }
+  catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+  finally { if (btn) btn.classList.remove('busy'); }
+  if (!r || !r.ok) { toast('入库失败：' + ((r && r.error) || '未知错误'), 3200); return; }
+  const item = r.item || null;
+  if (item) { s.itemKey = item.key; s.item = item; }
+  // 题录识别结果直接写进状态栏：用户能立刻看出「识别到了什么」，而不是只看到「已入库」
+  const title = (item && item.title) || s.fileName || '这份文档';
+  const bits = [r.deduped ? '这份文档已在文献库中' : '已存入文献库'];
+  if (r.identified && r.identified.source) bits.push('题录来自 ' + r.identified.source);
+  else if (r.identifyError) bits.push('题录未补全（' + r.identifyError + '）');
+  toast(bits.join('，') + '：' + title, 3400);
+  setStatus(bits.join('，') + '：' + title);
+  updateToLibButton();
+  if (window.LibraryUI && LibraryUI.refresh) { try { await LibraryUI.refresh(); } catch (_) {} }
+}
+App.saveCurrentToLibrary = saveCurrentToLibrary;
 
 // ---------- 侧栏：目录 / 缩略图 / 批注 ----------
 function initSidebar() {
@@ -2017,13 +2217,13 @@ function activeTab() {
 //   5) 界面更新只按代际过滤；首次操作前等这一份文档的书签读盘完成。
 // 这段代码被 scripts/test-audit-fixes.js 直接切出来做受控时序验证：
 // 保持「状态声明在前、App.bookmarkToggle 赋值在末尾」的结构。
-const bookmarkQueues = new Map();   // path → { chain, list, gen, pending }
+const bookmarkQueues = new Map();   // 当前路径 → { path, chain, list, gen, pending }
 
 function bookmarkQueueFor(path, gen, seed) {
   const initial = (Array.isArray(seed) ? seed : []).slice();
   let q = bookmarkQueues.get(path);
   if (!q) {
-    q = { chain: Promise.resolve(), list: initial, gen, pending: 0 };
+    q = { path, chain: Promise.resolve(), list: initial, gen, pending: 0 };
     bookmarkQueues.set(path, q);
   } else if (q.gen !== gen) {
     // 新代际：以这次读盘的结果为基线，但继续排在同一条链上
@@ -2036,24 +2236,50 @@ function bookmarkQueueFor(path, gen, seed) {
 // 队列空了且已经不属于当前文档：把条目丢掉，别让 Map 随会话一直长
 function bookmarkQueueSweep(path, q) {
   if (q.pending > 0) return;
-  if (q.gen === loadSeq && App.state.filePath === path) return;
-  if (bookmarkQueues.get(path) === q) bookmarkQueues.delete(path);
+  const currentPath = q.path || path;
+  if (q.gen === loadSeq && App.state.filePath === currentPath) return;
+  if (bookmarkQueues.get(currentPath) === q) bookmarkQueues.delete(currentPath);
+}
+
+// 同一份文档改名，队列及其已提交副本跟着迁移，不能按新路径另建一条链（K01）。
+function retargetBookmarkQueue(oldPath, newPath) {
+  const q = bookmarkQueues.get(oldPath);
+  if (!q) return;
+  bookmarkQueues.delete(oldPath);
+  q.path = newPath;
+  bookmarkQueues.set(newPath, q);
+}
+
+// 离开前等已发出的书签写完，才能注销文档会话或确认关窗（K02）。
+async function flushBookmarkQueue() {
+  const path = App.state.filePath;
+  const gen = loadSeq;
+  for (let round = 0; round < 5; round++) {
+    if (gen !== loadSeq || !annoDocAtPath(path)) return false;
+    const q = bookmarkQueues.get(App.state.filePath);
+    if (!q || q.pending === 0) return true;
+    await q.chain;
+  }
+  const q = bookmarkQueues.get(App.state.filePath);
+  return !q || q.pending === 0;
 }
 
 // 一次书签提交：候选 → 落盘 → 成功后提交工作副本；失败只回滚界面，不动工作副本
 async function bookmarkCommit(q, path, gen, page) {
-  // 真正开始执行时再确认一次归属：切走 / 关闭 / 重新打开后，未发送的任务不再写盘（R05）
-  if (gen !== loadSeq || App.state.filePath !== path) {
+  // 真正开始执行时再确认一次归属：切走 / 关闭 / 重新打开后，未发送的任务不再写盘（R05）。
+  // 这份文档刚改名不算「切走」——它还开着，只是路径换了（J03 同一族问题）。
+  if (gen !== loadSeq || !annoDocAtPath(path)) {
     return { ok: false, canceled: true, error: '文档已切换，未保存' };
   }
-  const current = () => gen === loadSeq && App.state.filePath === path;
+  const current = () => gen === loadSeq && annoDocAtPath(path);
   const i = q.list.findIndex((b) => b.page === page);
   const next = q.list.filter((b, k) => k !== i);
   if (i < 0) next.push({ page, at: Date.now(), label: '' });
   next.sort((a, b) => a.page - b.page);
   let r;
   try {
-    r = await pdfBridge.bookmarksSave(path, next);
+    const sid = annoSessionId();
+    r = await pdfBridge.bookmarksSave(path, next, sid ? { sessionId: sid } : undefined);
   } catch (err) {
     r = { ok: false, error: String((err && err.message) || err) };
   }
@@ -2082,8 +2308,9 @@ async function bookmarkToggle(page) {
   const n = Math.min(s.numPages, Math.max(1, page || s.currentPage));
   // 书签还在读盘：先等它，别拿空数组覆盖磁盘上已有的书签
   if (s.bookmarksReady) { try { await s.bookmarksReady; } catch (_) {} }
-  if (gen !== loadSeq || App.state.filePath !== path) return { ok: false, error: '文档已切换' };
-  const q = bookmarkQueueFor(path, gen, App.state.bookmarks);
+  if (gen !== loadSeq || !annoDocAtPath(path)) return { ok: false, error: '文档已切换' };
+  // 等读盘时可能刚改过名；取当前路径加入已迁移的同一条队列。
+  const q = bookmarkQueueFor(s.filePath, gen, App.state.bookmarks);
   q.pending++;
   const op = q.chain.then(() => bookmarkCommit(q, path, gen, n));
   // 无论成功、失败还是取消，都要减计数并可能回收队列；失败也继续排队，不能断链
@@ -2398,7 +2625,7 @@ function refreshAnnoPane() {
   }
   const l2 = host.querySelector('#anno-list');
   if (!rows.length) {
-    l2.innerHTML = '<div class="sb-empty">' + (q ? '没有匹配的批注' : '还没有标注。选中文字可高亮/评论，或用「绘制 ▾」里的工具画点什么。') + '</div>';
+    l2.innerHTML = '<div class="sb-empty">' + (q ? '没有匹配的批注' : '还没有标注。选中文字可高亮 / 评论，或用标注工具栏的画笔、荧光笔和「更多」里的工具画点什么。') + '</div>';
     return;
   }
   l2.innerHTML = rows.map((r) =>
@@ -2817,6 +3044,8 @@ App.saveImageAnno = async function (canvas, ctx) {
   try { dataUrl = canvas.toDataURL('image/png'); } catch (_) { toast('截图失败'); return; }
   const r = await window.pdfBridge.saveImageAnno({
     path: ctx.path, page: ctx.page, dataUrl, rect: ctx.rect, text: ctx.text,
+    // 灯箱里截的图属于「当前这份文档」：改名后要落到它现在的路径上（J01）
+    sessionId: (annoDoc && annoSamePath(annoDoc.path, ctx.path)) ? annoDoc.sid : '',
   });
   if (r && r.ok) {
     toast('已存为图片标注，可在文献库「标注」里找到');
@@ -2978,25 +3207,87 @@ App.quoteSelection = async function (text, page) {
 //
 // 凭据是「每次加载一份」的：路径 + 加载代际 + promise。用旧文档的恢复结果放行，
 // 等于把 A 的结论用在 B 上（第七轮审核 R7-01）。
-let annoRestore = { gen: -1, path: '', promise: null };
-// 「当前已显示文档」的标注凭据：路径 + 它是第几代加载装上去的。
+let annoRestore = { gen: -1, path: '', sid: '', paths: null, promise: null };
+// 「当前已显示文档」的标注凭据：路径 + 它是第几代加载装上去的 + 文档会话 id。
 // 不能拿全局 loadSeq 当凭据：下一次加载一开始就把 loadSeq 递增了，但屏幕上的还是上一份，
 // 拿新代际去核对旧文档的恢复句柄必然不匹配，保存保护就会把「打开下一份」也一并拦掉
 // （R-v1.6c-02）。凭据只在这一份文档真正成为当前文档时更新。
-let annoDoc = { path: '', gen: -1 };
+//
+// sid 是「这一份打开的文档」的会话身份，**不随改名变化**：磁盘上的文件名变了，文档还是同一份，
+// 在途的标注读写要跟着走到新路径。路径本身不能当身份——同一个路径在不同时刻可以是两份
+// 完全不同的文件，拿它做别名会让新文档认领旧文档的标注（J01 / J02）。
+let annoDoc = { path: '', gen: -1, sid: '' };
 let annoRetry = 0;
+let annoSidSeq = 0;
+
+function newAnnoSessionId() {
+  annoSidSeq += 1;
+  return 'sid-' + Date.now().toString(36) + '-' + annoSidSeq.toString(36)
+    + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+// 路径比较：Windows 大小写 / 分隔符都可能不同，但它们是同一个文件
+function annoPathKey(p) {
+  return String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+function annoSamePath(a, b) {
+  return !!a && !!b && annoPathKey(a) === annoPathKey(b);
+}
+
+// 把会话登记 / 更新告诉主进程。它只用来解「在途请求该写哪一份」，
+// 所以必须赶在标注读写之前发出去（同一渲染进程的 IPC 保序）。
+function pushAnnoSession(t) {
+  if (!t || !t.sid || !t.path) return;
+  if (!window.pdfBridge || !window.pdfBridge.annoSession) return;
+  try { window.pdfBridge.annoSession({ id: t.sid, path: t.path }); } catch (_) {}
+}
+function dropAnnoSession(t) {
+  if (!t || !t.sid) return;
+  if (!window.pdfBridge || !window.pdfBridge.annoSession) return;
+  try { window.pdfBridge.annoSession({ id: t.sid, closed: true }); } catch (_) {}
+}
+
+// 这份令牌是不是「这份路径上的这份文档」：改名会把 t.path 换成新路径，
+// 发起时的旧路径记在 t.paths 里，所以两者都算（J03）。
+function annoTokenAt(t, p) {
+  if (!t || !p) return false;
+  if (annoSamePath(t.path, p)) return true;
+  return !!(t.paths && t.paths.has(annoPathKey(p)));
+}
+// 「p 是不是当前这份文档（改名前的旧路径也算）」——书签等异步任务用它确认归属
+function annoDocAtPath(p) {
+  return !!annoDoc && !!annoDoc.sid && annoTokenAt(annoDoc, p);
+}
+// 当前文档的会话 id：随标注 / 书签请求一起发给主进程，改名后在途请求靠它认路
+function annoSessionId() {
+  return (annoDoc && annoDoc.sid) || '';
+}
 
 function startAnnoRestore(filePath) {
   annoRetry = 0;
   const p = String(filePath || '');
+  const prevDoc = annoDoc;
+  const prevTok = annoRestore;
+  // 同一份文档重新读盘（例如库里改了标注后重载）沿用原会话 id；
+  // 换了路径就是另一份文档，一律新开一个会话，绝不继承（J02）。
+  let sid = '';
+  if (prevDoc && prevDoc.sid && annoSamePath(prevDoc.path, p)) sid = prevDoc.sid;
+  else if (prevTok && prevTok.sid && annoSamePath(prevTok.path, p)) sid = prevTok.sid;
+  else sid = newAnnoSessionId();
+  // 这份文档走过的路径（改名会往里加）。annoDoc 与恢复令牌共用同一个集合：
+  // 它们是同一份文档的两个凭据，路径历史必须一致。
+  const paths = new Set([annoPathKey(p)]);
   // 新文档成为当前文档的时刻：凭据与状态一起换。放在这里而不是 loadPdf 开头，
   // 是因为 loadPdf 开头到真正换页之间还有一段销毁等待，那期间显示的仍是上一份。
-  annoDoc = { path: p, gen: loadSeq };
+  annoDoc = { path: p, gen: loadSeq, sid, paths };
   App.state.annoState = { status: 'unknown', annoPath: '', error: '' };
   App.state.annoBrokenNotified = false;
-  const token = { gen: loadSeq, path: p, promise: null };
+  const token = { gen: loadSeq, path: p, sid, paths, promise: null };
+  // 换了文档：旧会话的下一次请求不该再被解析到任何路径上
+  if (prevTok && prevTok.sid && prevTok.sid !== sid) dropAnnoSession(prevTok);
   annoRestore = token;
-  token.promise = restoreAnnos(p);
+  pushAnnoSession(token);
+  token.promise = restoreAnnos(p, token);
   return token;
 }
 
@@ -3008,14 +3299,21 @@ function startAnnoRestore(filePath) {
 async function annoRestoreSettled(path0, gen0) {
   const t = annoRestore;
   if (!t || !t.promise) return false;
-  if (t.gen !== gen0 || t.path !== path0) return false;
+  if (t.gen !== gen0 || !annoTokenAt(t, path0)) return false;
   try { await t.promise; } catch (_) {}
-  return annoRestore === t && App.state.filePath === path0;
+  // 改名会把令牌的当前路径换成新路径，这里同样用「属于这份文档」来判断，
+  // 不再拿调用方可能已经过期的 path0 去硬比（J03）。
+  return annoRestore === t && annoTokenAt(t, App.state.filePath);
 }
 
 function annoStateOk() {
   const st = App.state.annoState;
-  return !!st && (st.status === 'ok' || st.status === 'missing');
+  if (!st) return false;
+  // 补 ID 没落盘时，内存里的 id 还没进文件：此时保存会把「库已按新 id 关联」的假设打乱
+  if (st.migration === 'failed') return false;
+  // library-failed（id 已在文件里、标签关联还没迁完）不影响保存标注本体：标注能存能改，
+  // 待办映射由主进程留在 sidecar 里，下次加载 / 点重试再补
+  return st.status === 'ok' || st.status === 'missing';
 }
 
 // 不是 unknown/broken 才返回空串。调用前必须先 await annoRestoreSettled。
@@ -3024,6 +3322,7 @@ function annoUnsafeReason(force) {
   if (force) return '';
   if (!st) return '标注状态未知';
   if (st.status === 'broken') return st.error || '标注文件读不出来';
+  if (st.migration === 'failed') return st.error || '标注文件写不进去，本次不保存标注';
   if (st.status !== 'ok' && st.status !== 'missing') return '标注还没有读完（不能把「没读完」当成「没有标注」）';
   return '';
 }
@@ -3038,6 +3337,13 @@ App.annoBrokenReason = annoBrokenReason;
 
 function annoBrokenMessage() {
   const st = App.state.annoState;
+  if (st && st.migration === 'library-failed') {
+    return '标注的标签关联还没迁到新 ID（' + (st.error || '库写入失败') + '）。标注本身照常保存；' +
+      '点状态栏的「重试」或下次打开这份文档会自动补完。';
+  }
+  if (st && st.migration === 'failed') {
+    return '标注文件当前写不进去，这次改动不会保存；恢复权限后点状态栏的「重试」即可（不必重启）';
+  }
   if (st && st.status !== 'broken') {
     return '标注还在读取，这次改动先留在内存里；读完会自动补存（不必重画）';
   }
@@ -3046,10 +3352,120 @@ function annoBrokenMessage() {
     '可在命令面板执行「重建标注文件」把原文件另存一份后重新开始';
 }
 
+/*
+ * 标注内容的指纹：用来判断「这一份有没有还没落盘的改动」。
+ *
+ * 关键点（复查 G01）：指纹必须代表「磁盘上有什么」，不能拿合并后的内存去算。
+ * 读盘期间用户可能已经画了东西——那批内容不在磁盘上，如果把它们算进基线，
+ * 之后 annoHasUnsaved() 会认为「都存过了」，迁移持续失败时就把人放走，刚画的笔迹就没了。
+ * 所以恢复完成时用**主进程返回的 pages** 算基线，保存成功时用**实际发出去的那份快照**算基线。
+ */
+App.annoHasUnsaved = annoHasUnsaved;
+
+function annoSigOfPages(pages) {
+  const list = [];
+  for (const p of (pages || [])) {
+    const arr = (p && p.shapes) || [];
+    if (!arr.length) continue;
+    list.push([Number(p.page) || 1, arr]);
+  }
+  list.sort((a, b) => a[0] - b[0]);
+  try { return JSON.stringify(list); } catch (_) { return ''; }
+}
+
+function annoSignature() {
+  const s = App.state;
+  if (!s || !s.annos) return '[]';
+  const keys = [];
+  for (const n of s.annos.keys()) keys.push(n);
+  keys.sort((a, b) => a - b);
+  const out = [];
+  for (const n of keys) {
+    const arr = s.annos.get(n) || [];
+    if (!arr.length) continue;
+    out.push([n, arr]);
+  }
+  try { return JSON.stringify(out); } catch (_) { return ''; }
+}
+
+function annoMarkSaved(sig) {
+  App.state.annoSavedSig = (typeof sig === 'string' && sig) ? sig : annoSignature();
+}
+
+function annoHasUnsaved() {
+  const s = App.state;
+  // 不知道该跟哪份比就不敢放行：宁可多问一句，也不能把没落盘的内容当成已保存（G01）
+  if (!s || typeof s.annoSavedSig !== 'string') return true;
+  const now = annoSignature();
+  if (!now) return true;          // 算不出指纹同样按「可能有改动」处理
+  return now !== s.annoSavedSig;
+}
+
+/*
+ * 重试老标注的 ID 迁移（F01）。
+ *
+ * 只补「已落盘 id → 库标签关联」这一半：渲染层内存里的形状 id 在加载时就拿到了，
+ * 所以这里不动笔迹，也就不会用旧 sidecar 覆盖用户新画的内容。
+ * 期间切了文档 / 又加载了一次，结果一律丢弃——不能把旧任务的状态套到新文档上。
+ */
+async function retryAnnoMigration(pathArg) {
+  const p = String(pathArg || App.state.filePath || '');
+  if (!p || !window.pdfBridge || !window.pdfBridge.migrateAnnos) return false;
+  const gen0 = loadSeq;
+  const doc0 = annoDoc;
+  let r = null;
+  try {
+    r = await window.pdfBridge.migrateAnnos(p, doc0 && doc0.sid ? { sessionId: doc0.sid } : undefined);
+  } catch (err) { r = { ok: false, migration: 'failed', error: String((err && err.message) || err) }; }
+  if (gen0 !== loadSeq || annoDoc !== doc0
+    || !(annoSamePath(App.state.filePath, p) || annoTokenAt(doc0, p))) return false;
+  const st = App.state.annoState || {};
+  if (r && r.ok && (r.migration === 'ok' || r.migration === '')) {
+    App.state.annoState = Object.assign({}, st, {
+      migration: 'ok',
+      status: st.status === 'unknown' ? 'ok' : st.status,
+      error: '',
+    });
+    App.state.annoBrokenNotified = false;
+    setStatus(r.remapped ? '标注关联已迁移完成（' + r.remapped + ' 条）' : '标注关联已确认完成');
+    // 没有任何未保存笔迹时顺手把状态栏恢复成「已保存」（命令面板直接重试也走这里）
+    if (!annoHasUnsaved()) setAnnoSaveState('ok');
+    return true;
+  }
+  App.state.annoState = Object.assign({}, st, {
+    // 主进程给的是 sidecar-failed / library-failed / broken 这些细分原因，
+    // 渲染层只认两种状态：'failed'（id 还没落盘，不能保存标注）与 'library-failed'（只差库索引）
+    migration: (r && r.migration === 'library-failed') ? 'library-failed' : 'failed',
+    error: (r && r.error) || '标注文件仍然写不进去',
+  });
+  return false;
+}
+App.retryAnnoMigration = retryAnnoMigration;
+App.annoNeedsMigration = function () {
+  const st = App.state && App.state.annoState;
+  return !!st && (st.migration === 'failed' || st.migration === 'library-failed');
+};
+
+// 同一份文档的保存串行执行：改名迁移、H01 的补存循环、600ms 防抖都可能同时想写。
+// 并发写同一份 sidecar 会让较旧的快照最后落地，队列保证后一次一定基于最新内存。
+let annoSaveQueue = Promise.resolve();
+function saveAnnosNow(force) {
+  // 排队时锁定文档；尤其 force 只能重建用户当时选择的那份文件（K04）。
+  const docToken = annoDoc;
+  const run = () => annoDoc === docToken ? saveAnnosNowInner(force) : false;
+  const next = annoSaveQueue.then(run, run);
+  annoSaveQueue = next.then(() => {}, () => {});
+  return next;
+}
+
 // force = 用户明确要求重建（主进程会先把损坏的原文件另存为 *.broken-<时间戳>.json）
-async function saveAnnosNow(force) {
+async function saveAnnosNowInner(force) {
   const s = App.state;
   if (!s.filePath || !window.pdfBridge.saveAnnos) return;
+  // 这份快照属于哪个文档：路径 + 「当前已显示文档」的凭据
+  const sendPath = s.filePath;
+  const docToken = annoDoc;
+  setAnnoSaveState('saving');
   if (!force) {
     // 先看这次文档的标注有没有读完，再决定动不动笔（R7-01）：
     // 刚打开就保存会把「空」写回去，覆盖上次正常保存的标注，且主进程的损坏检查查不出来
@@ -3057,7 +3473,7 @@ async function saveAnnosNow(force) {
     // 凭据取「当前已显示文档」的那一份，不是全局 loadSeq——下一份可能正在加载但还没装上去
     const path0 = annoDoc.path || s.filePath;
     const gen0 = annoDoc.gen >= 0 ? annoDoc.gen : loadSeq;
-    const settled = path0 === s.filePath ? await annoRestoreSettled(path0, gen0) : false;
+    const settled = annoSamePath(path0, s.filePath) ? await annoRestoreSettled(path0, gen0) : false;
     if (!settled) {
       // 这批改动还留在内存里，别让用户白画：等这次读盘落地后再补一次（最多重试 20 次，
       // 避免在没有恢复句柄的环境里空转出一个永不停止的定时器）
@@ -3065,11 +3481,21 @@ async function saveAnnosNow(force) {
       if (annoRetry < 20) { annoRetry++; App._annoSaveTimer = setTimeout(saveAnnosNow, 300); }
       return false;
     }
+    // 迁移没完成时先就地重试一次：磁盘可能已经恢复可写，用户点「重试」也要能走通（F01）。
+    // 重试只补库索引，不动内存里的笔迹，所以失败期间新画的标注不会被旧 sidecar 覆盖。
+    const mig = s.annoState && s.annoState.migration;
+    if (mig === 'failed' || mig === 'library-failed') {
+      await retryAnnoMigration(s.filePath);
+      if (!annoSamePath(s.filePath, path0)) return false;   // 期间切了文档：这次保存不属于新文档
+    }
     const why = annoUnsafeReason(force);
     if (why) {
       const st = s.annoState;
-      const what = (st && st.status === 'broken') ? '标注文件已损坏' : '标注还没有读完';
+      const what = (st && st.status === 'broken') ? '标注文件已损坏'
+        : (st && st.migration === 'failed') ? '标注文件写不进去'
+          : '标注还没有读完';
       setStatus('标注没有保存：' + what + '（' + why + '）');
+      setAnnoSaveState('error', what + '（' + why + '）');
       // 每次改动都弹会把界面刷爆，一份文档只提示一次
       if (!s.annoBrokenNotified) { s.annoBrokenNotified = true; toast(annoBrokenMessage(), 7000); }
       return false;
@@ -3082,14 +3508,25 @@ async function saveAnnosNow(force) {
     for (const sh of shapes) if (!sh.id && window.Anno) sh.id = window.Anno.newAnnoId();
     pages.push({ page: n, shapes: JSON.parse(JSON.stringify(shapes)) });
   }
+  // 成功回执只能确认**这一份**快照：等待 IPC 期间用户再画的东西不能被顺手标成已保存（G01）
+  const sentSig = annoSigOfPages(pages);
+  const sendOpts = { sessionId: docToken && docToken.sid, force: !!force };
   try {
-    const result = await window.pdfBridge.saveAnnos(s.filePath, pages, force ? { force: true } : undefined);
+    const result = await window.pdfBridge.saveAnnos(sendPath, pages, sendOpts);
+    // 回执只属于发出去时的那份文档。等待期间切了文档就丢弃；
+    // 但这份文档刚在磁盘上改过名时**不能**丢：主进程已经按会话把它写到新路径了，
+    // 拿旧路径去比只会把一次真正成功的保存判成失败（J03）。
+    if (annoDoc !== docToken
+      || !(annoSamePath(App.state.filePath, sendPath) || annoTokenAt(docToken, sendPath))) {
+      return result === true || (result && result.ok === true) ? true : false;
+    }
     if (result !== true && !(result && result.ok === true)) {
       // 主进程拦下来的（读盘时还没查出来，或状态还没回来就先改了标注）：
       // 把状态补上，后续归档 / 保存才会一起停手
       if (result && result.broken) {
         s.annoState = { status: 'broken', annoPath: result.annoPath || s.annoState.annoPath, error: result.error || '' };
         setStatus('标注没有保存：标注文件已损坏（原文件已保留）');
+        setAnnoSaveState('error', '标注文件已损坏，原文件已保留');
         if (!s.annoBrokenNotified) { s.annoBrokenNotified = true; toast(annoBrokenMessage(), 7000); }
         return false;
       }
@@ -3100,14 +3537,126 @@ async function saveAnnosNow(force) {
       s.annoState = { status: 'ok', annoPath: s.annoState.annoPath, error: '' };
       s.annoBrokenNotified = false;
     }
+    annoMarkSaved(sentSig);   // 只确认发出去的那份快照，不是「此刻内存里的全部」
+    // 回执期间用户可能又画了东西：那时最新状态仍是 dirty，状态栏不能抢着报「已保存」（H01）
+    if (annoHasUnsaved()) setAnnoSaveState('saving');
+    else setAnnoSaveState('ok');
     return force && result && result.backup ? result : true;
   } catch (err) {
+    // 失败提示也只属于发出去时的那份文档，别让旧文档的失败显示在新文档上
+    if (annoDoc !== docToken
+      || !(annoSamePath(App.state.filePath, sendPath) || annoTokenAt(docToken, sendPath))) return false;
     setStatus('标注保存失败：' + err.message);
+    setAnnoSaveState('error', err.message);
     toast('标注尚未保存，请检查磁盘或目录权限后重试', 5000);
     return false;
   }
 }
 App.flushAnnos = saveAnnosNow;
+
+/*
+ * 离开 / 关闭文档时的统一保存边界（H01）。
+ *
+ * 一次 saveAnnos 成功只说明「发出去的那份快照」落盘了，不说明「此刻内存里的全部」落盘了：
+ * 等 IPC 回执时页面还停在当前文档上，用户完全可以继续画。以前 flushBeforeLeave 与
+ * handleWillClose 都是「一次 flush 返回 true 就放行」，于是等待期间的新笔迹随切文档一起消失。
+ *
+ * 判定改成「同一份文档的最新指纹已经确认落盘」：
+ *   · 每轮锁定文档令牌，发出最新快照，回执只确认该快照；仍 dirty 就补存下一轮；
+ *   · 等待期间文档被换掉 → 立刻中止这次离开，不能拿 B 的状态当 A 已保存；
+ *   · 补存失败或用户持续编辑 → 留在当前文档给出重试提示，不做无限补存；
+ *   · 打开另一份文档、切标签、关标签、关窗全部走这里，不再各入口自行判断。
+ * 保存循环期间暂停 600ms 自动保存定时器（notifyAnnoChanged 里配合），避免两个
+ * 快照并发写同一个 sidecar、较旧的那份最后落地。
+ */
+const MAX_LEAVE_SAVE_ROUNDS = 5;
+
+async function flushAnnosUntilClean(where, opts) {
+  const o = opts || {};
+  const s = App.state;
+  const docPath = o.path || s.filePath;
+  const tabId = o.tabId !== undefined ? o.tabId : App.activeTabId;
+  const restorePath = annoDoc.path || docPath;
+  const restoreGen = annoDoc.gen >= 0 ? annoDoc.gen : loadSeq;
+  const docToken = annoDoc;
+  const restoreToken = annoRestore;
+  const sameDoc = () => App.state.filePath === docPath
+    && App.activeTabId === tabId
+    && annoDoc === docToken && annoRestore === restoreToken;
+
+  // 没有文档 / 没有保存通道：本来就没有可丢的内容
+  if (!s.filePath || !window.pdfBridge || !window.pdfBridge.saveAnnos) return { ok: true };
+
+  // 先等这批标注读完（R7-01）：读到的内容会并进内存，存下去才是「旧的 + 新的」。
+  // 等的是「当前已显示文档」那一份，不是正在加载的下一份（R-v1.6c-02）。
+  // 关窗时给个上限，避免恢复句柄一直不落地把窗口永久卡住。
+  if (o.restoreTimeout) {
+    await Promise.race([
+      annoRestoreSettled(restorePath, restoreGen),
+      new Promise((r) => setTimeout(r, o.restoreTimeout)),
+    ]);
+  } else {
+    await annoRestoreSettled(restorePath, restoreGen);
+  }
+  if (!sameDoc()) return { ok: false, error: '文档已切换，已取消' + (where || '离开') };
+  // 已经发出的重建也在保存队列里；不能因当前状态 broken 就提前放行并注销会话。
+  await annoSaveQueue;
+  if (!sameDoc()) return { ok: false, error: '文档已切换，已取消' + (where || '离开') };
+  if (!await flushBookmarkQueue()) return { ok: false, error: '书签仍在保存，请稍后重试' };
+  if (!sameDoc()) return { ok: false, error: '文档已切换，已取消' + (where || '离开') };
+
+  // 标注文件损坏时不能 flush（会把还能人工修复的原文件换成一份合法空数据），
+  // 但也不能因此把导航卡死：如实提示，让人能走。这是唯一「明知没保存仍放行」的分支。
+  if (annoBrokenReason()) {
+    clearTimeout(App._annoSaveTimer);
+    return {
+      ok: true,
+      warn: '当前文档的标注文件已损坏，改动没有保存' + (where ? '（' + where + '后这些改动会丢失）' : ''),
+    };
+  }
+
+  App._annoLeaveSaving = (App._annoLeaveSaving || 0) + 1;
+  let lastDirtySig = '';
+  try {
+    for (let round = 0; round < MAX_LEAVE_SAVE_ROUNDS; round++) {
+      if (!sameDoc()) return { ok: false, error: '文档已切换，已取消' + (where || '离开') };
+      clearTimeout(App._annoSaveTimer);
+      setAnnoSaveState('saving');
+      const res = await App.flushAnnos();
+      if (!sameDoc()) return { ok: false, error: '文档已切换，已取消' + (where || '离开') };
+      // 标注回执等待期间也可能新增书签，最后一次放行前一并收口。
+      if (!await flushBookmarkQueue()) return { ok: false, error: '书签仍在保存，请稍后重试' };
+      if (!sameDoc()) return { ok: false, error: '文档已切换，已取消' + (where || '离开') };
+      if (res === false) {
+        // 迁移没完成、但这一趟没有新增/修改标注：没有内容会丢，允许安全离开（F01）。
+        // 有改动时仍然拦住——静默放行等于把用户刚画的笔迹丢掉。
+        const st0 = App.state.annoState;
+        if (st0 && st0.migration === 'failed' && !annoHasUnsaved()) {
+          return { ok: true, note: '标注 ID 迁移未完成，本次没有未保存的改动' };
+        }
+        return { ok: false, error: '标注没能写入磁盘（磁盘空间或目录权限？）' };
+      }
+      if (!annoHasUnsaved()) {
+        setAnnoSaveState('ok');   // 最新状态确实干净了才报「已保存」（H01）
+        return { ok: true };
+      }
+      // 回执之后又出现新版本：下一轮补存。若两轮之间指纹没变化却仍 dirty，
+      // 说明保存没有真正确认这份快照，别空转成死循环。
+      const sig = annoSignature();
+      if (sig && sig === lastDirtySig) return { ok: false, error: '标注保存没有跟上新改动' };
+      lastDirtySig = sig;
+    }
+    return { ok: false, error: '离开期间标注一直在变化，请先停笔再重试' };
+  } finally {
+    App._annoLeaveSaving = Math.max(0, (App._annoLeaveSaving || 1) - 1);
+    // 被拦下来时，内存里的新内容仍要接着尝试自动保存，不能只留一条错误提示。
+    if (App._annoLeaveSaving === 0 && annoHasUnsaved() && App.state.filePath === docPath) {
+      clearTimeout(App._annoSaveTimer);
+      App._annoSaveTimer = setTimeout(saveAnnosNow, 600);
+    }
+  }
+}
+App.flushAnnosUntilClean = flushAnnosUntilClean;
 
 // 关窗握手（v1.6d）：主进程拦下 close，等这里把标注与笔记都存完再真正关闭。
 // 顺序有讲究：笔记先存（它可能改动条目标题），标注后存；任一步失败都要如实回报，
@@ -3122,16 +3671,11 @@ async function handleWillClose() {
   } catch (e) { ok = false; error = '笔记保存出错：' + (e && e.message ? e.message : e); }
   if (ok) {
     try {
-      // 标注还在读盘（刚打开就关窗）时给它一小会儿：直接 flush 会被保护拦成失败，
+      // 标注还在读盘（刚打开就关窗）时最多等 1.5s：直接 flush 会被保护拦成失败，
       // 用户看到的却是「保存失败」的弹窗，容易误判成丢数据。
-      if (App.state.filePath) {
-        await Promise.race([
-          annoRestoreSettled(annoDoc.path || App.state.filePath, annoDoc.gen),
-          new Promise((r) => setTimeout(r, 1500)),
-        ]);
-      }
-      clearTimeout(App._annoSaveTimer);
-      if ((await App.flushAnnos()) === false) { ok = false; error = '标注没能写入磁盘（磁盘空间或目录权限？）。'; }
+      const r = await flushAnnosUntilClean('关闭窗口', { restoreTimeout: 1500 });
+      if (!r.ok) { ok = false; error = r.error || '标注没能写入磁盘。'; }
+      else if (r.note) App._lastCloseFlushNote = r.note;
     } catch (e) { ok = false; error = '标注保存出错：' + (e && e.message ? e.message : e); }
   }
   if (window.pdfBridge && pdfBridge.closeReady) pdfBridge.closeReady({ ok, error });
@@ -3143,23 +3687,17 @@ App.handleWillClose = handleWillClose;
 if (window.pdfBridge && pdfBridge.onWillClose) pdfBridge.onWillClose(handleWillClose);
 
 // 切文档 / 关标签前先保存当前标注。返回 true 表示可以继续走。
-// 标注文件损坏时不能 flush（会把还能人工修复的原文件换成一份合法空数据），
-// 但也不能因此把导航卡死——只如实提示「这批改动没保存」，人得能走。
+// 打开文档、切标签、关标签都调这里；是否放行只由统一保存边界决定（H01）。
 async function flushBeforeLeave(where) {
-  // 先等这批标注读完：读到的内容会并进内存（restore 是往 Map 里追加，不清空用户刚画的），
-  // 存下去才是「旧的 + 新的」。不等就用空覆盖上一次的正常保存（R7-01）。
-  // 等的是「当前已显示文档」那一份，不是正在加载的下一份（R-v1.6c-02）。
-  if (App.state.filePath) await annoRestoreSettled(annoDoc.path || App.state.filePath, annoDoc.gen);
-  if (annoBrokenReason()) {
-    clearTimeout(App._annoSaveTimer);
-    toast('当前文档的标注文件已损坏，改动没有保存' + (where ? '（' + where + '后这些改动会丢失）' : ''), 6000);
+  const r = await flushAnnosUntilClean(where);
+  if (r.ok) {
+    if (r.warn) toast(r.warn, 6000);
+    if (r.note) toast('标注 ID 迁移没完成，但当前没有未保存的改动；下次打开这份文档会自动再试一次', 6000);
     return true;
   }
-  if ((await App.flushAnnos()) === false) {
-    toast('标注尚未保存，已取消' + (where || '离开文档') + '；请等待标注读取完成，或解决写入问题后重试', 6000);
-    return false;
-  }
-  return true;
+  toast('标注尚未保存，已取消' + (where || '离开文档') + '；' +
+    (r.error || '请等待标注读取完成，或解决写入问题后重试'), 6000);
+  return false;
 }
 App.flushBeforeLeave = flushBeforeLeave;
 
@@ -3168,12 +3706,33 @@ App.flushBeforeLeave = flushBeforeLeave;
 App.rebuildAnnosFile = async function () {
   const s = App.state;
   if (!s.filePath) return { ok: false, error: '没有文档路径' };
+  const docToken = annoDoc;
+  const changed = () => annoDoc !== docToken;
   // 重建的判断依据是「读盘状态」，而状态要等这次读盘结束才有意义；
   // 没等就直接看 'unknown'，会把「还在读」误判成「没坏，无需重建」。
   await annoRestoreSettled(annoDoc.path || s.filePath, annoDoc.gen);
+  if (changed()) return { ok: false, error: '文档已切换，重建已取消' };
+  // 迁移没走完不是「文件坏了」：这里绝不能 force 重建（那会把一份有效文件换成内存快照），
+  // 只能补做迁移。状态栏的「重试」与这里是同一个入口（F01）。
+  const mig = s.annoState && s.annoState.migration;
+  if (mig === 'failed' || mig === 'library-failed') {
+    const done = await retryAnnoMigration(s.filePath);
+    if (changed()) return { ok: false, error: '文档已切换，重建已取消' };
+    if (done) {
+      setStatus('标注 ID 迁移已补完，无需重建');
+      refreshAnnoPane();
+      return { ok: true, note: '迁移已补完，标注文件没有损坏，无需重建' };
+    }
+    const err = (s.annoState && s.annoState.error) || '标注文件仍然写不进去';
+    setStatus('迁移还没完成：' + err);
+    toast('标注文件没有损坏，只是 ID 迁移没走完（' + err + '）。请解决写入问题后点状态栏的「重试」；' +
+      '不要用「重建标注文件」绕过——那会把有效标注换成内存里的副本。', 8000);
+    return { ok: false, migration: 'failed', error: err };
+  }
   if (annoBrokenReason() === '') return { ok: true, note: '当前标注文件没有损坏，无需重建' };
   clearTimeout(App._annoSaveTimer);
   const r = await saveAnnosNow(true);
+  if (changed()) return { ok: false, error: '文档已切换，重建结果不属于当前文档' };
   if (r && r.ok === true && r.backup) {
     setStatus('已重建标注文件；原文件另存为 ' + r.backup.split(/[\\/]/).pop());
     toast('已重建标注文件；损坏的原文件已另存一份：' + r.backup, 7000);
@@ -3190,22 +3749,60 @@ App.importNativeAnnos = function (opts) {
   return window.NativeAnnos ? window.NativeAnnos.import(opts) : Promise.resolve({ ok: false, error: 'NativeAnnos 未加载' });
 };
 App.closeDocument = closeDocument;   // v9：探针/外部关闭文档（顺带停朗读）
+
+// 标注是自动保存的，别让用户猜：状态栏给「正在保存 / 已保存 / 保存失败·重试」。
+// 失败会一直留在界面上直到成功或用户离开，点一下就能重试。
+function setAnnoSaveState(kind, detail) {
+  const el = document.getElementById('anno-save-state');
+  if (!el) return;
+  el.classList.remove('is-saving', 'is-error');
+  delete el.dataset.retry;
+  if (kind === 'saving') {
+    el.classList.add('is-saving');
+    el.textContent = '正在保存标注…';
+    el.title = '标注自动保存';
+  } else if (kind === 'migrate') {
+    // 标注本体能存，只有标签关联还没迁完：别写成「保存失败」，否则用户会以为字也丢了
+    el.classList.add('is-error');
+    el.textContent = '标签关联待迁移 · 重试';
+    el.title = (detail || '老标注的标签关联还没迁到新 ID') + '；点这里重试';
+    el.dataset.retry = '1';
+  } else if (kind === 'error') {
+    el.classList.add('is-error');
+    el.textContent = '保存失败 · 重试';
+    el.title = (detail || '标注尚未写入磁盘') + '；点这里重试';
+    el.dataset.retry = '1';
+  } else {
+    el.textContent = '标注已保存';
+    el.title = '标注自动保存';
+  }
+}
+App.setAnnoSaveState = setAnnoSaveState;
 App.notifyAnnoChanged = function () {
   refreshAnnoPane();
+  setAnnoSaveState('saving');
   clearTimeout(App._annoSaveTimer);
+  // 离开 / 关窗的保存循环正在跑：它会把每一轮的最新快照补存到底。
+  // 这里再排一个 600ms 定时器会与它并发写同一份 sidecar，反而可能让较旧的
+  // 快照最后落地（H01）。交给循环统一收口，循环结束/中止时再补排一次。
+  if (App._annoLeaveSaving > 0) return;
   App._annoSaveTimer = setTimeout(saveAnnosNow, 600);
 };
 
-async function restoreAnnos(filePath) {
-  // 读盘期间可能已经切到别的文档（甚至切走又切回来）：路径 + 加载代际都要对得上才写入
-  const gen = loadSeq;
-  const stillCurrent = () => gen === loadSeq && filePath === App.state.filePath;
+async function restoreAnnos(filePath, token) {
+  const t = token || annoRestore;
+  const sid = (t && t.sid) || '';
+  const annoOpts = sid ? { sessionId: sid } : undefined;
+  // 读盘期间可能已经切到别的文档（甚至切走又切回来），也可能这份文档刚在磁盘上改了名。
+  // 判定只认「这次恢复仍是当前恢复」+「当前文档就是它」，不再拿发起时的旧路径去比——
+  // 改名会让旧路径永远对不上，回执被丢掉、annoState 停在 unknown，之后保存与导航全被卡死（J03）。
+  const stillCurrent = () => annoRestore === t && annoTokenAt(t, App.state.filePath);
   // 书签与标注同一个 sidecar：无论有没有标注都要读一份。
   // bookmarksReady 让「刚打开就按 B」的操作等这次读盘完成，避免用空数组覆盖磁盘上的书签。
   if (filePath && window.pdfBridge.bookmarksLoad) {
     App.state.bookmarksReady = (async () => {
       try {
-        const bm = await window.pdfBridge.bookmarksLoad(filePath);
+        const bm = await window.pdfBridge.bookmarksLoad(filePath, annoOpts);
         if (stillCurrent()) { App.state.bookmarks = (bm && bm.bookmarks) || []; renderBookmarks(); }
       } catch (_) {}
     })();
@@ -3217,6 +3814,7 @@ async function restoreAnnos(filePath) {
   if (!window.pdfBridge.loadAnnos && !window.pdfBridge.loadAnnosState) {
     // 压根没有读标注的通道，也就没有什么「还没读完」可等——留在 unknown 会把所有保存永久挡住
     App.state.annoState = { status: 'ok', annoPath: '', error: '' };
+    annoMarkSaved(annoSigOfPages([]));
     return;
   }
   // 优先用「带状态」的读法：空数组既可能是「没标注过」，也可能是「读不出来」，
@@ -3224,15 +3822,24 @@ async function restoreAnnos(filePath) {
   let res = null;
   try {
     res = window.pdfBridge.loadAnnosState
-      ? await window.pdfBridge.loadAnnosState(filePath)
-      : { ok: true, status: 'ok', pages: await window.pdfBridge.loadAnnos(filePath) };
+      ? await window.pdfBridge.loadAnnosState(filePath, annoOpts)
+      : { ok: true, status: 'ok', pages: await window.pdfBridge.loadAnnos(filePath, annoOpts) };
   } catch (err) {
     res = { ok: false, status: 'broken', pages: [], error: String((err && err.message) || err) };
   }
   if (!res) res = { ok: false, status: 'broken', pages: [], error: '没有返回结果' };
   if (!stillCurrent()) return;
   const st = res.status || (res.ok === false ? 'broken' : 'ok');
-  App.state.annoState = { status: st, annoPath: res.annoPath || '', error: res.error || '' };
+  // 回执可能在改名前已完成读取；改名通知提供的当前位置比旧回执里的路径更新（K03）。
+  const annoPath = !annoSamePath(t.path, filePath) && App.state.annoState.annoPath
+    ? App.state.annoState.annoPath : (res.annoPath || '');
+  App.state.annoState = {
+    status: st,
+    annoPath,
+    error: res.error || '',
+    // 老标注补稳定 ID 没能落盘：标注能看，但关联没迁移，本次不让自动保存（见 annoUnsafeReason）
+    migration: res.migration || '',
+  };
   if (st === 'broken') {
     // 不写任何标注，也不再往下走：内存里的空不是磁盘上的真相。
     // 状态栏 + 一次性提示，说清「修改不会保存」和原文件在哪，别让用户以为标注丢了。
@@ -3241,17 +3848,36 @@ async function restoreAnnos(filePath) {
       '可在命令面板执行「重建标注文件」把原文件另存后重新开始。', 8000);
     return;
   }
+  if (res.migration === 'failed') {
+    setStatus('标注文件暂时写不进去，本次不会自动保存标注（标签关联未改动）');
+    toast('标注文件当前写不进去（' + (res.error || '权限或磁盘') + '）。标注照常显示，但这次打开不会自动保存；' +
+      '恢复写权限后点状态栏的「重试」即可完成，不必重启应用。', 8000);
+  } else if (res.migration === 'library-failed') {
+    // id 已经写进文件了，只是库里的标签关联还没迁完：标注照常能存能改，
+    // 别把它当成「不能保存」——那会让用户白白丢一批新标注（F02 的报警不该变成新的阻塞）
+    setStatus('标注 ID 已迁移，标签关联还差一步（可点状态栏重试）');
+    setAnnoSaveState('migrate', res.error || '库里的标签关联还没写完');
+    toast('标注已经可以正常保存；只是标签关联还没写进文献库（' + (res.error || '库写入失败') + '）。' +
+      '点状态栏的「重试」或下次打开会自动补完。', 7000);
+  }
   const saved = Array.isArray(res.pages) ? res.pages : [];
-  if (!saved.length) return;
   const s = App.state;
+  const diskPages = [];
+  const clip = (n) => Math.min(s.numPages, Math.max(1, n));
   for (const entry of saved) {
-    const n = Math.min(s.numPages, Math.max(1, entry.page || 1));
+    const n = clip(entry.page || 1);
     const arr = s.annos.get(n) || [];
     for (const sh of (entry.shapes || [])) arr.push(sh);
     s.annos.set(n, arr);
+    const bucket = diskPages.find((p) => p.page === n);
+    if (bucket) bucket.shapes = bucket.shapes.concat(entry.shapes || []);
+    else diskPages.push({ page: n, shapes: (entry.shapes || []).slice() });
   }
   for (const n of s.annos.keys()) Anno.renderPage(n);
   refreshAnnoPane();
+  // 基线只认「这次从磁盘读回来的内容」：读盘期间用户新画的笔迹不在里面，
+  // 因此仍是 dirty——迁移一恢复可写就会补存，不会在切文档时被当成「已保存」丢掉（G01）
+  annoMarkSaved(annoSigOfPages(diskPages));
 }
 
 // ---------- 翻页导航（滚动定位） ----------
@@ -3297,10 +3923,44 @@ function applyViewModeClass() {
   document.body.classList.toggle('view-spread', m === 'spread');
 }
 
+// 工具栏上「双页 / 独立缩放」两个按钮的状态：点亮 = 当前生效。
+// 早先按钮永远没有激活态，用户点完只能靠「页面变没变」猜，遇上富文档（不支持对开）就会觉得「点了没反应」。
+function updateViewModeUI() {
+  const eff = effectiveViewMode();
+  const spreadBtn = App.els.spread || $('btn-spread');
+  if (spreadBtn) {
+    const on = eff === 'spread';
+    spreadBtn.classList.toggle('active', on);
+    spreadBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // 富文档没有对开布局：把按钮画淡（仍可点，点了会说明原因）
+    spreadBtn.classList.toggle('is-disabled', App.state.mode === 'rich');
+  }
+  // 页面排列是图形分段控件：当前选项要能一直读出来，不能只靠「点完页面变没变」
+  for (const [id, mode] of [['btn-vm-scroll', 'scroll'], ['btn-vm-page', 'page']]) {
+    const b = $(id);
+    if (!b) continue;
+    const on = eff === mode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // 富文档没有对开：双页之外的两种排列仍可用，不做禁用
+  }
+  const zoomBtn = $('btn-spread-zoom');
+  if (zoomBtn) {
+    zoomBtn.hidden = eff !== 'spread';
+    const on = perPageZoomActive();
+    zoomBtn.classList.toggle('active', on);
+    zoomBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+App.updateViewModeUI = updateViewModeUI;
+
 // 切换阅读方式：连续滚动 / 单页翻页 / 双页对开
 App.setViewMode = function (mode) {
   const m = mode === 'page' ? 'page' : (mode === 'spread' ? 'spread' : 'scroll');
+  const beforeEff = effectiveViewMode();
   App.state.viewMode = m;
+  // 离开对开就把页级缩放清零：留着会让下次进对开时「凭空有一页是大的」
+  if (m !== 'spread') clearPageZoom();
   applyViewModeClass();
   applyPageVisibility(App.state.currentPage);
   const eff = effectiveViewMode();
@@ -3308,7 +3968,7 @@ App.setViewMode = function (mode) {
     // 单页 / 对开：把要显示的页渲染出来，其余页先不渲染（省内存）
     if (App.state.mode === 'pdf') {
       const targets = eff === 'spread' ? spreadPair(App.state.currentPage).filter(Boolean) : [App.state.currentPage];
-      for (const n of targets) if (!App.state.rendered.get(n)) renderPageNum(n);
+      for (const n of targets) ensurePageRendered(n);
       // 从连续模式切进来时，之前散落的已渲染页要一并回收
       freePagesExcept(targets);
     }
@@ -3316,9 +3976,47 @@ App.setViewMode = function (mode) {
     renderVisiblePages();
   }
   relayoutKeepingPosition();
+  // 关键：单页 / 对开下页面容器只剩当前那一两页，旧的 scrollTop 远超新的可滚动高度，
+  // 浏览器会把它夹到最大值 —— 用户看到的是「页面下半截 / 一片空白」，以为切换没生效。
+  if (eff !== 'scroll') {
+    App.els.viewer.scrollTop = 0;
+    App.els.viewer.scrollLeft = 0;
+  }
+  updateViewModeUI();
   try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ viewMode: m }); } catch (_) {}
+  App.lastViewModeChange = { before: beforeEff, after: eff };
   return m;
 };
+
+// 双页对开的开关：工具栏按钮 / Ctrl+Shift+D / 命令面板都走这里，
+// 保证「提示语」和「实际发生了什么」一致 —— 以前无论成功失败都弹「已切换到双页对开」，
+// 富文档（没有对开布局）上点它就成了「弹了提示框但页面没动」。
+function toggleSpread() {
+  const s = App.state;
+  // 没有文档时只是记偏好：别弹「第 1 页并排」这种没有对象的话
+  if (!hasDoc(s)) {
+    const m = App.setViewMode(s.viewMode === 'spread' ? 'scroll' : 'spread');
+    toast(m === 'spread' ? '已设为双页对开：打开 PDF 后生效' : '已切回连续滚动', 2600);
+    return effectiveViewMode();
+  }
+  const before = effectiveViewMode();
+  App.setViewMode(s.viewMode === 'spread' ? 'scroll' : 'spread');
+  const after = effectiveViewMode();
+  if (after === before) {
+    toast('这类文档不支持双页对开（只有 PDF 可以），已保持当前显示方式', 3200);
+    return after;
+  }
+  if (after === 'spread') {
+    const pair = spreadPair(App.state.currentPage).filter(Boolean);
+    toast(pair.length > 1 ? ('双页对开：第 ' + pair.join('、') + ' 页并排') : ('双页对开：第 ' + pair[0] + ' 页'), 2000);
+  } else if (after === 'page') {
+    toast('已切到单页显示（这类文档不支持对开）', 2600);
+  } else {
+    toast('已切回连续滚动', 1800);
+  }
+  return after;
+}
+App.toggleSpread = toggleSpread;
 
 // 单页 / 对开模式的内存回收：只保留「当前页组」的位图，其余页一律释放。
 // 早先只释放上一张「当前页」，对开时搭档页（例如 2→4 时的 3）会一直留着位图；
@@ -3362,10 +4060,11 @@ function scrollToPage(n, instant, record) {
     // 单页 / 对开模式：换页就是把「当前页」标记挪过去；不属于新页组的位图一律释放
     applyPageVisibility(n);
     const targets = App.state.viewMode === 'spread' ? spreadPair(n).filter(Boolean) : [n];
-    for (const t of targets) if (!App.state.rendered.get(t)) renderPageNum(t);
+    for (const t of targets) ensurePageRendered(t);
     freePagesExcept(targets);
     updateCurrentPage(n);
     App.els.viewer.scrollTop = 0;
+    updateViewModeUI();
     return;
   }
   el.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'start' });
@@ -3774,6 +4473,7 @@ function relayoutKeepingPosition() {
 function setNumericScale(next) {
   const clamped = Math.min(6, Math.max(0.2, next));
   App.state.scaleMode = String(clamped);
+  clearPageZoom();   // 工具栏 / 菜单的缩放是「整篇一起变」，页级倍数回到 1
   syncScaleSelect(clamped);
   relayoutKeepingPosition();
 }
@@ -3818,39 +4518,78 @@ function syncScaleSelect(scale) {
 const zoomMode = { on: false, space: false, panning: false, px: 0, py: 0 };
 
 // 以 (clientX, clientY) 为锚点把缩放改到 next
+const MIN_ZOOM = 0.2, MAX_ZOOM = 6;
+function clampZoom(v) { return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v)); }
+
+// 鼠标点在哪个页面上（放大模式的锚点、双页独立缩放的「目标页」都靠它）
+function pageAtPoint(clientX, clientY) {
+  const host = document.elementFromPoint(clientX, clientY);
+  const el = (host && host.closest) ? host.closest('.page, .doc-page') : null;
+  return (el && el.dataset && el.dataset.page) ? el : null;
+}
+
+// 记下光标落在页面里的哪个「单位坐标」点，改完布局再把它挪回光标下
+function zoomAnchorOf(pageEl, clientX, clientY, rich) {
+  if (rich) {
+    // 富文档用 CSS zoom，不在 CTM 里，只能按页面矩形 + 当前 scale 反算
+    const r0 = pageEl.getBoundingClientRect();
+    const s0 = App.state.scale || 1;
+    return { x: (clientX - r0.left) / s0, y: (clientY - r0.top) / s0 };
+  }
+  return clientToUnit(pageEl, clientX, clientY);
+}
+
+function restoreZoomAnchor(pageEl, u, clientX, clientY, rich) {
+  const v = App.els.viewer;
+  if (!v) return;
+  if (rich) {
+    const r1 = pageEl.getBoundingClientRect();
+    const s1 = App.state.scale || 1;
+    v.scrollLeft += (r1.left + u.x * s1) - clientX;
+    v.scrollTop += (r1.top + u.y * s1) - clientY;
+    return;
+  }
+  const svg = pageEl.querySelector('.anno') || pageEl.querySelector('.anno-base');
+  const ctm = svg && svg.getScreenCTM ? svg.getScreenCTM() : null;
+  if (!ctm) return;
+  const p = new DOMPoint(u.x, u.y).matrixTransform(ctm);
+  v.scrollLeft += p.x - clientX;
+  v.scrollTop += p.y - clientY;
+}
+
+// 双页独立缩放：只改这一页在基准缩放上的倍数
+function zoomPageAt(n, targetScale, clientX, clientY, pageEl) {
+  const s = App.state;
+  const el = pageEl || App.pageEl(n);
+  if (!el) return;
+  const want = Math.max(0.25, clampZoom(targetScale));
+  const cur = pageScale(n);
+  if (Math.abs(want - cur) < 0.0005) return;
+  const u = zoomAnchorOf(el, clientX, clientY, false);
+  s.pageZoom.set(n, Math.max(0.25, Math.min(8, want / (s.scale || 1))));
+  applyLayout();
+  restoreZoomAnchor(el, u, clientX, clientY, false);
+}
+App.zoomPageAt = zoomPageAt;
+
 function zoomAtPoint(next, clientX, clientY) {
   const s = App.state;
-  const want = Math.min(6, Math.max(0.2, next));
-  if (Math.abs(want - (s.scale || 1)) < 0.0005) return;
-  const host = document.elementFromPoint(clientX, clientY);
-  const pageEl = (host && host.closest) ? host.closest('.page, .doc-page') : null;
-  if (!pageEl || !pageEl.dataset || !pageEl.dataset.page) { setNumericScale(want); return; }
-  // v34：PDF 用页面标注层的逆 CTM 取锚点，旋转 90°/180° 后放大也不会偏；
-  // 富文档没有旋转，仍走原来的矩形 + zoom 换算（CSS zoom 不在 CTM 里，别混用）
+  const pageEl = pageAtPoint(clientX, clientY);
   const rich = s.mode === 'rich';
-  const s0 = s.scale || 1;
-  const r0 = pageEl.getBoundingClientRect();
-  const u = rich ? { x: (clientX - r0.left) / s0, y: (clientY - r0.top) / s0 } : clientToUnit(pageEl, clientX, clientY);
-  const ux = u.x, uy = u.y;
-
-  s.scaleMode = String(want);
-  applyLayout();
-
-  const v = App.els.viewer;
-  if (v && rich) {
-    const r1 = pageEl.getBoundingClientRect();
-    const s1 = s.scale || 1;
-    v.scrollLeft += (r1.left + ux * s1) - clientX;
-    v.scrollTop += (r1.top + uy * s1) - clientY;
-  } else if (v) {
-    const svg = pageEl.querySelector('.anno') || pageEl.querySelector('.anno-base');
-    const ctm = svg && svg.getScreenCTM ? svg.getScreenCTM() : null;
-    if (ctm) {
-      const p = new DOMPoint(ux, uy).matrixTransform(ctm);
-      v.scrollLeft += p.x - clientX;
-      v.scrollTop += p.y - clientY;
-    }
+  // 双页 + 独立缩放：滚轮只作用于鼠标所指的那一页，另一页原地不动
+  if (perPageZoomActive() && pageEl) {
+    const n = +pageEl.dataset.page;
+    zoomPageAt(n, pageScale(n) * (next / (s.scale || 1)), clientX, clientY, pageEl);
+    return;
   }
+  const want = clampZoom(next);
+  if (Math.abs(want - (s.scale || 1)) < 0.0005) return;
+  if (!pageEl) { setNumericScale(want); return; }
+  const u = zoomAnchorOf(pageEl, clientX, clientY, rich);
+  s.scaleMode = String(want);
+  clearPageZoom();          // 全局缩放：两页一起变，页级倍数归 1
+  applyLayout();
+  restoreZoomAnchor(pageEl, u, clientX, clientY, rich);
   syncScaleSelect(s.scale);
 }
 
@@ -3912,7 +4651,28 @@ App.buildExportPayload = function (outPath) {
         g.text = sh.text || ''; g.comment = sh.comment || '';
         if (sh.kind) g.kind = sh.kind;   // v29：下划线 / 删除线 / 波浪线 / 摘录要传出图方式
       }
-      else { g.a = conv(sh.a); g.b = conv(sh.b); }
+      else if (sh.tool === 'triangle') {
+        // 三角形三个顶点逐点换算。旧写法只换算包围框的两个角，主进程再按 PDF 坐标轴
+        // 重建顶点——页带 /Rotate 90° 时方向和位置都会变（B05）。
+        g.a = conv(sh.a); g.b = conv(sh.b);
+        g.tri = window.Anno && Anno.trianglePoints ? Anno.trianglePoints(sh).map(conv) : null;
+      }
+      else if (sh.tool === 'image') {
+        // 图片标注是「页面上这块图的截图」，原 PDF 里这块图本来就在。重复铺一层同样的位图
+        // 只会让副本变胖、还可能盖住文字，所以导出只保留恢复数据，不画。
+        g.tool = 'image';
+        g.image = sh.image || '';
+        g.skip = 'image-snapshot';
+        g.rects = (sh.rects || []).map((r) => {
+          const a = conv({ x: r.x, y: r.y });
+          const b = conv({ x: r.x + r.w, y: r.y + r.h });
+          return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+        });
+      }
+      else if (sh.a && sh.b) { g.a = conv(sh.a); g.b = conv(sh.b); }
+      // 兜底：没有 a/b 也不是已知类型 —— 标成跳过，保留恢复数据，
+      // 不能像旧版那样落进「其它类型都有 a/b」的假设里整次抛错（B04）
+      else { g.skip = 'unsupported'; }
       return g;
     });
     pages.push({ index: n - 1, shapes: out });
@@ -4135,11 +4895,16 @@ function syncSpeakUi() {
   const E = App.els || {};
   if (E.speak) {
     E.speak.classList.toggle('active', speech.status !== 'idle');
-    E.speak.title = speech.status === 'speaking' ? '暂停朗读（跨页连续）'
-      : speech.status === 'paused' ? '继续朗读' : '朗读：从当前位置连续朗读（句级高亮）';
+    E.speak.title = speech.status === 'speaking' ? '暂停朗读'
+      : speech.status === 'paused' ? '继续朗读' : '朗读当前页';
     E.speak.setAttribute('aria-pressed', speech.status !== 'idle' ? 'true' : 'false');
   }
-  if (E.speakStop) E.speakStop.disabled = speech.status === 'idle';
+  // 播放控制只在朗读中出现：开始前不占主栏
+  if (E.speakStop) {
+    const speaking = speech.status !== 'idle';
+    E.speakStop.disabled = !speaking;
+    E.speakStop.hidden = !speaking;
+  }
 }
 
 // 富文档（Word / PPT / Excel / Markdown）没有 pdfPage，直接读渲染出来的 DOM 文本
@@ -4555,6 +5320,12 @@ function bind() {
     refFollow: $('ref-follow'), refClose: $('ref-close'), refPick: $('ref-pick'), refName: $('ref-name'),
   };
 
+  // 自动保存状态：失败时点一下直接重试，不用去猜该按哪个「保存」
+  const saveState = $('anno-save-state');
+  if (saveState) saveState.addEventListener('click', () => {
+    if (saveState.dataset.retry && typeof App.flushAnnos === 'function') App.flushAnnos();
+  });
+
   // v9：朗读 / 停止 / 打印
   if (E.speak) E.speak.addEventListener('click', () => App.speakToggle());
   if (E.speakStop) E.speakStop.addEventListener('click', () => App.speakStop());
@@ -4688,32 +5459,100 @@ function bind() {
       else if (opened > 1) toast('已恢复上次打开的 ' + opened + ' 个标签页');
     });
   }
-  // v9：库里按条目元数据重命名了附件文件，把打开的标签 / 当前会话的路径跟着换掉
-  if (window.pdfBridge.onFilesRenamed) {
-    window.pdfBridge.onFilesRenamed((info) => {
-      const changes = (info && info.changes) || [];
-      if (!changes.length) return;
-      const base = (p) => String(p || '').split(/[\\/]/).pop();
-      let touched = false;
-      for (const c of changes) {
-        for (const t of App.tabs) {
-          if (t.filePath === c.oldPath) {
-            t.filePath = c.newPath;
-            t.fileName = base(c.newPath);
-            touched = true;
-          }
+  // Windows 路径大小写 / 分隔符都可能不同，但它们是同一个文件
+  function sameFilePath(a, b) {
+    const norm = (p) => String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    return !!a && !!b && norm(a) === norm(b);
+  }
+
+  /*
+   * 文档在磁盘上改名后，把「这份文档」的身份完整迁到新路径（I01）。
+   * 只改路径，不重新读盘：内存里的标注、撤销栈与脏状态都要原样保留。
+   * 以前只改 state/tab 的路径，annoDoc.path 与 annoRestore.path 还是旧值，
+   * saveAnnosNow 会因 path0 !== s.filePath 直接拒绝保存。
+   */
+  function migrateCurrentDocPath(c) {
+    const s = App.state;
+    const base = (p) => String(p || '').split(/[\\/]/).pop();
+    const oldPath = s.filePath;
+    retargetBookmarkQueue(oldPath, c.newPath);
+    s.filePath = c.newPath;
+    s.fileName = base(c.newPath);
+    if (App.els.fileName) App.els.fileName.textContent = s.fileName;
+
+    // 标注恢复凭据里也存着路径：令牌对象保持同一个（避免被误判成切换了文档），只换路径。
+    // 旧路径要留在路径历史里——改名那一刻已经发出去、还没落地的请求带的正是旧路径，
+    // 主进程要靠它认出「这是同一份文档的请求」（J01）。
+    const moveToken = (tok) => {
+      if (!tok || !annoSamePath(tok.path, oldPath)) return false;
+      tok.path = c.newPath;
+      if (tok.paths) tok.paths.add(annoPathKey(c.newPath));
+      return true;
+    };
+    const docMoved = moveToken(annoDoc);
+    const tokMoved = moveToken(annoRestore);
+    // 会话当前路径同步给主进程（改名流程里已经更新过一次，这里是幂等的保险：
+    // 万一登记请求比改名通知晚到，靠它把路径纠正回来）
+    if (docMoved || tokMoved) pushAnnoSession({ sid: annoDoc.sid, path: annoDoc.path });
+
+    // sidecar 的显示 / 重试路径换成主进程给的新 hash 文件
+    if (s.annoState && c.annoPath) s.annoState.annoPath = c.annoPath;
+
+    // 改名期间可能有一次「按旧路径」的保存回执还没落地（主进程会把它重定向到新文件，
+    // 但那条回执本身属于旧路径）。把保存基线作废，让下一次保存把当前内存——包括
+    // 改名前 600ms 防抖里还没落盘的笔迹——完整写到新路径。不重新读盘，内存与撤销栈都保留。
+    if (annoStateOk() && (s.annoState.status === 'ok' || annoHasUnsaved())) {
+      s.annoSavedSig = '__renamed__';
+      clearTimeout(App._annoSaveTimer);
+      setAnnoSaveState('saving');
+      App._annoSaveTimer = setTimeout(saveAnnosNow, 0);
+    }
+  }
+
+  function applyRenamedPaths(changes) {
+    const s = App.state;
+    const base = (p) => String(p || '').split(/[\\/]/).pop();
+    let touched = false;
+    let current = null;
+    for (const c of changes) {
+      if (!c || !c.oldPath || !c.newPath) continue;
+      for (const t of App.tabs) {
+        if (sameFilePath(t.filePath, c.oldPath)) {
+          t.filePath = c.newPath;
+          t.fileName = base(c.newPath);
+          touched = true;
         }
-        if (App.state.filePath === c.oldPath) {
-          App.state.filePath = c.newPath;
-          App.state.fileName = base(c.newPath);
-          App.els.fileName.textContent = App.state.fileName;
+        if (sameFilePath(t.refPath, c.oldPath)) {
+          t.refPath = c.newPath;
+          t.refName = base(c.newPath);
           touched = true;
         }
       }
-      if (touched) {
-        renderTabs();
-        toast('文件已按条目信息重命名');
+      // 对照视图里的参考文档也可能是被改名的那一份
+      if (sameFilePath(s.refPath, c.oldPath)) {
+        s.refPath = c.newPath;
+        s.refName = base(c.newPath);
+        touched = true;
       }
+      if (sameFilePath(s.filePath, c.oldPath)) current = c;
+    }
+    if (current) migrateCurrentDocPath(current);
+    if (touched || current) {
+      renderTabs();
+      saveSessionNow();   // 会话里记的也必须是新路径，否则下次恢复还是旧路径
+      toast('文件已按条目信息重命名');
+    }
+  }
+
+  // v9：库里按条目元数据重命名了附件文件，把打开的标签 / 当前会话的路径跟着换掉。
+  // 订阅位置必须是 pdfBridge.lib（preload 就挂在这一层）。以前写成顶层
+  // pdfBridge.onFilesRenamed，判断永远为假，整段从未执行：阅读器一直用旧路径，
+  // 新笔迹存进旧 hash，重新打开改名后的文件看不到（I01）。
+  const libBridge = window.pdfBridge.lib;
+  if (libBridge && libBridge.onFilesRenamed) {
+    libBridge.onFilesRenamed((info) => {
+      const changes = (info && info.changes) || [];
+      if (changes.length) applyRenamedPaths(changes);
     });
   }
   // v8：在文献库里改了标注文字/批注，主进程改完真身后通知阅读器重画
@@ -4759,6 +5598,8 @@ function bind() {
       applyTheme(s && s.theme);
       // v34：分屏偏好启动即生效（没有文档时先记着，打开 PDF 再显示）
       if (s && s.splitView) { App.state.split = true; syncSplitPane({ relayout: false }); }
+      // 双页独立缩放：记在设置里，下次打开对开还是上次的选择
+      if (s && s.spreadPageZoom) { App.state.perPageZoom = true; updateViewModeUI(); }
     }).catch(() => {});
   }
   if (window.pdfBridge.onOpenSettings) {
@@ -4776,10 +5617,43 @@ function bind() {
 
   E.prev.addEventListener('click', prevPage);
   E.next.addEventListener('click', nextPage);
-  if (E.spread) E.spread.addEventListener('click', () => {
-    const m = App.setViewMode(App.state.viewMode === 'spread' ? 'scroll' : 'spread');
-    toast(m === 'spread' ? '已切换到双页对开' : '已切换到连续滚动');
-  });
+  if (E.spread) {
+    // 原生 title 提示会在点完之后还挂着，挡住刚变出来的页面。点下去先摘掉，
+    // 移开后再挂回来 —— 想再看说明只要把鼠标挪开再回来。
+    E.spread.addEventListener('pointerdown', () => {
+      if (E.spread.title) { E.spread.dataset.tip = E.spread.title; E.spread.title = ''; }
+    });
+    E.spread.addEventListener('pointerleave', () => {
+      if (E.spread.dataset.tip) { E.spread.title = E.spread.dataset.tip; delete E.spread.dataset.tip; }
+    });
+    E.spread.addEventListener('click', () => toggleSpread());
+  }
+  // 页面排列的另外两项：点一下就切过去，选中态由 updateViewModeUI 统一画
+  for (const [id, mode] of [['btn-vm-scroll', 'scroll'], ['btn-vm-page', 'page']]) {
+    const b = $(id);
+    if (!b) continue;
+    b.addEventListener('click', () => {
+      if (effectiveViewMode() === mode) return;
+      App.setViewMode(mode);
+      const label = mode === 'scroll' ? '连续滚动：滚动即翻页' : '单页翻页：一次只看一页';
+      toast(label, 2000);
+    });
+  }
+  const spreadZoomBtn = $('btn-spread-zoom');
+  if (spreadZoomBtn) {
+    spreadZoomBtn.addEventListener('click', () => {
+      const on = !App.state.perPageZoom;
+      App.state.perPageZoom = on;
+      if (!on) clearPageZoom();     // 关掉就回到「两页一起缩放」，把各自的倍数归 1
+      applyLayout();
+      updateViewModeUI();
+      toast(on ? '双页独立缩放：滚轮只放大鼠标所指的那一页' : '双页同步缩放：两页一起变大变小', 2600);
+      try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ spreadPageZoom: on }); } catch (_) {}
+    });
+  }
+  const toLibBtn = $('btn-to-lib');
+  if (toLibBtn) toLibBtn.addEventListener('click', () => { openImportLib(); });
+  initImportLib();
   E.pageInput.addEventListener('change', () => scrollToPage(parseInt(E.pageInput.value, 10) || 1, false, true));
   E.save.addEventListener('click', doSave);
 
@@ -4848,8 +5722,7 @@ function bind() {
       if (k === '[') { App.rotateView(-90); e.preventDefault(); return; }   // v34：逆时针旋转
       if (k === ']') { App.rotateView(90); e.preventDefault(); return; }    // v34：顺时针旋转
       if (k === 'd' && e.shiftKey) {                                        // 双页对开
-        const m = App.setViewMode(App.state.viewMode === 'spread' ? 'scroll' : 'spread');
-        toast(m === 'spread' ? '已切换到双页对开' : '已切换到连续滚动');
+        toggleSpread();
         e.preventDefault(); return;
       }
     }
@@ -4865,6 +5738,7 @@ function bind() {
       e.preventDefault();
       return;
     }
+    if (e.key === 'Escape' && importLib.open) { closeImportLib(); e.preventDefault(); return; }
     if (e.key === 'Escape' && cmd.open) { closeCmd(); e.preventDefault(); return; }
     if (e.key === 'Escape' && refi.open) { closeRefImport(); e.preventDefault(); return; }
     if (e.key === 'Escape' && reflow.open) { closeReflow(); e.preventDefault(); return; }
@@ -4940,7 +5814,17 @@ function bind() {
     const acc = zoomAcc;
     zoomAcc = 0;
     if (!acc) return;
-    const next = App.state.scale * Math.exp(-acc * 0.0016);
+    const factor = Math.exp(-acc * 0.0016);
+    // 双页独立缩放：Ctrl+滚轮也只动鼠标底下这一页（放大模式的 zoomAtPoint 内部同样会分流）
+    if (perPageZoomActive() && !zoomMode.on) {
+      const el = pageAtPoint(zoomPt.x, zoomPt.y);
+      if (el) {
+        const n = +el.dataset.page;
+        zoomPageAt(n, pageScale(n) * factor, zoomPt.x, zoomPt.y, el);
+        return;
+      }
+    }
+    const next = App.state.scale * factor;
     if (zoomMode.on) zoomAtPoint(next, zoomPt.x, zoomPt.y);
     else setNumericScale(next);
   };
@@ -4976,6 +5860,20 @@ function bind() {
     zoomMode.py = e.clientY;
     document.body.classList.add('zoom-pan');
   }, true);
+  // 文本层背景（没落在任何 span 上）按下：不许浏览器自己起选区。
+  // 那一块没有任何文字，Chromium 会把选区锚点丢到文档开头，鼠标一动就从第一行
+  // 一路选到光标处——用户看到的就是「圈不住，只选中前半部分」。
+  E.viewer.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (zoomMode.on && zoomMode.space) return;
+    if (window.Anno && Anno.state && Anno.state.tool !== 'select') return;
+    if (App.state.mode === 'rich') return;
+    const t = e.target;
+    if (!t || !t.classList || !t.classList.contains('textlayer')) return;
+    e.preventDefault();
+    try { window.getSelection().removeAllRanges(); } catch (_) {}
+  }, true);
+
   window.addEventListener('mousemove', (e) => {
     if (!zoomMode.panning) return;
     const v = App.els.viewer;
@@ -5030,6 +5928,14 @@ function bind() {
       '-',
       { label: '放大看这一块', run: () => openRegionLightbox(pageEl, e.clientX, e.clientY) },
       { label: '复制页码', run: () => { window.pdfBridge.copyText(String(n)); toast('已复制页码 ' + n); } },
+      '-',
+      // 页面布局不再有下拉菜单，这几个低频动作在右键菜单里也有一个看得见的入口
+      { label: '向左旋转 90°', run: () => App.rotateView(-90) },
+      { label: '向右旋转 90°', run: () => App.rotateView(90) },
+      { label: '重排阅读', run: () => openReflow() },
+      { label: (ruler.on ? '关闭阅读标尺' : '打开阅读标尺'), run: () => setRuler(!ruler.on) },
+      { label: '分屏参考视图', run: () => { const b = $('btn-split'); if (b) b.click(); } },
+      '-',
       { label: '这条引用的出处：自己挑一篇…', run: () => {
         // 优先用上一次 Smart Jump / Portal 拿到的参考文献条目文本；没有就用选中的文字，
         // 再没有就让弹窗空着 —— 下面那份「库里所有 PDF」本来就够手挑。
@@ -5039,10 +5945,7 @@ function bind() {
       '-',
       {
         label: App.state.viewMode === 'spread' ? '改回连续滚动' : '改成双页对开',
-        run: () => {
-          const m = App.setViewMode(App.state.viewMode === 'spread' ? 'scroll' : 'spread');
-          toast(m === 'spread' ? '已切换到双页对开' : '已切换到连续滚动');
-        },
+        run: () => { toggleSpread(); },
       },
       {
         label: App.state.viewMode === 'page' ? '改成连续滚动' : '改成单页翻页',
@@ -5200,7 +6103,12 @@ function cmdCommands() {
     { id: 'archive', label: '导出批注归档（zip：文档 + 标注 + 清单）', keys: '', group: '文件', run: () => { doExportArchive(); }, need: hasPdf },
     // 只在标注文件真的坏掉时出现：主进程会先把原文件另存为 *.broken-<时间戳>.json，再写新的
     { id: 'rebuild-anno', label: '重建标注文件（损坏时用；原文件另存一份）', keys: '', group: '文件', run: () => { App.rebuildAnnosFile(); }, need: hasPdf && !!annoBrokenReason() },
+    // 老标注的稳定 ID 迁移没走完（磁盘恢复可写之后）：只补迁移，绝不用内存覆盖文件
+    { id: 'retry-anno-migrate', label: '重试标注 ID 迁移（标签关联没迁完时用）', keys: '', group: '文件',
+      run: () => { App.retryAnnoMigration(); }, need: hasPdf && App.annoNeedsMigration && App.annoNeedsMigration() },
+    { id: 'importlib', label: '导入文献库…（当前文档 / 本文的参考文献表）', keys: '', group: '文献库', run: () => { openImportLib(); } },
     { id: 'refimport', label: '参考文献表批量入库…', keys: '', group: '文献库', run: () => { openRefImport(); }, need: hasPdf },
+    { id: 'tolib', label: '把当前文档存入文献库', keys: '', group: '文献库', run: () => { saveCurrentToLibrary(); }, need: !!s.filePath && !s.itemKey },
 
     { id: 'search', label: '文档内搜索', keys: 'Ctrl+F', group: '浏览', run: () => { const b = $('search-box'); if (b) { b.focus(); b.select(); } } },
     { id: 'goto', label: '跳到指定页…', keys: '', group: '浏览', run: () => {
@@ -5214,7 +6122,8 @@ function cmdCommands() {
     { id: 'next', label: '下一页', keys: 'PgDn', group: '浏览', run: () => { if ($('btn-next')) $('btn-next').click(); }, need: hasPdf },
     { id: 'scroll', label: '视图：连续滚动', keys: '', group: '浏览', run: () => { App.setViewMode('scroll'); } },
     { id: 'page', label: '视图：单页翻页', keys: '', group: '浏览', run: () => { App.setViewMode('page'); } },
-    { id: 'spread', label: '视图：双页对开', keys: 'Ctrl+Shift+D', group: '浏览', run: () => { App.setViewMode('spread'); } },
+    { id: 'spread', label: '视图：双页对开（开 / 关）', keys: 'Ctrl+Shift+D', group: '浏览', run: () => { toggleSpread(); } },
+    { id: 'spreadzoom', label: '双页独立缩放（只放大鼠标所指的一页）', keys: '', group: '浏览', run: () => { const b = $('btn-spread-zoom'); if (b && !b.hidden) b.click(); else toast('先切到双页对开'); } },
     { id: 'sidebar', label: '侧栏（目录 / 缩略图 / 批注）', keys: '', group: '浏览', run: () => { if ($('btn-sidebar')) $('btn-sidebar').click(); } },
     { id: 'zoomin', label: '放大', keys: 'Ctrl+=', group: '浏览', run: () => { if ($('btn-zoom-in')) $('btn-zoom-in').click(); } },
     { id: 'zoomout', label: '缩小', keys: 'Ctrl+-', group: '浏览', run: () => { if ($('btn-zoom-out')) $('btn-zoom-out').click(); } },
@@ -5239,7 +6148,9 @@ function cmdCommands() {
     { id: 'tool-hl', label: '工具：荧光笔', keys: 'H', group: '标注', run: () => Anno.setTool('highlight'), need: hasPdf },
     { id: 'tool-text', label: '工具：文字', keys: 'T', group: '标注', run: () => Anno.setTool('text'), need: hasPdf },
     { id: 'tool-note', label: '工具：便签', keys: 'N', group: '标注', run: () => Anno.setTool('note'), need: hasPdf },
-    { id: 'tool-stamp', label: '工具：印章', keys: 'S', group: '标注', run: () => Anno.setTool('stamp'), need: hasPdf },
+    { id: 'tool-ellipse', label: '工具：圆 / 椭圆', keys: 'O', group: '标注', run: () => Anno.setTool('ellipse'), need: hasPdf },
+    { id: 'tool-triangle', label: '工具：三角形', keys: 'D', group: '标注', run: () => Anno.setTool('triangle'), need: hasPdf },
+    { id: 'tool-smart', label: '工具：一笔成型（手绘自动变标准图形）', keys: 'S', group: '标注', run: () => Anno.setTool('smart'), need: hasPdf },
     { id: 'undo', label: '撤销', keys: 'Ctrl+Z', group: '标注', run: () => Anno.undo(), need: hasPdf },
     { id: 'clear', label: '清除本页标注', keys: '', group: '标注', run: () => { if ($('btn-clear-page')) $('btn-clear-page').click(); }, need: hasPdf },
     { id: 'bookmark', label: '本页加 / 删书签', keys: 'B', group: '标注', run: () => { if (typeof bookmarkToggle === 'function') bookmarkToggle(App.state.currentPage); }, need: hasPdf },
@@ -5255,9 +6166,9 @@ function cmdCommands() {
     // 帮助：说明写在 src/help-content.js；这里只留最常用的三个入口，
     // 具体某条功能可以在指南里搜（Help 打开后输入框自动聚焦）。
     { id: 'help', label: '使用指南（所有功能怎么用）', keys: 'F1', group: '帮助', run: () => { if (window.Help) window.Help.open(); } },
-    { id: 'help-keys', label: '快捷键速查', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.openTopic('shortcuts'); } },
-    { id: 'help-trouble', label: '常见问题排查', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.openTopic('trouble'); } },
-    { id: 'help-limits', label: '当前版本做不到什么', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.openTopic('limits'); } },
+    { id: 'help-keys', label: '快捷键速查', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.open('shortcuts'); } },
+    { id: 'help-trouble', label: '常见问题排查', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.open('trouble'); } },
+    { id: 'help-limits', label: '当前版本做不到什么', keys: '', group: '帮助', run: () => { if (window.Help) window.Help.open('limits'); } },
   ];
   return list.filter((c) => c.need !== false);
 }

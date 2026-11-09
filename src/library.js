@@ -505,6 +505,33 @@ function now() { return Date.now(); }
 function findItem(key) { return load().items.find((x) => x.key === key) || null; }
 function findCollection(id) { return load().collections.find((c) => c.id === id) || null; }
 
+/*
+ * 附件存在性缓存。
+ * 以前 summary() 对每条带附件的条目同步 existsSync 一次：万条库刷一次列表就是一万次
+ * 文件系统探测（实测单次 summary 376—392 ms）。列表要的只是「在 / 不在」，
+ * 完全没必要每次都问磁盘：同一批里相同路径只问一次，跨批次按短 TTL 复用，
+ * 改名 / 重新定位 / 删除后由调用方 forgetAttachment() 立刻失效。
+ * TTL 取 30 秒：用户在外面删了文件，最多半分钟后列表自己纠正；手动「重新定位」不受影响。
+ */
+const ATTACH_TTL_MS = 30 * 1000;
+const attachCache = new Map();
+function pathExistsCached(p) {
+  if (!p) return false;
+  const key = String(p);
+  const hit = attachCache.get(key);
+  const now = Date.now();
+  if (hit && now - hit.at < ATTACH_TTL_MS) return hit.exists;
+  let exists = false;
+  try { exists = fs.existsSync(key); } catch (_) { exists = false; }
+  if (attachCache.size > 20000) attachCache.clear();   // 防止长期运行无限增长
+  attachCache.set(key, { at: now, exists });
+  return exists;
+}
+function forgetAttachment(p) {
+  if (p) attachCache.delete(String(p));
+  return !!p;
+}
+
 // 从文件名猜标题：去扩展名、去下划线/连字符、去开头数字前缀
 function guessTitleFromPath(p) {
   const base = path.basename(p).replace(/\.[A-Za-z0-9]{1,8}$/, '');
@@ -894,11 +921,15 @@ function moveItem(key, collectionId) {
 function setAttachment(key, filePathArg, fingerprint) {
   const it = findItem(key); if (!it || !filePathArg) return null;
   const abs = path.resolve(filePathArg);
+  const oldPath = it.attachment && it.attachment.path;
   it.attachment = {
     path: abs,
     name: path.basename(abs),
     fingerprint: normalizeFingerprint(fingerprint),
   };
+  // 新旧两条路径的存在性缓存都作废：旧路径可能已被放弃，新路径要立刻重新探测
+  forgetAttachment(oldPath);
+  forgetAttachment(abs);
   it.updated = now(); save(); return it;
 }
 
@@ -994,12 +1025,12 @@ function publicItem(it, collIds) {
     // 阅读状态与笔记旧标题：都是可选字段，老库读出空值
     readStatus: it.readStatus || '',
     aliases: ((load().noteAliases || {})[it.key] || []).slice(),
-    hasFile: !!(it.attachment && fs.existsSync(it.attachment.path)),
+    hasFile: !!(it.attachment && pathExistsCached(it.attachment.path)),
     attachment: it.attachment,
     snapshot: it.snapshot && it.snapshot.path ? {
       path: it.snapshot.path, png: it.snapshot.png || '',
       url: it.snapshot.url || '', at: it.snapshot.at || 0,
-      hasFile: fs.existsSync(it.snapshot.path),
+      hasFile: pathExistsCached(it.snapshot.path),
     } : null,
   };
 }
@@ -1484,31 +1515,102 @@ function unlinkAnno(id) {
   return { ok: true, id: key, removed: 1 };
 }
 
-// 稳定 id 升级后，把标签 / 对象的键从旧 id（hash:页:下标）搬到新 id
+/*
+ * 稳定 id 升级后，把标签 / 对象的键从旧 id（hash:页:下标）搬到新 id。
+ *
+ * 三个约束来自复查：
+ *   1. save() 失败必须如实返回 ok:false（F02）。以前直接 throw，调用方空 catch 之后照旧报
+ *      「迁移成功」，标签就永久挂在旧键上——disk 上 sidecar 已是新 id，新 id 查不到标签。
+ *   2. 重放必须是空操作（F02）。迁移是可重试的两步提交，第二次跑时旧键早就不在了；
+ *      这时不能凭空给新键建一条空 annoMeta（否则每次重试都往库里写垃圾）。
+ *   3. 反向引用也必须一起改（G04）：条目 it.annoIds 与笔记 note.annoIds 存的是标注 id，
+ *      只搬 annoMeta 会让它们永远指向旧 id——解除关联解不掉、统计多算一个条目。
+ *      即使旧 meta 键已经不在了，引用替换仍要照做（否则以前迁坏的数据永远补不回来）。
+ */
+/*
+ * 一次遍历里把一个引用数组里的所有旧 id 换成新 id。返回 null 表示没有任何映射命中，
+ * 调用方据此跳过写回（不去无谓地改 updated）。命中时保留 G04 的规则：去空、去重、保序。
+ * 查表用 Object.create(null)，避免旧 id 恰好叫 __proto__ / constructor 时踩原型链。
+ */
+function replaceAnnoRefsByLookup(list, lookup, applied) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  let hit = false;
+  for (const x of list) {
+    let v = x;
+    if (x && Object.prototype.hasOwnProperty.call(lookup, x)) {
+      v = lookup[x];
+      applied.add(x);
+      hit = true;
+    }
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return hit ? out : null;
+}
+
 function remapAnnoTags(map) {
   const m = map && typeof map === 'object' ? map : {};
-  const s = load();
-  let n = 0;
+  // A01：先建 oldId → newId 查表。以前是「每条映射都把全部条目和笔记扫一遍」，
+  // M 条映射 × N 条文献会重复扫 M 次全库；现在条目 / 笔记只遍历一次。
+  const lookup = Object.create(null);
   for (const oldId of Object.keys(m)) {
     const newId = str(m[oldId]);
     if (!newId || newId === oldId) continue;
+    lookup[oldId] = newId;
+  }
+  if (!Object.keys(lookup).length) return { ok: true, remapped: 0 };
+  const s = load();
+  const applied = new Set();
+
+  // ① 反向引用：条目与它的笔记都可能在 annoIds 里记着旧 id。每个数组只过一遍。
+  //    新旧 id 分属不同命名空间（老的是 hash:页:下标，新的是 aXXXX），映射不会串成链，
+  //    因此一次查表替换与过去逐条替换等价。
+  for (const it of s.items) {
+    if (!it || typeof it !== 'object') continue;
+    let touched = false;
+    const ids = replaceAnnoRefsByLookup(it.annoIds, lookup, applied);
+    if (ids) { it.annoIds = ids; touched = true; }
+    for (const nt of (it.notes || [])) {
+      if (!nt || typeof nt !== 'object') continue;
+      const nids = replaceAnnoRefsByLookup(nt.annoIds, lookup, applied);
+      if (nids) { nt.annoIds = nids; touched = true; }
+    }
+    if (touched) it.updated = now();
+  }
+
+  // ② 键与对象层：只按映射数量处理，不再碰全库。
+  let n = 0;
+  for (const oldId of Object.keys(lookup)) {
+    const newId = lookup[oldId];
     const oldTags = strList(s.annoTags[oldId]);
     const oldMeta = s.annoMeta[oldId];
-    const target = s.annoMeta[newId] || (s.annoMeta[newId] = emptyAnnoMeta());
-    for (const t of oldTags) if (!target.tags.includes(t)) target.tags.push(t);
-    if (oldMeta) {
-      for (const t of oldMeta.tags) if (!target.tags.includes(t)) target.tags.push(t);
-      if (!target.text) target.text = oldMeta.text;
-      if (!target.comment) target.comment = oldMeta.comment;
-      if (!target.itemKey) target.itemKey = oldMeta.itemKey;
-      for (const nid of oldMeta.noteIds) if (!target.noteIds.includes(nid)) target.noteIds.push(nid);
-      if (!target.created) target.created = oldMeta.created;
-      delete s.annoMeta[oldId];
+    const hasKeys = !!(oldTags.length || oldMeta);
+    if (hasKeys) {
+      const target = s.annoMeta[newId] || (s.annoMeta[newId] = emptyAnnoMeta());
+      for (const t of oldTags) if (!target.tags.includes(t)) target.tags.push(t);
+      if (oldMeta) {
+        for (const t of oldMeta.tags) if (!target.tags.includes(t)) target.tags.push(t);
+        if (!target.text) target.text = oldMeta.text;
+        if (!target.comment) target.comment = oldMeta.comment;
+        if (!target.itemKey) target.itemKey = oldMeta.itemKey;
+        for (const nid of oldMeta.noteIds) if (!target.noteIds.includes(nid)) target.noteIds.push(nid);
+        if (!target.created) target.created = oldMeta.created;
+        delete s.annoMeta[oldId];
+      }
+      delete s.annoTags[oldId];
+      n++;
+    } else if (applied.has(oldId)) {
+      // 旧键早就不在、只剩反向引用：也要照做，别让以前迁坏的数据永远补不回来（G04）
+      n++;
     }
-    delete s.annoTags[oldId];
-    n++;
   }
-  if (n) save();
+  if (!n) return { ok: true, remapped: 0 };
+  try {
+    save();
+  } catch (err) {
+    // save() 已经把内存回滚到最后一次成功落盘的状态：旧键与旧标签都还在磁盘上，可直接重试
+    return { ok: false, remapped: 0, error: String((err && err.message) || err) };
+  }
   return { ok: true, remapped: n };
 }
 
@@ -1525,61 +1627,126 @@ function annoPublic(id, m) {
   };
 }
 
-// ---------- 撤销 / 重做（v9） ----------
-// 快照式：每次「可撤销操作」执行前后各序列化一次库，有变化就压一个撤销点。
-// 比起给每个操作写反向逻辑，这样覆盖全、不会漏字段，代价是两步 JSON.stringify
-// （库通常几百 KB ~ 几 MB，用户手动操作时才跑，可以接受）。
-const UNDO_LIMIT = 20;
-let undoStack = [];
-let redoStack = [];
+// ---------- 撤销 / 重做（1.7.0 本轮：实体 / 字段差量） ----------
+// 旧写法是整库快照：每次可撤销操作前后各 stringify 一次整个库，20 个撤销点＝20 份全库 JSON。
+// 它有两个真问题：万条库 20 个撤销点占约 559 MiB；撤销时整库替换，会把后来保存的
+// 页码 / 订阅 / 附件路径一起回退（B01）。现在改为只记录被命令改到的实体字段。
+const UndoHistory = require('./undo-history.js');
+const NOTE_SEP = UndoHistory.NOTE_SEP;
 
-function snapshotJson() { return JSON.stringify(load()); }
+const history = UndoHistory.createHistory({
+  getStore: () => load(),
+  save: () => save(),
+  limit: 20,
+  coalesceMs: 4000,
+});
 
-function restoreSnapshot(str) {
-  try {
-    cache = normalize(JSON.parse(str));
-    save();
-    return true;
-  } catch (_) { return false; }
+function undoInfo() { return history.info(); }
+function undo() { return history.undo(); }
+function redo() { return history.redo(); }
+
+// 带某个标签的全部条目（重命名 / 合并 / 全库移除都要改这些）
+function keysWithTag(tag) {
+  const t = str(tag);
+  if (!t) return [];
+  return load().items.filter((it) => Array.isArray(it.tags) && it.tags.indexOf(t) >= 0).map((it) => ['item', it.key]);
 }
 
-function undoInfo() {
-  return {
-    canUndo: undoStack.length,
-    canRedo: redoStack.length,
-    undoDesc: undoStack.length ? undoStack[undoStack.length - 1].desc : '',
-    redoDesc: redoStack.length ? redoStack[redoStack.length - 1].desc : '',
-  };
+// 收藏集连同所有子孙（删除收藏集时整棵子树一起没）
+function collectionTree(id) {
+  const s = load();
+  const out = new Set([String(id)]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const c of s.collections) if (!out.has(c.id) && out.has(c.parentId)) { out.add(c.id); grew = true; }
+  }
+  return out;
 }
 
-function undo() {
-  const it = undoStack[undoStack.length - 1];
-  if (!it) return { ok: false, error: '没有可撤销的操作' };
-  const nowSnap = snapshotJson();
-  if (!restoreSnapshot(it.snap)) return { ok: false, error: '撤销失败：无法保存，请检查磁盘或目录权限后重试' };
-  undoStack.pop();
-  redoStack.push({ desc: it.desc, snap: nowSnap });
-  if (redoStack.length > UNDO_LIMIT) redoStack.shift();
-  return { ok: true, desc: it.desc };
+function itemsInCollections(ids) {
+  const set = ids instanceof Set ? ids : new Set(ids);
+  return load().items.filter((it) => (it.collectionIds || []).some((c) => set.has(c))).map((it) => ['item', it.key]);
 }
 
-function redo() {
-  const it = redoStack[redoStack.length - 1];
-  if (!it) return { ok: false, error: '没有可重做的操作' };
-  const nowSnap = snapshotJson();
-  if (!restoreSnapshot(it.snap)) return { ok: false, error: '重做失败：无法保存，请检查磁盘或目录权限后重试' };
-  redoStack.pop();
-  undoStack.push({ desc: it.desc, snap: nowSnap });
-  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-  return { ok: true, desc: it.desc };
-}
+/*
+ * 每条可撤销命令可能写到的实体。touch 会被克隆前值，watch 只记 id 集合
+ * （用于发现新建 / 删除的实体，例如「新建条目」「导入题录」）。
+ */
+const SCOPE = {
+  addPdf: () => ({ watch: ['item'] }),
+  ensurePdf: (args) => {
+    const p = args[0] ? path.resolve(String(args[0])) : '';
+    const ex = p ? findItemByPath(p) : null;
+    return { watch: ['item'], touch: ex ? [['item', ex.key]] : [] };
+  },
+  addItem: () => ({ watch: ['item'] }),
+  importItems: () => ({ watch: ['item'] }),
+  updateItem: (a) => ({ touch: [['item', a[0]], ['noteAlias', a[0]]] }),
+  trashItem: (a) => ({ touch: [['item', a[0]]] }),
+  restoreItem: (a) => ({ touch: [['item', a[0]]] }),
+  deleteItemForever: (a) => ({ touch: [['item', a[0]], ['noteAlias', a[0]]] }),
+  emptyTrash: () => ({ touch: load().items.filter((x) => x.deletedAt).map((x) => ['item', x.key]) }),
+  trashItems: (a) => ({ touch: (a[0] || []).map((k) => ['item', String(k)]) }),
+  addTag: (a) => ({ touch: [['item', a[0]]] }),
+  removeTag: (a) => ({ touch: [['item', a[0]]] }),
+  renameTag: (a) => ({ touch: keysWithTag(a[0]).concat([['tagColor', str(a[0])], ['tagColor', str(a[1])]]) }),
+  removeTagEverywhere: (a) => ({ touch: keysWithTag(a[0]).concat([['tagColor', str(a[0])]]) }),
+  mergeTags: (a) => ({ touch: keysWithTag(a[0]).concat([['tagColor', str(a[0])], ['tagColor', str(a[1])]]) }),
+  setTagColor: (a) => ({ touch: [['tagColor', str(a[0])]] }),
+  addRelation: (a) => ({ touch: [['item', a[0]], ['item', a[1]]] }),
+  removeRelation: (a) => ({ touch: [['item', a[0]], ['item', a[1]]] }),
+  addCollection: () => ({ watch: ['collection'] }),
+  removeCollection: (a) => {
+    const tree = collectionTree(a[0]);
+    return { touch: [...tree].map((id) => ['collection', id]).concat(itemsInCollections(tree)) };
+  },
+  renameCollection: (a) => ({ touch: [['collection', a[0]]] }),
+  setCollections: (a) => ({ touch: [['item', a[0]]] }),
+  moveItem: (a) => ({ touch: [['item', a[0]]] }),
+  addSearch: () => ({ watch: ['search'] }),
+  removeSearch: (a) => ({ touch: [['search', str(a[0])]] }),
+  bulkUpdate: (a) => ({ touch: (a[0] || []).map((k) => ['item', String(k)]) }),
+  mergeItems: (a) => {
+    const drop = new Set((a[1] || []).filter((k) => k && k !== a[0]).map(String));
+    const touch = [['item', a[0]]];
+    for (const k of drop) touch.push(['item', k]);
+    const s = load();
+    for (const it of s.items) {
+      if (it.key === a[0] || drop.has(it.key)) continue;
+      if ((it.relations || []).some((r) => drop.has(r))) touch.push(['item', it.key]);
+    }
+    for (const [id, m] of Object.entries(s.annoMeta || {})) if (m && drop.has(String(m.itemKey))) touch.push(['annoMeta', id]);
+    return { touch };
+  },
+  addNote: (a) => ({ touch: [['item', a[0]]] }),
+  // 笔记正文编辑只同步这一条笔记：整条条目克隆会把其它笔记的正文也复制一遍
+  updateNote: (a) => ({ touch: [['note', String(a[0]) + NOTE_SEP + String(a[1])]] }),
+  removeNote: (a) => ({ touch: [['note', String(a[0]) + NOTE_SEP + String(a[1])]] }),
+  setAnnoTags: (a) => ({ touch: [['annoMeta', str(a[0])], ['annoTags', str(a[0])]] }),
+  addAnnoTags: (a) => ({ touch: (a[0] || []).flatMap((id) => [['annoMeta', str(id)], ['annoTags', str(id)]]) }),
+  removeAnnoTag: (a) => ({ touch: [['annoMeta', str(a[0])], ['annoTags', str(a[0])]] }),
+  updateAnno: (a) => ({ touch: [['annoMeta', str(a[0])]] }),
+  linkAnnoToItem: (a) => {
+    const m = (load().annoMeta || {})[str(a[0])];
+    const touch = [['annoMeta', str(a[0])], ['item', a[1]]];
+    if (m && m.itemKey && m.itemKey !== a[1]) touch.push(['item', m.itemKey]);
+    return { touch };
+  },
+  unlinkAnno: (a) => {
+    const m = (load().annoMeta || {})[str(a[0])];
+    const touch = [['annoMeta', str(a[0])]];
+    if (m && m.itemKey) touch.push(['item', m.itemKey]);
+    return { touch };
+  },
+};
 
-// 给导出函数套一层：执行前后比对，真有变化才留撤销点（返回 false / 没有改动时不污染栈）。
-// 注意 addPdf / importItems 之类是 async：要等 Promise 落定后再比快照，否则永远比在中间态。
+
+// 给导出函数套一层：执行后按「本命令可能写到的实体」求差量，真有变化才留撤销点。
+// 注意 addPdf / importItems 之类是 async：要等 Promise 落定后再求差，否则比在中间态。
 //
-// 笔记编辑也进撤销栈，但**同一条笔记的连续编辑合并成一个撤销点**（NOTE_COALESCE_MS）。
-// 不合并的话打字每 700ms 就压一个整库快照，栈立刻被填满；完全不记录的话，
-// 撤销别的操作（比如「添加标签」）会连后来保存的笔记一起回退——那是真的丢数据（R-v1.6d-01）。
+// 笔记编辑仍合并（NOTE_COALESCE_MS）：同一条笔记的连续编辑只占一个撤销点，
+// 但合并时用「上一次的 before ↔ 当前值」重新求差，期间新改的字段也不会漏。
 const NOTE_COALESCE_MS = 4000;
 function noteKeyOf(args) { return String(args[0] == null ? '' : args[0]) + '|' + String(args[1] == null ? '' : args[1]); }
 
@@ -1588,39 +1755,19 @@ function enableUndo(names) {
     const orig = module.exports[name];
     if (typeof orig !== 'function' || orig.__undoWrapped) continue;
     const wrapped = function (...args) {
-      // 能合并就不必拍「之前」的快照：省掉两次整库 JSON，打字时不至于卡
-      const top = undoStack[undoStack.length - 1];
-      if (name === 'updateNote' && top && top.note === noteKeyOf(args)
-        && (Date.now() - (top.at || 0) < NOTE_COALESCE_MS)) {
-        const r0 = orig.apply(module.exports, args);
-        const bump = () => {
-          const t = undoStack[undoStack.length - 1];
-          if (t && t.note === noteKeyOf(args)) t.at = Date.now();
-          redoStack = [];
-        };
-        if (r0 && typeof r0.then === 'function') { r0.then(bump, bump); return r0; }
-        bump();
-        return r0;
-      }
-      let before = '';
-      try { before = snapshotJson(); } catch (_) {}
+      const scopeFn = SCOPE[name];
+      const scope = typeof scopeFn === 'function' ? (scopeFn(args) || {}) : {};
+      const token = history.begin(scope.touch || [], scope.watch || []);
       const finish = () => {
-        let after = before;
-        try { after = snapshotJson(); } catch (_) {}
-        if (before && after !== before) {
-          undoStack.push({
-            desc: names[name], snap: before,
-            // 只有笔记编辑参与合并，其它操作不带这两个字段
-            note: name === 'updateNote' ? noteKeyOf(args) : '',
-            at: Date.now(),
-          });
-          if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-          redoStack = [];
-        }
+        history.commit(token, names[name], {
+          coalesceKey: name === 'updateNote' ? noteKeyOf(args) : '',
+          coalesceMs: NOTE_COALESCE_MS,
+        });
       };
+      // 命令抛错时 save() 已把内存回滚到上次成功落盘的状态，这里不记录撤销点
       const r = orig.apply(module.exports, args);
       if (r && typeof r.then === 'function') {
-        r.then(finish, finish);
+        r.then(finish, () => {});
         return r;
       }
       finish();
@@ -1646,9 +1793,11 @@ module.exports = {
   bulkUpdate, trashItems, findDuplicates, mergeItems, importItems,
   exportStore, replaceStore, mergeStore, combineStores, backupNow,
   guessTitleFromPath, ITEM_TYPES,
-  undo, redo, undoInfo,
+  undo, redo, undoInfo, forgetAttachment,
   resetCache() { cache = null; savedJson = null; }, // 测试钩子：模拟新进程从磁盘重载
-  resetUndo() { undoStack = []; redoStack = []; },   // 测试钩子：清空撤销栈（不动数据）
+  resetUndo() { history.clear(); },   // 测试钩子：清空撤销栈（不动数据）
+  // 测试钩子：撤销栈里存了多少东西（用于验证「不再复制整库」）
+  undoStats() { return history.stats(); },
 };
 
 // 哪些操作可以撤销（描述会显示在提示里）。

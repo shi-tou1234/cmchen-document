@@ -12,6 +12,15 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 
+// 没显式指定 --user-data-dir 的调用，一律分一个临时目录，避免单个测试忘记传参
+// 就启动默认用户配置（会改动真实 session.json / Preferences）。进程退出时统一清掉。
+const AUTO_DIRS = [];
+process.on('exit', () => {
+  for (const d of AUTO_DIRS) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 function runProbe(opts) {
   const o = opts || {};
   // 支持注入：probePath + inject（渲染进程没有 process/env，常量直接替换进探针源码）
@@ -27,7 +36,23 @@ function runProbe(opts) {
   }
   const env = Object.assign({}, process.env, o.env || {}, { PDFREADER_PROBE: probeFile });
   delete env.ELECTRON_RUN_AS_NODE;
-  const args = ['.', '--no-sandbox', '--disable-gpu'].concat(o.args || []);
+  const extraArgs = (o.args || []).slice();
+  const hasUserData = extraArgs.some((a) => String(a).startsWith('--user-data-dir='));
+  let isolated = null;
+  if (!hasUserData) {
+    isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'trove-probe-'));
+    AUTO_DIRS.push(isolated);
+    extraArgs.push('--user-data-dir=' + isolated);
+    // 显式配置优先：只补调用方没给的那几个目录
+    if (!env.PDFREADER_LIBRARY) env.PDFREADER_LIBRARY = path.join(isolated, 'library.json');
+    if (!env.PDFREADER_DATA_DIR) env.PDFREADER_DATA_DIR = path.join(isolated, 'data');
+  }
+  // 隐藏 / 后台窗口会被 Chromium 节流，页块渲染与 rendered.get(1) 可能一直等不到；
+  // 这是界面探针偶发超时的环境因素，与被测逻辑无关。
+  const args = ['.', '--no-sandbox', '--disable-gpu',
+    '--disable-background-timer-throttling',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows'].concat(extraArgs);
   let out = '';
   try {
     out = execFileSync(ELECTRON, args, {

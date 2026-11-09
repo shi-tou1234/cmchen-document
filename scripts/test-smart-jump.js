@@ -51,6 +51,14 @@ const { runProbe } = require('./probe-runner');
   assert.ok(SJ.isBibHeading('Bibliography'), 'Bibliography');
   assert.ok(!SJ.isBibHeading('References1'), '带后缀不算标题');
   assert.ok(!SJ.isBibHeading('12. Writer'), '条目不是标题');
+  // 真实 PDF 的标题行常见写法（早先只认最干净的那一种，导致「找不到参考文献区」）
+  assert.ok(SJ.isBibHeading('7 References'), '章节号 + References');
+  assert.ok(SJ.isBibHeading('VII. Bibliography'), '罗马数字章节号');
+  assert.ok(SJ.isBibHeading('REFERENCES AND NOTES'), 'References and Notes');
+  assert.ok(SJ.isBibHeading('参考文献（References）'), '中英并写（中文在前）');
+  assert.ok(SJ.isBibHeading('References (参考文献)'), '中英并写（英文在前）');
+  assert.ok(SJ.isBibHeading('参 考 文 献'), '中文标题被拆成单字');
+  assert.ok(!SJ.isBibHeading('12. Writer, B. 2019.'), '编号条目仍不是标题');
 
   // 条目匹配
   assert.ok(SJ.matchNumericLine('12. Writer, B. 2019.', 12), '数字条目 12.');

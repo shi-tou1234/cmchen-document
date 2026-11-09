@@ -2,7 +2,8 @@ const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen } = 
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { atomicWrite } = require('./atomic-file');
+const { atomicWrite, atomicCreate } = require('./atomic-file');
+const { createSidecarStore } = require('./sidecar-store.js');
 const resources = require('./data-resources');
 
 const settings = require('./settings.js');
@@ -124,11 +125,6 @@ search.start(currentDataDir());
 // 渲染进程据此刷新索引状态、重跑当前搜索——不用轮询，也不会因为「搜完才建好索引」漏结果。
 search.on('change', (ev) => broadcast('ft-index-changed', ev));
 search.on('idle', (ev) => broadcast('ft-index-idle', ev));
-// 老标注补稳定 id（v8 地基）：这次不动它，后面删一条标注就会把所有标签串位
-try {
-  const up = upgradeAnnoIds();
-  if (up && up.upgraded) console.log('[anno] upgrade ids ' + JSON.stringify(up));
-} catch (err) { console.warn('[anno] id upgrade failed:', err && err.message); }
 
 // ---------- 最近打开 + 每文件页码 ----------
 const MAX_RECENT = 8;
@@ -146,7 +142,6 @@ function rememberRecent(filePath, page) {
   appState.recent = list.slice(0, MAX_RECENT);
   appState.lastDir = path.dirname(filePath);
   saveWindowState(appState);
-  rebuildMenu();
 }
 // 页码来源统一：库条目优先，其次「最近打开」。这样从库里打开、双击、最近列表都恢复到同一页。
 function pageForPath(filePath) {
@@ -332,6 +327,13 @@ function createWindow(opts = {}) {
   const w = appState.width || 1180;
   const h = appState.height || 780;
   const pos = safeWindowPos(appState.x, appState.y, w, h);
+  // 打开就铺满屏幕：首次启动（还没存过窗口状态）和「上次就是最大化关的」都算。
+  // 只有用户自己把窗口拉小、并在那个尺寸下关过窗，才恢复成他定的尺寸。
+  const visible = opts.show !== false;
+  // 首次启动（没有保存过尺寸）或上次就是在最大化下关闭的 → 直接铺满。
+  // 只有「自己拉小过、并以那个尺寸关掉」的窗口才恢复成原尺寸：缺 maximized 字段的
+  // 旧状态文件不该被当成「用户要求最大化」，否则每次升级都会盖掉用户设定的窗口大小。
+  const startMax = appState.maximized === true || !appState.width;
   win = new BrowserWindow({
     width: w,
     height: h,
@@ -342,7 +344,8 @@ function createWindow(opts = {}) {
     title: 'Trove',
     backgroundColor: '#ececec',
     icon: path.join(__dirname, '..', 'assets', 'icon-256.png'),
-    show: opts.show !== false,
+    // 最大化启动时先不显示，等最大化生效再 show：不然会先闪一下小窗口
+    show: visible && !startMax,
     webPreferences: {
       // 安全底线：渲染进程拿不到 Node 能力，本地文件读取全部走 preload/IPC
       nodeIntegration: false,
@@ -353,6 +356,12 @@ function createWindow(opts = {}) {
       additionalArguments: ['--pdfreader-app'],
     },
   });
+
+  // 最大化要显式调一次再显示：hidden 窗口直接 maximize 在某些 Windows 版本上不生效
+  if (visible && startMax) {
+    win.maximize();
+    win.show();
+  }
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
@@ -389,7 +398,7 @@ function createWindow(opts = {}) {
       if (process.env.SMOKE_SHOT) {
         setTimeout(async () => {
           try {
-            // 可选：展开「绘制 ▾」下拉，核对分组浮层
+            // 可选：展开标注工具栏的「更多」下拉，核对其中的工具
             if (process.env.SMOKE_OPEN_DRAW) {
               await win.webContents.executeJavaScript(
                 "(function(){var b=document.getElementById('draw-btn');if(b)b.click();return 1;})()");
@@ -406,12 +415,14 @@ function createWindow(opts = {}) {
   }
 
   win.on('closed', () => { win = null; });
-  // 关闭时保存窗口边界，下次启动恢复
+  // 关闭时保存窗口边界与「是否最大化」，下次启动照着来
   win.on('close', (e) => {
-    if (!win.isMinimized() && !win.isMaximized()) {
+    const maxed = win.isMaximized();
+    if (!win.isMinimized() && !maxed) {
       const b = win.getBounds();
       Object.assign(appState, { width: b.width, height: b.height, x: b.x, y: b.y });
     }
+    appState.maximized = maxed;
     saveWindowState(appState);
     // v1.6d：关窗先让渲染层把没落盘的东西存完（标注 600ms 防抖、笔记 700ms 防抖）。
     // 不拦这一下，用户改完标注立刻点 ✕ 就会丢掉最后那批改动（R-v1.6d-02）。
@@ -857,29 +868,231 @@ function uniquePath(dir, base, ext) {
   return target;
 }
 
-// 一个文件改了名，它的标注文件与全文索引也跟着搬到新路径对应的文件
-async function moveSidecar(oldPath, newPath) {
-  const moved = { anno: false, ft: false };
-  if (path.resolve(oldPath).toLowerCase() === path.resolve(newPath).toLowerCase()) return moved;
+/*
+ * 改名时标注文件要跟过去。这里拆成「准备 / 收尾 / 撤销」三步，而不是一把梭：
+ *
+ *   ① 准备：先按新路径的 hash 写出一份标注（旧文件先留着）。写不进去就整次放弃，
+ *      PDF 一个字都不动 —— 旧行为是先把 PDF 改名，标注搬迁失败被空 catch 吞掉，
+ *      结果是「改名成功、新路径打开一份没有标注的文档」，而标注还在旧 hash 里（G03）。
+ *   ② 收尾：PDF 与库都提交成功之后，才删旧标注文件。删不掉只是留个孤儿文件，不影响数据。
+ *   ③ 撤销：PDF 改名或库提交失败时，把刚写的新标注删掉，保证「什么都没变」。
+ *
+ * 读不出来的标注文件（broken）也照样按字节复制：坏文件还是坏文件，但至少跟着文档走，
+ * 不会因为改名把还能人工捞回的内容留在旧路径上。
+ */
+/*
+ * 改名事务日志（H03）：在**第一次改动磁盘文件之前**就写下这次要做什么。
+ * 单独一个小文件，不塞进 library.json —— 它描述的正是「库与磁盘不一致」这件事，
+ * 库写不进去的时候最需要它，不能反过来依赖库还能写。
+ * 以前只在「库写失败且回滚也失败」时补记一条，于是「PDF 已改名、库还没提交」被强制
+ * 终止时（真实 fs.renameSync 已返回、进程随即被杀）没有任何记录，重启后库指向旧路径、
+ * 新 PDF 与新标注都在磁盘上却接不回来。
+ * 记录内容：操作 id / 条目 key / 旧新路径 / 两个 sidecar 路径 / 目标是否本次创建 / 阶段。
+ * 阶段只是提示，恢复一律以磁盘真实状态为准。
+ */
+function renamePendingFile() { return path.join(USER_DATA, 'pending-renames.json'); }
+
+function readRenamePending() {
   try {
-    const oldAnno = annoFileFor(oldPath);
-    if (fs.existsSync(oldAnno)) {
-      const obj = JSON.parse(fs.readFileSync(oldAnno, 'utf8'));
-      obj.path = newPath;
-      const target = annoFileFor(newPath);
-      if (fs.existsSync(target)) throw new Error('目标附件已有关联标注');
-      atomicWrite(target, JSON.stringify(obj));
-      try { fs.unlinkSync(oldAnno); } catch (_) {}
-      moved.anno = true;
+    const list = JSON.parse(fs.readFileSync(renamePendingFile(), 'utf8'));
+    return Array.isArray(list) ? list.filter((x) => x && x.key && x.oldPath && x.newPath) : [];
+  } catch (_) { return []; }
+}
+
+// 写盘结果必须如实返回：写不进去时调用方要放弃改名（H03 验收 2）。
+function writeRenamePending(list) {
+  try { atomicWrite(renamePendingFile(), JSON.stringify(list)); return true; }
+  catch (err) { console.warn('[rename] pending log write failed:', err && err.message); return false; }
+}
+
+function sameRenameOp(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id) return a.id === b.id;
+  try {
+    return String(a.key) === String(b.key)
+      && path.resolve(a.oldPath) === path.resolve(b.oldPath)
+      && path.resolve(a.newPath) === path.resolve(b.newPath);
+  } catch (_) { return false; }
+}
+
+// A02：去重 + 追加在内存里一次做完，只落一次盘；旧实现先写一次过滤结果再写一次追加，
+// 前一次的结果根本没交给后一次，等于白写一次原子文件。
+function putRenamePending(rec) {
+  const list = readRenamePending().filter((x) => !sameRenameOp(x, rec));
+  list.push(rec);
+  return writeRenamePending(list);
+}
+function patchRenamePending(rec, patch) {
+  const list = readRenamePending();
+  let hit = false;
+  for (const x of list) if (sameRenameOp(x, rec)) { Object.assign(x, patch); hit = true; }
+  return hit && writeRenamePending(list);
+}
+function clearRenamePending(rec) {
+  const list = readRenamePending();
+  const rest = list.filter((x) => !sameRenameOp(x, rec));
+  if (rest.length === list.length) return true;
+  return writeRenamePending(rest);
+}
+
+function sameFsPath(a, b) {
+  try { return path.resolve(a) === path.resolve(b); } catch (_) { return false; }
+}
+function unlinkQuiet(p) { try { fs.unlinkSync(p); } catch (_) {} }
+
+/*
+ * 单条记录的恢复。四种磁盘状态分开处理，不能只看「库当前路径在不在」：
+ *   新在旧不在 → 改名已发生，补写库 / 补搬标注 / 清旧标注；
+ *   旧在新不在 → 还没改名（或已回滚），只撤销本次创建的预备 sidecar；
+ *   两者都在   → 可能是用户后来又放回文件，按库指向决定收尾还是撤销，绝不动 PDF；
+ *   两者都不在 → 文件被移走 / 删除，保留记录作为明确的待恢复状态。
+ * 条目被删或用户已重新关联到第三个路径时，一律不动库，避免旧操作覆盖新选择。
+ */
+function recoverRename(rec) {
+  const oldSidecar = rec.oldSidecar || annoFileFor(rec.oldPath);
+  const newSidecar = rec.newSidecar || annoFileFor(rec.newPath);
+  const it = library.findItem(rec.key);
+  if (!it || it.deletedAt) return { done: true };
+  const cur = it.attachment && it.attachment.path;
+  const atOld = !!cur && sameFsPath(cur, rec.oldPath);
+  const atNew = !!cur && sameFsPath(cur, rec.newPath);
+  if (cur && !atOld && !atNew) return { done: true };
+
+  const oldDoc = fs.existsSync(rec.oldPath);
+  const newDoc = fs.existsSync(rec.newPath);
+  const newSidecarExists = fs.existsSync(newSidecar);
+
+  if (newDoc && !oldDoc) {
+    // 新 PDF 在了，预备的标注却可能还没搬（或搬了一半）：补搬，同样绝不覆盖既有文件。
+    if (!newSidecarExists && fs.existsSync(oldSidecar)) {
+      try { fs.copyFileSync(oldSidecar, newSidecar, fs.constants.COPYFILE_EXCL); }
+      catch (err) {
+        if (!err || err.code !== 'EEXIST') return { done: false, error: '标注文件补搬失败' };
+      }
     }
-  } catch (_) {}
-  // 索引文件跟着搬家：交给索引服务（worker 里改写 path 字段并换文件），
-  // 主进程不再直接读写 fulltext 目录。
+    let fixed = 0;
+    if (!atNew) {
+      try { library.setAttachment(rec.key, rec.newPath); fixed = 1; }
+      catch (_) { return { done: false, error: '库写入失败' }; }
+    }
+    // 新标注确实落地了，才敢删旧标注（原文件仍可在旧 hash 上人工找回）
+    if (fs.existsSync(newSidecar)) unlinkQuiet(oldSidecar);
+    return { done: true, fixed };
+  }
+  if (oldDoc && !newDoc) {
+    // 只删「本次创建」的目标 sidecar；目标本来就有的文件一个字节都不碰（H02）
+    if (rec.sidecarOwned) unlinkQuiet(newSidecar);
+    if (atNew) {
+      try { library.setAttachment(rec.key, rec.oldPath); }
+      catch (_) { return { done: false, error: '库写入失败' }; }
+    }
+    return { done: true, fixed: 0 };
+  }
+  if (oldDoc && newDoc) {
+    if (atNew && newSidecarExists) { unlinkQuiet(oldSidecar); return { done: true, fixed: 0 }; }
+    if (atOld) { if (rec.sidecarOwned) unlinkQuiet(newSidecar); return { done: true, fixed: 0 }; }
+    return { done: false, error: '旧路径和新路径都存在，需要人工确认' };
+  }
+  return { done: false, error: '旧路径和新路径都不存在，无法自动恢复' };
+}
+
+function applyPendingRenames() {
+  const list = readRenamePending();
+  if (!list.length) return { fixed: 0, left: 0 };
+  let fixed = 0;
+  const left = [];
+  for (const rec of list) {
+    let r;
+    try { r = recoverRename(rec); }
+    catch (err) { r = { done: false, error: String((err && err.message) || err) }; }
+    if (r && r.fixed) fixed += r.fixed;
+    if (!r || !r.done) {
+      left.push(rec);
+      if (r && r.error) console.warn('[rename] pending left:', r.error);
+    }
+  }
+  if (left.length !== list.length) writeRenamePending(left);
+  return { fixed, left: left.length };
+}
+
+function prepareSidecarMove(oldPath, newPath) {
+  const oldFile = annoFileFor(oldPath);
+  const newFile = annoFileFor(newPath);
+  if (path.resolve(oldFile).toLowerCase() === path.resolve(newFile).toLowerCase()) {
+    return { status: 'same', oldFile, newFile };
+  }
+  const st = sidecar.readPath(oldFile);
+  // 目标已有 sidecar（PDF 被移走 / 删除 / 重新关联后留下的）时，无论**源**是什么状态
+  // 都必须先拒绝：源有效会覆盖（H02），源损坏会覆盖（H02），源没有标注则会把这批
+  // 遗留标注错误绑定到新 PDF 上（I02）。所以这条检查必须在所有源状态分支之前，
+  // 包括 missing 的提前返回。检查 + 落地都要有「不覆盖」语义。
+  if (fs.existsSync(newFile)) {
+    return { status: 'failed', oldFile, newFile, error: '目标路径已有关联标注（' + path.basename(newFile) + '），没有覆盖' };
+  }
+  if (st.status === 'missing') return { status: 'missing', oldFile, newFile };
+  if (st.status === 'broken') {
+    try {
+      // 损坏文件按原字节跟着走，但 COPYFILE_EXCL 保证目标存在就失败，绝不覆盖。
+      fs.copyFileSync(oldFile, newFile, fs.constants.COPYFILE_EXCL);
+      return { status: 'copied-broken', oldFile, newFile, owned: true, error: st.error };
+    } catch (err) {
+      // 复制到一半失败可能已生成半个文件：那个是本次创建的，可以清；
+      // EEXIST 则是别人先创建的目标，绝不能删。
+      if (!err || err.code !== 'EEXIST') unlinkQuiet(newFile);
+      const why = err && err.code === 'EEXIST'
+        ? '目标路径已有关联标注' : String((err && (err.code || err.message)) || err);
+      return { status: 'failed', oldFile, newFile, error: '标注文件复制失败：' + why };
+    }
+  }
+  const obj = st.data;
+  obj.path = newPath;
   try {
-    const r = await search.moveIndex(oldPath, newPath);
-    moved.ft = !!(r && r.moved);
-  } catch (_) {}
-  return moved;
+    sidecar.createPath(newFile, obj);   // 不存在才创建，替代会覆盖的 writePath
+  } catch (err) {
+    if (!err || err.code !== 'EEXIST') unlinkQuiet(newFile);
+    const why = err && err.code === 'EEXIST'
+      ? '目标路径已有关联标注' : String((err && (err.code || err.message)) || err);
+    return { status: 'failed', oldFile, newFile, error: '标注文件写入失败：' + why };
+  }
+  return { status: 'ready', oldFile, newFile, owned: true };
+}
+
+// 回滚 / 恢复只删本次创建的目标文件；owned 是这份所有权的唯一凭据（H02/H03）。
+function dropPreparedSidecar(prep) {
+  if (!prep || prep.owned !== true) return;
+  if (prep.status !== 'ready' && prep.status !== 'copied-broken') return;
+  try { fs.unlinkSync(prep.newFile); } catch (_) {}
+}
+
+function finishSidecarMove(prep) {
+  if (!prep || (prep.status !== 'ready' && prep.status !== 'copied-broken')) return { ok: true };
+  if (prep.owned && !fs.existsSync(prep.newFile)) {
+    return { ok: false, error: '新标注文件不见了，旧标注文件已保留：' + prep.oldFile };
+  }
+  try { fs.unlinkSync(prep.oldFile); return { ok: true }; }
+  catch (err) {
+    return {
+      ok: false,
+      error: '新标注已写好，但旧标注文件没能删除（' + String((err && (err.code || err.message)) || err) + '）：' + prep.oldFile,
+    };
+  }
+}
+
+/*
+ * 附件改名：一次操作要协调三样东西 —— 磁盘文件名、库里的 attachment.path、标注 sidecar。
+ * 顺序是「写恢复日志 → 准备用户数据 → 改文件名 → 写库 → 删旧标注 → 清日志」，
+ * 任一步失败都能退回去（G02/G03），任何一步被强制终止都能在下次启动接回来（H03）。
+ * ok 表达整次结果（有失败就不是 ok），不再用「renamed 计数」掩盖状态已经改变。
+ */
+
+// 「最近打开」里如果还是旧路径，跟着换成新路径；否则下次从最近列表点开会打不开。
+// 会话（标签页）由渲染层在收到 files-renamed 后重新保存。
+function retargetRecentPaths(oldPath, newPath) {
+  let touched = false;
+  for (const r of recentList()) {
+    if (r && sameFsPath(r.path, oldPath)) { r.path = newPath; touched = true; }
+  }
+  if (touched) { try { saveWindowState(appState); } catch (_) {} }
 }
 
 ipcMain.handle('lib-rename-file', async (_e, info) => {
@@ -890,6 +1103,9 @@ ipcMain.handle('lib-rename-file', async (_e, info) => {
     if (!it || it.deletedAt || !it.attachment || !it.attachment.path) { out.skipped++; continue; }
     const oldPath = it.attachment.path;
     if (!fs.existsSync(oldPath)) { out.skipped++; out.errors.push({ key, error: '文件不存在' }); continue; }
+    let prep = null;
+    let rec = null;
+    let pdfRenamed = false;
     try {
       const ext = path.extname(oldPath);
       const base = renameBaseFor(it);
@@ -900,16 +1116,126 @@ ipcMain.handle('lib-rename-file', async (_e, info) => {
       const want = path.join(dir, base + ext);
       if (path.resolve(want) === path.resolve(oldPath)) { out.skipped++; continue; }
       const target = uniquePath(dir, base, ext);
-      fs.renameSync(oldPath, target);
-      library.setAttachment(key, target);   // 只接受路径字符串（内部会自己算 name）
-      const side = await moveSidecar(oldPath, target);
+
+      // ⓪ 动任何文件之前先写恢复日志。写不进去就整次放弃 —— 没有日志就不该开始改路径（H03）。
+      // 目标此刻不存在 → 一旦出现就一定是本次创建的（prepare 全程用 EXCL 语义），
+      // 先记下所有权，连「预备文件已写好、标记还没落盘」这个窄窗口也能被恢复清理。
+      // 目标本来就存在的，prepare 会整次拒绝，恢复也绝不会去删它（H02）。
+      const targetSidecarExisted = fs.existsSync(annoFileFor(target));
+      rec = {
+        id: 'rn-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+        key, oldPath, newPath: target,
+        oldSidecar: annoFileFor(oldPath), newSidecar: annoFileFor(target),
+        sidecarOwned: !targetSidecarExisted, stage: 'planned', at: Date.now(), reason: 'in-progress',
+      };
+      if (!putRenamePending(rec)) {
+        out.failed++;
+        out.errors.push({ key, step: 'journal', error: '改名的恢复记录写不进去，已放弃本次改名（文件未改动）' });
+        rec = null;
+        continue;
+      }
+
+      // ① 先把标注按新 hash 写好（旧文件保留）。失败就不动 PDF —— 不能「文件改了、标注没跟上」（G03）
+      prep = prepareSidecarMove(oldPath, target);
+      if (prep.status === 'failed') {
+        clearRenamePending(rec); rec = null;
+        out.failed++;
+        out.errors.push({ key, step: 'sidecar', error: prep.error });
+        continue;
+      }
+      // 标记「这个目标 sidecar 是本次创建的」：回滚 / 启动恢复只敢删标记为 own 的文件。
+      // 标记本身写不进去就撤销预备文件并放弃：否则崩溃后恢复无法判断目标归属（H03）。
+      const marked = patchRenamePending(rec, {
+        sidecarOwned: !!prep.owned, sidecarStatus: prep.status, stage: 'sidecar-ready',
+      });
+      if (!marked) {
+        dropPreparedSidecar(prep);
+        clearRenamePending(rec); rec = null;
+        out.failed++;
+        out.errors.push({ key, step: 'journal', error: '改名恢复记录无法更新，已放弃本次改名（文件未改动）' });
+        continue;
+      }
+
+      // ② 改 PDF 名字
+      try {
+        fs.renameSync(oldPath, target);
+        pdfRenamed = true;
+      } catch (err) {
+        dropPreparedSidecar(prep);
+        clearRenamePending(rec); rec = null;
+        throw err;
+      }
+      patchRenamePending(rec, { stage: 'pdf-renamed' });
+      // ②' 文件已经在新位置：从这一刻起，这份文档在途的旧路径请求要落到新路径（I01 / J01）。
+      //     只改「当前路径正好是 oldPath」的会话；复用同一路径的另一份文档有别的
+      //     sessionId，不会被顺手认领（J02）。
+      noteRenameForSessions(oldPath, target);
+
+      // ③ 写库路径。写不进去就把文件改回去，别让库指向一个已经不存在的路径（G02）
+      try {
+        library.setAttachment(key, target);   // 只接受路径字符串（内部会自己算 name）
+      } catch (err) {
+        let rolled = false;
+        try { fs.renameSync(target, oldPath); rolled = true; } catch (_) {}
+        if (rolled) {
+          pdfRenamed = false;
+          noteRenameForSessions(target, oldPath);
+          dropPreparedSidecar(prep);
+          clearRenamePending(rec); rec = null;
+          throw err;
+        }
+        // 改不回去（文件被占用 / 权限变化）：至少把库指向真实位置；日志留着，重启接着收拾
+        let fixed = false;
+        try { library.setAttachment(key, target); fixed = true; } catch (_) {}
+        patchRenamePending(rec, { stage: 'library-failed', reason: 'library-failed', at: Date.now() });
+        out.failed++;
+        out.errors.push({
+          key, step: 'library', path: target,
+          error: '库保存失败（' + String((err && err.message) || err) + '），且文件改不回原名。' +
+            'PDF 现在在：' + target + (fixed ? '（库已改指到它）' : '（库仍指向旧路径，已记录待恢复）'),
+        });
+        continue;
+      }
+      patchRenamePending(rec, { stage: 'library-committed' });
+
+      // ④ 库已提交，才删旧标注；删不掉只留孤儿文件，不影响数据
+      const fin = finishSidecarMove(prep);
+      if (!fin.ok) out.errors.push({ key, step: 'cleanup', error: fin.error, warn: true });
+      patchRenamePending(rec, { stage: 'cleanup' });
+
+      // ④' 会话已经在 ②' 跟着改名走了；这里只把「最近文件」等展示性路径一起换掉。
+      retargetRecentPaths(oldPath, target);
+
+      // ⑤ 全文索引是派生数据：失败只降级为「待重建」，不当成改名失败
+      let ft = false;
+      try {
+        const r = await search.moveIndex(oldPath, target);
+        ft = !!(r && r.moved);
+      } catch (_) {}
+
+      // ⑥ 全部提交完才清日志；清不掉只是留一条下次启动会自动收拾的记录
+      if (!clearRenamePending(rec)) {
+        out.errors.push({ key, step: 'journal', error: '改名已完成，但恢复记录没删掉；下次启动会自动清理', warn: true });
+      }
+      rec = null;
+
       out.renamed++;
-      out.changes.push({ key, oldPath, newPath: target, anno: side.anno, ft: side.ft });
+      out.changes.push({
+        key, oldPath, newPath: target, ft,
+        // 渲染层据此把 annoState 的显示 / 重试路径一起换到新 hash 文件（I01）
+        annoPath: prep.newFile,
+        anno: prep.status === 'ready',
+        annoStatus: prep.status,
+        annoWarning: prep.status === 'copied-broken' ? ('原标注文件读不出来，已按原样搬到新路径：' + (prep.error || '')) : '',
+      });
     } catch (err) {
+      // PDF 还在原路径时可以直接撤掉日志；已经改过名就必须留着让启动恢复接手。
+      if (rec && !pdfRenamed) clearRenamePending(rec);
       out.failed++;
       out.errors.push({ key, error: String(err && err.message ? err.message : err) });
     }
   }
+  out.ok = out.failed === 0;
   if (out.renamed && win) {
     win.webContents.send('lib-changed');
     win.webContents.send('files-renamed', { changes: out.changes });
@@ -1353,7 +1679,13 @@ ipcMain.handle('import-references', async (_e, info) => {
     if (!lines.length) return { ok: false, error: '没有参考文献行' };
     const parsed = RefImport.parseSection(lines, { max: o.max });
     if (!parsed.entries.length) {
-      return { ok: false, error: '这一段里没认出条目', heading: parsed.heading };
+      return {
+        ok: false,
+        error: parsed.dropped
+          ? '这一段里没认出参考文献（' + parsed.dropped + ' 段都不像条目，可能是文末正文）'
+          : '这一段里没认出条目',
+        heading: parsed.heading,
+      };
     }
     const items = library.load().items || [];
 
@@ -1363,6 +1695,7 @@ ipcMain.handle('import-references', async (_e, info) => {
         heading: parsed.heading,
         lines: parsed.lines,
         truncated: parsed.truncated,
+        dropped: parsed.dropped,
         total: parsed.entries.length,
         entries: refiPreview(parsed, items),
       };
@@ -2328,6 +2661,81 @@ ipcMain.handle('lib-relink-scan', async (_e, info) => {
 });
 
 // ---------- 标注自动保存 / 恢复（按文件路径，userData/annotations/<hash>.json） ----------
+/*
+ * 物理 sidecar 定位与「在途请求归属」必须分开（J01 / J02）。
+ *
+ * 上一轮把「改名历史」做成全局路径别名，让 annoFileFor 隐式跟随，结果：
+ *   · A→B→A 时，第二次准备阶段把 hash(A) 误判成 hash(B)，返回 same，标注留在 B；
+ *   · 旧路径 A 被一份新 PDF 复用时，新文档读到了 B 的标注，新笔迹也写进 B。
+ * 路径不是文档身份：同一个路径在不同时刻可以是两份完全不同的文件。
+ *
+ * 现在 annoFileFor 恢复为纯函数（给什么路径就算什么 hash），prepare / finish /
+ * rollback / journal / recovery / 普通加载都只认真实路径。改名往返会真的把
+ * sidecar 从 B 搬回 A。
+ *
+ * 唯一还需要「跟随改名」的是**已经发出、还没落地**的请求：它们带着发起时的旧路径，
+ * 但属于同一份已打开的文档。为此给每份打开的文档一个会话 id，渲染层在读写请求里
+ * 带上它；主进程只在「sessionId 匹配 + 发起路径属于该会话自己走过的路径」时，
+ * 才把这次请求解析到会话当前路径。复用旧路径的新文档有新的 sessionId，绝不会被认领。
+ */
+const annoSessions = new Map();
+function pathKey(p) {
+  // 空串不能走 path.resolve（它会变成 cwd，等于凭空造出一个路径）
+  if (!p) return '';
+  const r = path.resolve(String(p));
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+function registerAnnoSession(info) {
+  const id = String((info && info.id) || '');
+  if (!id) return { ok: false };
+  if (info.closed) { annoSessions.delete(id); return { ok: true }; }
+  const p = String(info.path || '');
+  if (!p) return { ok: false };
+  let sess = annoSessions.get(id);
+  if (!sess) { sess = { path: p, paths: new Set(), at: Date.now() }; annoSessions.set(id, sess); }
+  sess.path = p;
+  sess.paths.add(pathKey(p));
+  sess.at = Date.now();
+  // 只保留最近的会话；正常只会同时有「打开的标签」这么多
+  if (annoSessions.size > 64) {
+    const all = [...annoSessions.entries()].sort((a, b) => a[1].at - b[1].at);
+    for (const [k] of all.slice(0, annoSessions.size - 64)) annoSessions.delete(k);
+  }
+  return { ok: true };
+}
+function noteRenameForSessions(oldPath, newPath) {
+  if (!oldPath || !newPath) return;
+  const from = pathKey(oldPath);
+  for (const sess of annoSessions.values()) {
+    if (pathKey(sess.path) === from) {
+      sess.path = newPath;
+      sess.paths.add(pathKey(newPath));
+    }
+  }
+}
+// 返回 null 表示「这不是一份在途的已改名文档请求」，调用方老老实实用 info.path。
+function resolveSessionPath(info) {
+  const sent = String((info && info.path) || '');
+  const id = info && info.sessionId;
+  if (!sent || !id) return null;
+  const sess = annoSessions.get(String(id));
+  if (!sess) return null;
+  const k = pathKey(sent);
+  if (k === pathKey(sess.path)) return sess.path;
+  if (sess.paths.has(k)) return sess.path;
+  return null;
+}
+// 所有标注 / 书签 IPC 的统一入口：先问会话，问不到就用调用方给的路径。
+// 这是**唯一**允许「跟随改名」的地方，且只对被同一份文档明确认领的请求生效。
+function livePathOf(info) {
+  const sent = String((info && info.path) || '');
+  if (!sent) return '';
+  return resolveSessionPath(info) || sent;
+}
+// 渲染层用 send 登记（不阻塞、且与随后的标注读写保持同一发送顺序）
+ipcMain.on('anno-session', (_e, info) => { registerAnnoSession(info); });
+
+// 纯函数：不查会话、不查改名历史，输入确定路径就得到固定 hash 文件。
 function annoFileFor(filePath) {
   const h = crypto.createHash('sha1').update(path.resolve(filePath)).digest('hex').slice(0, 20);
   const dir = path.join(app.getPath('userData'), 'annotations');
@@ -2341,25 +2749,17 @@ function annoFileFor(filePath) {
 //   broken  —— 存在但读不出来（权限、磁盘错误、JSON 截断、pages 不是数组）。
 // 以前全归成 null，于是「读不出来」被当成「没有标注」，下一次保存用空数组把
 // 还能人工修复的原文件直接覆盖掉，归档也顺理成章地读到一份合法空数据（第五 / 六轮审核 R6-01）。
+// 本轮起这套策略收进 SidecarStore，图片标注 / 编辑标注 / ID 回写都走同一个入口。
+const sidecar = createSidecarStore({
+  fileFor: annoFileFor,
+  atomicWrite,
+  atomicCreate,
+  backupNameFor: annoBackupNameFor,
+});
+
 function readAnnoSidecar(filePath) {
-  const annoPath = annoFileFor(filePath);
-  let raw = '';
-  try {
-    raw = fs.readFileSync(annoPath, 'utf8');
-  } catch (err) {
-    if (err && err.code === 'ENOENT') return { status: 'missing', data: null, annoPath, error: '' };
-    return { status: 'broken', data: null, annoPath, error: '读取失败：' + String((err && (err.code || err.message)) || err) };
-  }
-  let obj = null;
-  try {
-    obj = JSON.parse(raw.replace(/^\uFEFF/, ''));
-  } catch (e) {
-    return { status: 'broken', data: null, annoPath, error: 'JSON 解析失败：' + String((e && e.message) || e) };
-  }
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj) || (obj.pages != null && !Array.isArray(obj.pages))) {
-    return { status: 'broken', data: null, annoPath, error: '结构异常：pages 不是数组' };
-  }
-  return { status: 'ok', data: obj, annoPath, error: '' };
+  const r = sidecar.read(filePath);
+  return { status: r.status, data: r.data, annoPath: r.file || '', error: r.error };
 }
 
 // ---------- 标注稳定 id（数据层 v8 的地基） ----------
@@ -2374,8 +2774,24 @@ function genAnnoId() {
   return 'a' + s;
 }
 
-// 给一份标注文件的所有形状补齐 id，返回 { changed, map: {旧id: 新id} }
-function ensureAnnoIds(obj, fileId, writeBack) {
+/*
+ * 老标注的位置式 id（file hash:页码:本页下标）→ 稳定 id。
+ *
+ * 稳定 id 必须是「就算这次没写进文件也不变」的：之前用随机 id，写盘失败后下一次读取
+ * 又生成一个新 id，库里却已经被重映射到第一次那个永远不存在的 id 上（R01）。
+ * 这里用内容无关的确定性推导，同一个位置永远得到同一个 id，重试与并发读取都幂等。
+ */
+function legacyAnnoId(fileId, page, index) {
+  const h = crypto.createHash('sha1').update(String(fileId) + ':' + String(page) + ':' + String(index)).digest('hex');
+  return 'a' + h.slice(0, 10);
+}
+
+/*
+ * 给一份标注文件的所有形状补齐 id（只改内存，不写盘），返回 { changed, map: {旧id: 新id} }。
+ * 落盘与迁移由 migrateAnnoIds 统一负责：调用方千万别拿这里的 map 直接重映射库索引，
+ * 那要等 id 真的写进文件之后（否则标签会挂到磁盘上并不存在的 id 上）。
+ */
+function ensureAnnoIds(obj, fileId) {
   const map = {};
   let changed = false;
   const pages = Array.isArray(obj && obj.pages) ? obj.pages : [];
@@ -2384,78 +2800,206 @@ function ensureAnnoIds(obj, fileId, writeBack) {
     shapes.forEach((sh, i) => {
       if (!sh || typeof sh !== 'object') return;
       if (sh.id) return;
-      sh.id = genAnnoId();
+      sh.id = legacyAnnoId(fileId, pg.page || 0, i);
       changed = true;
       const oldId = fileId + ':' + (pg.page || 0) + ':' + i;
       map[oldId] = sh.id;
     });
   });
-  if (changed && writeBack) writeBack();
   return { changed, map };
 }
 
-// 启动时跑一次：老标注补 id → 库里的标签键重映射到新 id
+/*
+ * 待迁移映射（旧位置式 id → 稳定 id）存在 sidecar 的 pendingIds 字段里。
+ *
+ * 为什么存盘而不是只放内存：迁移要写两个文件（sidecar 与 library.json），跨文件没有事务。
+ * 只要「sidecar 已换成新 id、库索引还没迁」这个窗口崩过一次（盘满、断电、权限），
+ * 旧键上的标签就再也找不到对应形状了——而且下次加载时形状已经有 id，changed=false，
+ * 原来的映射根本不会再产生（复查 F02）。把映射留在 sidecar 里，迁移就变成可重放的：
+ * 下次加载 / 启动升级 / 用户点重试都能把第二半补上，成功后清空这个字段。
+ */
+function pendingIdsOf(obj) {
+  const p = obj && obj.pendingIds;
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return {};
+  const out = {};
+  for (const k of Object.keys(p)) {
+    const v = String(p[k] == null ? '' : p[k]);
+    if (v && v !== k) out[k] = v;
+  }
+  return out;
+}
+
+// 文件里现存的形状 id：重放时只迁「目标还在文件里」的映射，不给已删除的标注复活标签
+function shapeIdSet(obj) {
+  const set = new Set();
+  const pages = Array.isArray(obj && obj.pages) ? obj.pages : [];
+  for (const pg of pages) {
+    for (const sh of (pg && Array.isArray(pg.shapes) ? pg.shapes : [])) {
+      if (sh && sh.id) set.add(String(sh.id));
+    }
+  }
+  return set;
+}
+
+// 把「本次补出来的映射 + 上次没迁完的映射」合并，并剪掉目标已不存在的
+function pendingFor(obj, freshMap) {
+  const prev = pendingIdsOf(obj);
+  const alive = shapeIdSet(obj);
+  const merged = Object.assign({}, prev, freshMap || {});
+  for (const k of Object.keys(merged)) if (!alive.has(merged[k])) delete merged[k];
+  return { prev, merged };
+}
+
+/*
+ * 迁移计划：单文档加载与启动批量扫描共用这一份判断，规则只写一次（报告 §3）。
+ * 没有新 ID、也没有待办映射时直接短路——不建形状 ID 集合，也不读整份文件做比对（报告 §4）。
+ */
+function planIdMigration(obj, fileId) {
+  const res = ensureAnnoIds(obj, fileId);
+  const prev = pendingIdsOf(obj);
+  if (!res.changed && !Object.keys(prev).length) {
+    return { changed: false, prev, merged: {}, todo: 0 };
+  }
+  const { merged } = pendingFor(obj, res.map);
+  return { changed: res.changed, prev, merged, todo: Object.keys(merged).length };
+}
+
+/*
+ * 把一份标注文件的 id 迁移走完，返回的是真话：
+ *   migration: 'noop'           没有要迁的东西
+ *              'ok'             两边都写成了
+ *              'sidecar-failed' id 没写进文件（不能迁库索引，否则标签挂到空 id 上，R01）
+ *              'library-failed' id 已落盘、待迁移映射也已存盘，但库索引写失败（可重试，F02）
+ * 提交顺序：① 形状 id + pendingIds 一起写进 sidecar；② 写库索引；③ 清 pendingIds。
+ * ②失败时①的 pendingIds 留在盘上，下次照着重放即可，重复执行是空操作。
+ */
+function migrateAnnoIds(file, obj) {
+  const fileId = path.basename(file, '.json');
+  const plan = planIdMigration(obj, fileId);         // 只补内存，不写盘
+  const { prev, merged, changed: resChanged } = plan;
+  const hadPending = Object.keys(prev).length > 0;
+  const todo = plan.todo;
+  if (!resChanged && !hadPending) return { migration: 'noop', map: {}, remapped: 0 };
+
+  // ① sidecar：稳定 id 与待迁移映射一起落盘（这一步成功后，磁盘上不再有「无 id 的形状」）
+  const pendingChanged = JSON.stringify(prev) !== JSON.stringify(merged);
+  if (resChanged || pendingChanged) {
+    if (todo) obj.pendingIds = merged; else delete obj.pendingIds;
+    try {
+      sidecar.writePath(file, obj);
+    } catch (err) {
+      if (todo) delete obj.pendingIds; else if (hadPending) obj.pendingIds = prev;
+      return {
+        migration: 'sidecar-failed', map: {}, remapped: 0,
+        error: '标注文件写不进去，补 ID 没有落盘：' + String((err && (err.code || err.message)) || err),
+      };
+    }
+  }
+  if (!todo) return { migration: 'ok', map: {}, remapped: 0 };
+
+  // ② 库索引：失败不再当成功（F02 的核心）
+  let r;
+  try { r = library.remapAnnoTags(merged) || { ok: false, error: '' }; }
+  catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+  if (!r.ok) {
+    return {
+      migration: 'library-failed', map: merged, remapped: 0,
+      error: '标注 ID 已写入文件，但库里的标签关联没能保存（' + (r.error || '写入失败') + '）；恢复后会自动重试',
+    };
+  }
+
+  // ③ 清 pending：清不掉也无害（重放是空操作），但别让它一直留着
+  delete obj.pendingIds;
+  try { sidecar.writePath(file, obj); } catch (_) {}
+  if (r.remapped && win) win.webContents.send('lib-changed');
+  return { migration: 'ok', map: merged, remapped: r.remapped || 0 };
+}
+
+// 启动时跑一次：老标注补 id → 库里的标签键重映射到新 id。
+// 规则与逐文档加载一致（pendingIds 先落盘、索引写成功才清），区别只是把多份文件的映射
+// 攒起来一次写库，避免「每份文件都 load/save 一遍 library.json」。
 function upgradeAnnoIds() {
   let dir = '';
   try { dir = annoDir(); } catch (_) { return { ok: false, upgraded: 0 }; }
   let files = [];
   try { files = fs.readdirSync(dir).filter(isActiveAnnoFile); } catch (_) { return { ok: false, upgraded: 0 }; }
-  const map = {};
+  const union = {};
+  const touched = [];         // 写进过 pendingIds 的文件：迁完要回去清
+  const failed = [];
   let upgraded = 0;
   for (const f of files) {
     const full = path.join(dir, f);
-    let obj = null;
-    try { obj = JSON.parse(fs.readFileSync(full, 'utf8')); } catch (_) { continue; }
-    if (!obj || !Array.isArray(obj.pages)) continue;
-    const res = ensureAnnoIds(obj, f.replace(/\.json$/i, ''), () => {
-      try { fs.writeFileSync(full, JSON.stringify(obj)); } catch (_) {}
-    });
-    if (!res.changed) continue;
-    upgraded++;
-    Object.assign(map, res.map);
+    const st = sidecar.readPath(full);
+    if (st.status !== 'ok') continue;
+    const obj = st.data;
+    const plan = planIdMigration(obj, f.replace(/\.json$/i, ''));
+    const { prev, merged, changed: resChanged } = plan;
+    const hadPending = Object.keys(prev).length > 0;
+    const todo = plan.todo;
+    if (!resChanged && !hadPending) continue;
+    const pendingChanged = JSON.stringify(prev) !== JSON.stringify(merged);
+    if (resChanged || pendingChanged) {
+      if (todo) obj.pendingIds = merged; else delete obj.pendingIds;
+      try {
+        // 补 id 的回写也走原子替换：中途失败时原文件仍是可解析的旧内容
+        sidecar.writePath(full, obj);
+      } catch (err) {
+        // 写不进文件就别迁库内关联：新 id 磁盘上没有，迁过去等于把标签弄丢（R01）
+        if (todo) delete obj.pendingIds; else if (hadPending) obj.pendingIds = prev;
+        failed.push(f);
+        continue;
+      }
+      if (resChanged) upgraded++;
+    }
+    if (todo) { Object.assign(union, merged); touched.push({ full, obj }); }
   }
+
   let remapped = 0;
-  if (Object.keys(map).length) {
-    try { remapped = (library.remapAnnoTags(map) || {}).remapped || 0; } catch (_) {}
+  let libraryFailed = false;
+  if (Object.keys(union).length) {
+    let r;
+    try { r = library.remapAnnoTags(union) || { ok: false, error: '' }; }
+    catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+    if (r.ok) remapped = r.remapped || 0;
+    else { libraryFailed = true; console.warn('[anno] 标签关联没写进库：' + (r.error || '')); }
   }
-  return { ok: true, upgraded, remapped };
+  // 索引写成功才清 pendingIds；失败就留着，下次加载 / 启动再重放
+  if (!libraryFailed) {
+    for (const t of touched) {
+      if (!t.obj.pendingIds) continue;
+      delete t.obj.pendingIds;
+      try { sidecar.writePath(t.full, t.obj); } catch (_) {}
+    }
+  }
+  if (failed.length) console.warn('[anno] 有 ' + failed.length + ' 份标注文件补 ID 后写不回去，关联迁移已跳过：' + failed.slice(0, 3).join(', '));
+  return { ok: !libraryFailed, upgraded, remapped, failed: failed.length, libraryFailed };
 }
 ipcMain.handle('anno-save', (_e, info) => {
   if (!info || !info.path) return false;
-  try {
-    const st = readAnnoSidecar(info.path);
-    // 既存文件坏掉时，绝不拿内存里的空状态去覆盖它：那份文件里可能还留着能人工捞回的文字。
-    // 只有渲染层明确带 force（用户点了「重建标注文件」并确认）才往下走，而且先按原样备份一份。
-    if (st.status === 'broken' && !info.force) {
-      return {
-        ok: false,
-        broken: true,
-        annoPath: st.annoPath,
-        error: '标注文件已损坏，本次修改没有保存：' + path.basename(st.annoPath) + '（' + st.error + '）',
-      };
-    }
-    let backup = '';
-    if (st.status === 'broken' && info.force) {
-      backup = annoBackupNameFor(st.annoPath);
-      try { fs.copyFileSync(st.annoPath, backup); }
-      catch (err) {
-        return {
-          ok: false,
-          broken: true,
-          annoPath: st.annoPath,
-          error: '无法备份损坏的标注文件，为免丢数据已中止：' + String((err && err.message) || err),
-        };
-      }
-    }
+  // 这份文档若在本进程内改过名，在途的旧路径保存要落到新路径（I01 / J01）。
+  // 复用旧路径的另一份文档有另一个 sessionId，不会被认领（J02）。
+  const livePath = livePathOf(info);
+  // 既存文件坏掉时，SidecarStore 不会拿内存里的空状态去覆盖它：那份文件里可能还留着
+  // 能人工捞回的文字。只有渲染层明确带 force（用户点了「重建标注文件」并确认）才往下走，
+  // 而且先按原样备份一份。
+  const r = sidecar.update(livePath, (prev, st) => {
     // 空标注也落盘（用户清空后重开不应复活旧标注）——这是「正常读到过」的前提下才有意义
-    const obj = { path: info.path, saved: Date.now(), pages: info.pages || [] };
+    const obj = { path: livePath, saved: Date.now(), pages: info.pages || [] };
     // 用户书签存在同一个 sidecar 里，标注保存不能把它们冲掉
-    if (st.status === 'ok' && Array.isArray(st.data.bookmarks)) obj.bookmarks = st.data.bookmarks;
+    if (st.status === 'ok' && Array.isArray(prev.bookmarks)) obj.bookmarks = prev.bookmarks;
+    // 迁移中的待办映射也不能丢：它只在库索引写成功后才该被清（F02）。
+    // 渲染层不认识这个字段，保存时按原样带过去，否则下一次加载就再也补不上第二半迁移。
+    const pend = pendingIdsOf(st.status === 'ok' ? prev : null);
+    if (Object.keys(pend).length) obj.pendingIds = pend;
     // 兜底：渲染层没带 id 的形状顺手补上（新建标注由渲染层生成 id，这里是保险）
-    ensureAnnoIds(obj, '', () => {});
-    atomicWrite(annoFileFor(info.path), JSON.stringify(obj));
-    return backup ? { ok: true, backup } : true;
-  } catch (err) { return { error: String(err && err.message ? err.message : err) }; }
+    ensureAnnoIds(obj, '');
+    return obj;
+  }, { force: !!info.force });
+  if (!r.ok) {
+    if (r.code === 'broken') return { ok: false, broken: true, annoPath: r.file, error: r.error };
+    return { error: r.error };
+  }
+  return r.backup ? { ok: true, backup: r.backup } : true;
 });
 // ---------- 用户书签（每份 PDF 一组，存标注 sidecar 的 bookmarks 字段） ----------
 function readSidecarBookmarks(filePath) {
@@ -2470,7 +3014,7 @@ function readSidecarBookmarks(filePath) {
 }
 
 ipcMain.handle('bookmarks-load', (_e, info) => {
-  const p = info && info.path;
+  const p = livePathOf(info);
   if (!p) return { ok: false, bookmarks: [] };
   // 书签和标注同住一个 sidecar：文件坏了要如实说出来，别让界面以为「一个书签都没有」
   const st = readAnnoSidecar(p);
@@ -2479,7 +3023,7 @@ ipcMain.handle('bookmarks-load', (_e, info) => {
 });
 
 ipcMain.handle('bookmarks-save', (_e, info) => {
-  const p = info && info.path;
+  const p = livePathOf(info);
   if (!p) return { ok: false, error: '没有文档路径' };
   const list = (Array.isArray(info.bookmarks) ? info.bookmarks : [])
     .filter((b) => b && Number.isFinite(+b.page) && +b.page >= 1)
@@ -2502,8 +3046,10 @@ ipcMain.handle('bookmarks-save', (_e, info) => {
 });
 
 ipcMain.handle('anno-load', (_e, info) => {
-  if (!info || !info.path) return { ok: false, status: 'missing', pages: [], annoPath: '' };
-  const st = readAnnoSidecar(info.path);
+  // 改名期间发出的加载请求带着旧路径，但属于同一份文档：解析到它当前所在路径（J03）。
+  const loadPath = livePathOf(info);
+  if (!loadPath) return { ok: false, status: 'missing', pages: [], annoPath: '' };
+  const st = readAnnoSidecar(loadPath);
   if (st.status === 'missing') return { ok: true, status: 'missing', pages: [], annoPath: st.annoPath };
   // 读不出来就如实上报：渲染层要据此禁止自动保存与归档，否则一次 flush 就把原文件换掉了。
   // 这里不回退成 []——「空」和「读失败」在界面上长得一模一样，那是最坏的一种失败方式。
@@ -2511,18 +3057,38 @@ ipcMain.handle('anno-load', (_e, info) => {
     return { ok: false, status: 'broken', pages: [], annoPath: st.annoPath, error: st.error };
   }
   const file = st.annoPath;
-  const fileId = path.basename(file, '.json');
   const obj = st.data;
   const pages = Array.isArray(obj.pages) ? obj.pages : [];
-  // 老标注首次打开：补 id → 回写文件 → 库里的标签键重映射过去
-  const res = ensureAnnoIds(obj, fileId, () => {
-    try { fs.writeFileSync(file, JSON.stringify(obj)); } catch (_) {}
-  });
-  if (res.changed) {
-    try { library.remapAnnoTags(res.map); } catch (_) {}
-    if (win) win.webContents.send('lib-changed');
+  // 老标注首次打开（或上次迁移没走完）：补 id → 写文件 → 迁库索引。
+  // 三种结果都要如实带出去，渲染层据此决定「能不能保存 / 要不要重试」（R01、F02）。
+  const mig = migrateAnnoIds(file, obj);
+  if (mig.migration === 'sidecar-failed') {
+    // 文件写不进去：标注照常显示（数据是读到的、可信），但**不迁移**库内标签关联。
+    // 迁移了就会把标签挂到一个磁盘上并不存在的 id 上，重开即失联（R01）。
+    // 用 migration:'failed' 让渲染层禁止自动保存；恢复写权限后点重试或重开文档即可完成。
+    return { ok: true, status: 'ok', pages, annoPath: file, migration: 'failed', error: mig.error };
   }
-  return { ok: true, status: 'ok', pages, annoPath: file };
+  if (mig.migration === 'library-failed') {
+    // id 已经在文件里了：标注能存、能改，只是库里的标签关联还挂在旧键上。
+    // 报 library-failed 而不是 ok——报 ok 就等于告诉调用方「迁移完成」，而它并没有（F02）。
+    return { ok: true, status: 'ok', pages, annoPath: file, migration: 'library-failed', error: mig.error };
+  }
+  return { ok: true, status: 'ok', pages, annoPath: file, migration: 'ok', remapped: mig.remapped || 0 };
+});
+
+// 重试迁移（保存前自动跑一次，也给界面上的「重试」按钮用）。
+// 只处理这一个文件：id 在加载时就已经给过渲染层了，这里补的是上一次没写成功的库索引。
+ipcMain.handle('anno-migrate', (_e, info) => {
+  const p = livePathOf(info).trim();
+  if (!p) return { ok: false, migration: 'failed', error: '当前没有打开文档' };
+  const st = sidecar.read(p);
+  if (st.status === 'missing') return { ok: true, migration: 'ok', remapped: 0 };
+  if (st.status === 'broken') return { ok: false, migration: 'broken', error: st.error || '标注文件读不出来' };
+  const mig = migrateAnnoIds(st.file, st.data);
+  if (mig.migration === 'ok' || mig.migration === 'noop') {
+    return { ok: true, migration: 'ok', remapped: mig.remapped || 0 };
+  }
+  return { ok: false, migration: mig.migration, error: mig.error || '' };
 });
 
 // 把所有文档的标注汇总成一张表（标注条目化的第一步）。
@@ -2530,6 +3096,7 @@ ipcMain.handle('anno-load', (_e, info) => {
 const ANNO_KIND = {
   mark: '高亮', highlight: '高亮', comment: '批注', quote: '摘录', underline: '下划线',
   pen: '手绘', rect: '矩形', arrow: '箭头', line: '直线', text: '文字', note: '便签',
+  ellipse: '圆 / 椭圆', triangle: '三角形', smart: '一笔成型',
   image: '图片', select: '选区', stamp: '印章',
 };
 function annoKindOf(shape) {
@@ -2603,8 +3170,26 @@ function scanAllAnnotations() {
 
 function listAllAnnotations() { return scanAllAnnotations().list; }
 
-// 编辑标注对象：改文字 / 批注 / 颜色。文字与批注同时写回标注真身（阅读器要看到），
-// 颜色只存在于真身，库里记一份更新时间。
+// 这条标注在不在这份 sidecar 里
+function hasAnnoShape(obj, id) {
+  const pages = Array.isArray(obj && obj.pages) ? obj.pages : [];
+  for (const pg of pages) {
+    for (const sh of (pg && Array.isArray(pg.shapes) ? pg.shapes : [])) {
+      if (sh && String(sh.id || '') === id) return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * 编辑标注对象：改文字 / 批注 / 颜色。文字与批注同时写回标注真身（阅读器要看到），
+ * 颜色只存在于真身，库里记一份更新时间。
+ *
+ * 三种失败必须分开报，不能混成一句「没找到」（B03）：
+ *   · 文件在、但没有这个 id          → 没找到（可能已被删除）；
+ *   · 有文件读不出来，无法确认位置   → 不能断言「没有」，如实说读不出来；
+ *   · 找到了但写盘失败（磁盘满/权限）→ 报磁盘原因，原文件保持可解析（atomicWrite）。
+ */
 ipcMain.handle('anno-update', (_e, info) => {
   const id = String((info && info.id) || '').trim();
   if (!id) return { ok: false, error: '标注 id 为空' };
@@ -2612,38 +3197,63 @@ ipcMain.handle('anno-update', (_e, info) => {
   let dir = '';
   try { dir = annoDir(); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
   let files = [];
-  try { files = fs.readdirSync(dir).filter(isActiveAnnoFile); } catch (_) { return { ok: false, error: '标注目录不可用' }; }
-  let touched = null;
+  try { files = fs.readdirSync(dir).filter(isActiveAnnoFile); }
+  catch (err) { return { ok: false, error: '标注目录不可用：' + String((err && (err.code || err.message)) || err) }; }
+
+  const broken = [];
+  let hitFile = '';
+  let docPath = '';
   for (const f of files) {
     const full = path.join(dir, f);
-    let obj = null;
-    try { obj = JSON.parse(fs.readFileSync(full, 'utf8')); } catch (_) { continue; }
-    const pages = Array.isArray(obj && obj.pages) ? obj.pages : [];
-    let hit = false;
-    for (const pg of pages) {
+    const st = sidecar.readPath(full);
+    if (st.status === 'broken') { broken.push(f); continue; }
+    if (st.status !== 'ok') continue;
+    if (!hasAnnoShape(st.data, id)) continue;
+    hitFile = full;
+    docPath = String(st.data.path || '');
+    break;
+  }
+  if (!hitFile) {
+    if (broken.length) {
+      return {
+        ok: false, broken: true,
+        error: '有 ' + broken.length + ' 个标注文件读不出来（' + broken[0] + '），无法确认这条标注是否在其中，本次修改没有保存。',
+      };
+    }
+    return { ok: false, error: '没找到这条标注（可能已被删除）' };
+  }
+
+  const w = sidecar.updatePath(hitFile, (obj) => {
+    for (const pg of (Array.isArray(obj.pages) ? obj.pages : [])) {
       for (const sh of (pg && Array.isArray(pg.shapes) ? pg.shapes : [])) {
         if (!sh || String(sh.id || '') !== id) continue;
         if (typeof patch.text === 'string') sh.text = patch.text;
         if (typeof patch.comment === 'string') sh.comment = patch.comment;
         if (typeof patch.color === 'string' && patch.color) sh.color = patch.color;
-        hit = true;
       }
     }
-    if (hit) {
-      try { fs.writeFileSync(full, JSON.stringify(obj)); touched = { path: String(obj.path || '') }; break; } catch (_) {}
-    }
+    return obj;
+  });
+  if (!w.ok) return { ok: false, broken: w.code === 'broken', error: w.error };
+
+  // 真身写成功后才动对象层：反过来会出现「库里说有新批注、真身还是旧的」
+  let r = { ok: true };
+  try { r = library.updateAnno(id, patch) || { ok: true }; }
+  catch (err) {
+    r = { ok: true, indexError: '标注已保存，但库索引更新失败：' + String((err && err.message) || err) };
   }
-  if (!touched) return { ok: false, error: '没找到这条标注（可能已被删除）' };
-  const r = library.updateAnno(id, patch);
   if (win) win.webContents.send('lib-changed');
-  if (touched.path && win) win.webContents.send('anno-reload', { path: touched.path });
+  if (docPath && win) win.webContents.send('anno-reload', { path: docPath });
   return Object.assign({ ok: true }, r);
 });
 
 // v9：图片标注落盘 —— 灯箱里「存为标注」把这一块图片存进快照目录，
 // 并在标注文件对应页写入一条 tool:'image' 形状（位置 = 它在页面上的矩形）。
+//
+// 与 anno-save 同一条底线：标注文件读不出来时不能拿「只有这张图」的新内容覆盖它。
+// 旧实现在这里把读失败当成「没有旧标注」（B02），原文件里还能人工捞回的文字直接没了。
 ipcMain.handle('anno-save-image', (_e, info) => {
-  const filePath = String((info && info.path) || '').trim();
+  const filePath = livePathOf(info).trim();
   const dataUrl = String((info && info.dataUrl) || '');
   const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
   if (!filePath) return { ok: false, error: '当前没有打开文档' };
@@ -2652,33 +3262,41 @@ ipcMain.handle('anno-save-image', (_e, info) => {
   const x = Number(rect.x) || 0, y = Number(rect.y) || 0;
   const w = Math.max(1, Number(rect.w) || 1), h = Math.max(1, Number(rect.h) || 1);
   const page = Math.max(1, Math.floor(+((info && info.page) || 1)) || 1);
+  let imageFile = '';
   try {
     const buf = Buffer.from(m[1], 'base64');
     if (buf.length > 12 * 1024 * 1024) return { ok: false, error: '图片太大' };
     const name = 'img-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex') + '.png';
-    fs.writeFileSync(path.join(snapshotsDir(), name), buf);
+    imageFile = path.join(snapshotsDir(), name);
+    fs.writeFileSync(imageFile, buf);
     const rel = 'snapshots/' + name;
-    const file = annoFileFor(filePath);
-    let obj = { path: filePath, saved: Date.now(), pages: [] };
-    try {
-      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (raw && Array.isArray(raw.pages)) obj = raw;
-    } catch (_) {}
-    let pg = obj.pages.find((p) => Number(p && p.page) === page);
-    if (!pg) { pg = { page, shapes: [] }; obj.pages.push(pg); }
-    if (!Array.isArray(pg.shapes)) pg.shapes = [];
     const shape = {
       id: genAnnoId(), tool: 'image', color: '#8a7f6a', width: 1,
       image: rel, rects: [{ x, y, w, h }],
       text: String((info && info.text) || ('图片标注 · 第 ' + page + ' 页')),
       comment: '',
     };
-    pg.shapes.push(shape);
-    obj.saved = Date.now();
-    fs.writeFileSync(file, JSON.stringify(obj));
+    const r = sidecar.update(filePath, (obj) => {
+      if (!Array.isArray(obj.pages)) obj.pages = [];
+      let pg = obj.pages.find((p) => Number(p && p.page) === page);
+      if (!pg) { pg = { page, shapes: [] }; obj.pages.push(pg); }
+      if (!Array.isArray(pg.shapes)) pg.shapes = [];
+      pg.shapes.push(shape);
+      obj.path = obj.path || filePath;
+      obj.saved = Date.now();
+      return obj;
+    }, { empty: () => ({ path: filePath, saved: Date.now(), pages: [] }), docPath: filePath });
+    if (!r.ok) {
+      // 写不进标注文件就别留下孤立图片
+      if (imageFile) { try { fs.unlinkSync(imageFile); } catch (_) {} }
+      return { ok: false, broken: r.code === 'broken', error: r.error };
+    }
     if (win) win.webContents.send('anno-reload', { path: filePath });
     return { ok: true, id: shape.id, image: rel };
-  } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+  } catch (err) {
+    if (imageFile) { try { fs.unlinkSync(imageFile); } catch (_) {} }
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
 });
 
 // ---------- 从标注生成笔记（v8 阶段二：带页面截图） ----------
@@ -3260,6 +3878,7 @@ ipcMain.handle('export-all-notes', (_e, info) => exportAllNotesToFile(info && in
 // 归档里的 JSON 才是可恢复的那份，PDF 只是「当时看的是什么」。
 const ANNO_TOOL_NAMES = {
   mark: '高亮', highlight: '荧光', pen: '手绘', line: '直线', rect: '矩形', arrow: '箭头',
+  ellipse: '圆 / 椭圆', triangle: '三角形', smart: '一笔成型',
   text: '文字', note: '便签', stamp: '印章', image: '图片', select: '选区',
 };
 
@@ -3457,6 +4076,13 @@ function drawAnno(page, sh, fonts, lib, stats) {
   const round = { lineCap: LineCapStyle.Round };
   const seg = (a, bpt, opts) => page.drawLine(Object.assign({ start: { x: a.x, y: a.y }, end: { x: bpt.x, y: bpt.y } }, opts));
 
+  // 渲染层标了 skip 的形状（未知类型 / 约定不绘制的图片快照）：跳过但保留恢复数据，
+  // 不能因为一条认不出的形状就让整页或整次导出失败
+  if (sh.skip === 'unsupported') {
+    if (stats) stats.unsupported = (stats.unsupported || 0) + 1;
+    return;
+  }
+
   if (sh.tool === 'pen') {
     for (let i = 0; i < sh.pts.length - 1; i++) seg(sh.pts[i], sh.pts[i + 1], { color, thickness: t, ...round });
   } else if (sh.tool === 'highlight') {
@@ -3495,6 +4121,33 @@ function drawAnno(page, sh, fonts, lib, stats) {
       width: Math.abs(sh.b.x - sh.a.x), height: Math.abs(sh.b.y - sh.a.y),
       borderColor: color, borderWidth: t, opacity: 0,
     });
+  } else if (sh.tool === 'ellipse') {
+    const x1 = Math.min(sh.a.x, sh.b.x), y1 = Math.min(sh.a.y, sh.b.y);
+    const x2 = Math.max(sh.a.x, sh.b.x), y2 = Math.max(sh.a.y, sh.b.y);
+    page.drawEllipse({
+      x: (x1 + x2) / 2, y: (y1 + y2) / 2,
+      xScale: Math.max(0.5, (x2 - x1) / 2), yScale: Math.max(0.5, (y2 - y1) / 2),
+      borderColor: color, borderWidth: t, opacity: 0,
+    });
+  } else if (sh.tool === 'triangle') {
+    // 优先用渲染层逐点换算好的三个顶点（页带旋转时也正确）；
+    // 只有老数据没有 tri 时才退回「按 PDF 坐标轴重建包围框顶点」
+    if (Array.isArray(sh.tri) && sh.tri.length === 3) {
+      seg(sh.tri[0], sh.tri[1], { color, thickness: t, ...round });
+      seg(sh.tri[1], sh.tri[2], { color, thickness: t, ...round });
+      seg(sh.tri[2], sh.tri[0], { color, thickness: t, ...round });
+    } else {
+      const x1 = Math.min(sh.a.x, sh.b.x), y1 = Math.min(sh.a.y, sh.b.y);
+      const x2 = Math.max(sh.a.x, sh.b.x), y2 = Math.max(sh.a.y, sh.b.y);
+      const p1 = { x: (x1 + x2) / 2, y: y2 }, p2 = { x: x1, y: y1 }, p3 = { x: x2, y: y1 };
+      seg(p1, p2, { color, thickness: t, ...round });
+      seg(p2, p3, { color, thickness: t, ...round });
+      seg(p3, p1, { color, thickness: t, ...round });
+    }
+  } else if (sh.tool === 'image') {
+    // 图片标注是「页面上这块图的截图」，原 PDF 里本来就有这块图。
+    // 重复铺一层只会让副本变胖、还可能盖住文字：导出只保留恢复数据，不绘制。
+    if (stats) stats.imageSkipped = (stats.imageSkipped || 0) + 1;
   } else if (sh.tool === 'stamp') {
     drawStamp(page, sh, fonts, lib, stats);
   } else if (sh.tool === 'text') {
@@ -3617,6 +4270,9 @@ ipcMain.handle('export-pdf', async (_e, payload) => {
       cjk: !!fonts.cjk,
       cjkFont: fonts.cjk ? path.basename(fonts.cjk.path) : '',
       missingGlyphs: stats.missingGlyphs,
+      // 图片快照是「约定不画」而不是「画失败」：分开报，免得 UI 把正常导出说成有缺口
+      imageSkipped: stats.imageSkipped || 0,
+      unsupported: stats.unsupported || 0,
     };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
@@ -3637,14 +4293,22 @@ function buildMenu() {
   Menu.setApplicationMenu(null);
 }
 
-// v26：没有原生菜单栏了，「最近打开」由文档快速切换面板负责，
-// 这里只留一个空实现（老调用点不必逐个改）。
-function rebuildMenu() {
-  // noop
-}
-
 app.whenReady().then(() => {
   if (!hasLock) return;
+  // 老标注补稳定 id（v8 地基）：这次不动它，后面删一条标注就会把所有标签串位。
+  // 必须放在 ready 之后：它要用 sidecar 存储层，而那个 const 定义在文件后面，
+  // 以前在模块顶层直接调用，一路 ReferenceError 被 catch 吞掉，等于从来没跑过。
+  try {
+    const up = upgradeAnnoIds();
+    if (up && (up.upgraded || up.remapped || up.libraryFailed)) {
+      console.log('[anno] upgrade ids ' + JSON.stringify(up));
+    }
+  } catch (err) { console.warn('[anno] id upgrade failed:', err && err.message); }
+  // 上次改名只做了一半（PDF 换了名、库没写成功）的收拾一下
+  try {
+    const pr = applyPendingRenames();
+    if (pr && pr.fixed) console.log('[rename] pending fixed ' + JSON.stringify(pr));
+  } catch (err) { console.warn('[rename] pending apply failed:', err && err.message); }
   buildMenu();
   // 冒烟/截图/探针模式一律不起可见窗口，避免测试时屏幕上反复闪窗；
   // PDFREADER_HIDDEN 只隐藏窗口，不影响单实例锁（单实例测试要用）。

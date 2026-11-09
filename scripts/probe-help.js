@@ -21,9 +21,18 @@ module.exports = `(async () => {
   $('#btn-help').click();
   await sleep(150);
   push('工具栏问号能打开指南', !$('#help-modal').hidden);
-  push('左侧目录条目数 = 节数', $$('#help-nav .help-nav-item').length === Help.topics.length,
-    $$('#help-nav .help-nav-item').length + '/' + Help.topics.length);
-  push('默认显示第一节', !!$('#help-article .help-title'));
+  // v1.6.3：默认先进任务首页，不把完整目录铺在脸上
+  push('默认进首页（6 张任务卡）', $$('#help-article .help-task-card').length === 6,
+    $$('#help-article .help-task-card').length);
+  push('首页不铺完整目录', $$('#help-nav .help-nav-item').length < 15,
+    $$('#help-nav .help-nav-item').length);
+  push('首页给「全部功能」入口', $('#help-article').textContent.indexOf('全部功能') >= 0);
+  Help.openBrowse();
+  push('全部功能按组折叠', $$('#help-nav details.help-fold').length === HELP_GUIDE.groups.length,
+    $$('#help-nav details.help-fold').length + '/' + HELP_GUIDE.groups.length);
+  push('折叠目录里仍能到每一节', $$('#help-nav [data-topic]').length === Help.topics.length,
+    $$('#help-nav [data-topic]').length + '/' + Help.topics.length);
+  Help.goHome();
 
   // ---- 3. 每一节都能渲染，且有步骤 / 摘要 ----
   stage = 'render-all';
@@ -40,6 +49,15 @@ module.exports = `(async () => {
     } catch (e) { bad.push(t.id + ':' + (e && e.message)); }
   }
   push('全部 ' + Help.topics.length + ' 节都能渲染（标题 + 摘要 + 步骤）', bad.length === 0, bad.join(' , '));
+
+  // 任务文章：先给用途 + 最多 3 步，细节按需展开
+  Help.openTopic('quickstart');
+  push('文章默认最多 3 步', $$('#help-article > ol.help-steps > li').length <= 3,
+    $$('#help-article > ol.help-steps > li').length);
+  push('快捷键与补充按需展开', $$('#help-article details.help-more').length >= 1);
+  Help.openTopic('backup');
+  const warn = $('#help-article > .help-limits');
+  push('关键警示不折叠', !!warn, warn ? warn.textContent.slice(0, 40) : 'none');
 
   // ---- 4. 搜索 ----
   stage = 'search';
@@ -77,14 +95,14 @@ module.exports = `(async () => {
 
   // ---- 6. 在界面定位 ----
   stage = 'locate';
-  Help.openTopic('read-zoom');
+  Help.openTopic('open-file');
   await sleep(60);
-  const loc = $('#help-article [data-locate]');
+  const loc = $('#help-article [data-locate="#btn-open"]');
   push('有「在界面定位」按钮', !!loc, loc && loc.dataset.locate);
   if (loc) {
     loc.click();
     await sleep(420);
-    const flashed = $('#scale-select').classList.contains('help-flash');
+    const flashed = $('#btn-open').classList.contains('help-flash');
     push('定位会关掉指南并闪一下目标控件', $('#help-modal').hidden && flashed,
       'hidden=' + $('#help-modal').hidden + ' flash=' + flashed);
   }
@@ -121,7 +139,10 @@ module.exports = `(async () => {
   await sleep(80);
   key('F1');
   await sleep(120);
-  push('重开时回到上次看的那节', text('#help-article .help-title').indexOf('笔记互链') >= 0, text('#help-article .help-title'));
+  // v1.6.3：重开回首页，但把上次那节留在「接着上次」里，不做强制续读
+  push('重开默认回首页', text('#help-article .help-title').indexOf('你想完成什么') >= 0, text('#help-article .help-title'));
+  push('首页保留「接着上次」入口', $('#help-nav').textContent.indexOf('接着上次') >= 0 &&
+    $('#help-nav').textContent.indexOf('笔记互链') >= 0);
   key('Escape');
   await sleep(60);
 

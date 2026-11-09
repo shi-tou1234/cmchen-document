@@ -23,7 +23,7 @@ PDF.js 的浏览器构建输出到 src/renderer/pdfjs/，该目录受 .gitignore
 
 ```powershell
 Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-$skip = @('test-pen.js', 'test-real-input.js', 'test-lazy-render.js', 'test-packaged.js')
+$skip = @('test-pen.js', 'test-real-input.js', 'test-lazy-render.js', 'test-textlayer-select.js', 'test-packaged.js')
 $failed = @()
 Get-ChildItem scripts/test-*.js | Sort-Object Name |
     Where-Object { $skip -notcontains $_.Name } | ForEach-Object {
@@ -33,10 +33,10 @@ Get-ChildItem scripts/test-*.js | Sort-Object Name |
 if ($failed.Count) { throw ('测试失败：' + ($failed -join ', ')) }
 ```
 
-三个直接 Electron 测试分别验证画笔、真实鼠标和懒渲染。每个实例使用独立的临时 userData；PowerShell 直接调用 GUI exe 可能拿不到正确等待行为，可用 Start-Process -Wait -PassThru，或 Node child_process.execFileSync 检查退出码。
+四个直接 Electron 测试分别验证画笔、真实鼠标、懒渲染和文本层拖选。每个实例使用独立的临时 userData；PowerShell 直接调用 GUI exe 可能拿不到正确等待行为，可用 Start-Process -Wait -PassThru，或 Node child_process.execFileSync 检查退出码。
 
 ```powershell
-$direct = @('test-pen.js', 'test-real-input.js', 'test-lazy-render.js')
+$direct = @('test-pen.js', 'test-real-input.js', 'test-lazy-render.js', 'test-textlayer-select.js')
 foreach ($name in $direct) {
     $testData = Join-Path $env:TEMP ('trove-direct-' + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $testData | Out-Null
@@ -55,11 +55,19 @@ foreach ($name in $direct) {
 | 范围 | 脚本 |
 | --- | --- |
 | 数据、撤销与作者 | test-library、test-undo、test-creators |
+| 撤销差量 | test-undo-delta（撤销只回退本条命令改过的字段；20 个撤销点不再各存一份整库 JSON） |
 | 导入识别与附件找回 | test-identify-fields、test-doiscan、test-pdf-identify、test-fingerprint |
 | 阅读队列与笔记别名 | test-read-queue、test-library-meta |
 | 综述草稿 | test-review、test-review-ui |
 | 标注读取与备份扫描 | test-r7-anno-guard（读取完成前保护、损坏文件重建、备份隔离） |
 | 保存失败后的文档切换 | test-anno-save-navigation（真实只读文件失败、保留未保存标注、恢复写入后切换） |
+| 标注会话身份与改名 | test-anno-session-identity（A→B→A、A→B→C→A、9 次链式改名、旧路径被另一份 PDF 复用、在途保存与读取跨改名，含书签并发与排队重建）、test-rename-active-doc（打开中的文档改名后新笔迹必须落到新路径） |
+| 改名事务与失败回滚 | test-rename-boundary（损坏 sidecar 不覆盖目标、五种强制终止检查点重启恢复）、test-rename-attachment（改 PDF 名 / 写库 / 搬标注任一步失败可回退） |
+| 离开与关闭的保存边界 | test-leave-save-boundary（回执期间新画的内容必须补存；补存失败留在原文档；无编辑不多存） |
+| sidecar 读写一致性 | test-sidecar-integrity（缺失可创建 / 有效可追加 / 损坏默认拒绝 / force 先备份再重建 / 回调抛错不落盘） |
+| 老标注 ID 迁移重试 | test-migration-retry（sidecar 已换稳定 id 但库写失败、写盘恢复后可重试且不卡住 flush） |
+| 桥接契约 | test-bridge-contract（静态提取渲染层引用的 pdfBridge 路径并对照真实 preload；防止接口层级写错后静默失效） |
+| 全文索引事件 | test-ft-index-events（change 只更新状态且合并、idle 重跑当前查询、面板关着不白跑、重开后仍生效） |
 | 保存失败 | test-save-failures、test-reliability-ui、test-n01-note-export-save |
 | 迁移与备份 | test-datadir、test-data-resources、test-resource-roundtrip、test-backup-restore |
 | 搜索与列表 | test-search、test-search-boundaries、test-search-paging、test-large-library |
@@ -75,6 +83,9 @@ foreach ($name in $direct) {
 | 参考文献表批量入库 | test-refimport（切条 / 字段抽取 / 标题四级识别 / 查重 / 置信度 / 上限，纯 Node）、test-refimport-ui（预览 → 取消一条 → 导入 → 就地变「已有」） |
 | 引用键模板 | test-citekey（与旧算法逐字符对拍、混合作者守第一作者语义、字段与修饰符、兜底与上限、重名后缀与顺序无关、设置项规范化，纯 Node） |
 | 原生批注归属 | test-native-annos、test-r01-anno-race |
+| 图形绘制与导出 | test-draw-export（图片+文字+线条混合导出、三角形按真实顶点换算、0/90/180/270° 页、橡皮稀疏事件不漏擦、一次手势一个撤销点、Shift 等边） |
+| 形状工具与页面排列 | test-anno-shapes（圆 / 三角 / 一笔成型与形状识别、按段擦除与 Alt 整条删、页面排列三按钮、导入文献库双入口、菜单高度上限） |
+| 文本层几何与拖选 | test-textlayer-select（span 盒子宽度对齐 PDF advance、相邻行不重叠、真实鼠标拖选不跳到文档开头） |
 | 笔记保真与链接 | test-note-templates-export、test-review-r02-r05、test-n02-n04-note-content、test-m01-legacy-md-note |
 | 会话与历史 | test-session、test-session-restore、test-tabs、test-nav-history |
 | 旋转与分屏 | test-reader-rotate-split（含会话二次启动恢复）、test-ref-doc（跨文档对照） |
@@ -97,6 +108,9 @@ foreach ($name in $direct) {
 | 阅读时长 | test-reading-time（累加 / 非法剔除 / 落盘 / 面板热力图 / 跨重启） |
 | 用户书签 | test-bookmarks（B 键 / 侧栏跳页 / sidecar 共存 / 跨启动） |
 | 审核 B01–B12 + 复查 R01–R04 | test-audit-fixes（书签串行队列与失败回滚 / 合并订阅 / EndNote 样式与混合 CDATA / 条件构建器往返 / 组行下标 / Atom 引号 / 年份口径） |
+| 窄窗与面板复查 | test-review-172（真实窗口尺寸：窄窗「更多」子菜单逐级 Esc、帮助跨断点后目录与正文同步、定位落到可继续操作的状态、640×400 下不超视口、悬停提示按下即取消） |
+| 界面精简与参数随场景 | test-v163-ui（主栏收敛、收起仍可达、色板与粗细随场景出现、帮助任务化、保存状态与空态三步） |
+| 1.6.2 反馈 | test-v162-feedback（色板分工具记忆与取色器同步、橡皮按段擦、双页对开切页不留在旧滚动位、双页独立缩放、导入文献库按钮状态） |
 | 引用与格式 | test-csl、test-csl-ui、test-bib、test-formats |
 | 引用补齐（同上 / 前引 / 消歧 / COinS） | test-cite-note（纯 Node：消歧边界、四种文献类型的脚注体、三种 collapse、坏输入、COinS 编码）、test-atc-citation（引注体下拉） |
 | 题录格式（RDF / MARCXML / EndNote 附件） | test-refio-formats（纯 Node：RDF 往返与 DC 简版、MARCXML 往返、`.xml` 三种格式分辨、附件候选路径）、test-enw-xml |
@@ -108,6 +122,8 @@ foreach ($name in $direct) {
 | 懒渲染与缩放 | test-lazy-render、test-zoom-mode，以及相关 reader/v 系列 |
 
 scripts/ 中的 probe 脚本是正式测试辅助文件，不因文件名含 probe 或 test 就删除。
+
+`scripts/bench-library.js` 是文献库开销基准（summary / setPageByKey / updateItem / 20 个撤销点占多少字符 / 一次 summary 触发多少次附件存在性探测）。它用合成夹具做横向比较，没有断言、不是 `test-*.js`，不进上面的全量循环。
 
 ### 测试隔离与判定
 
@@ -147,7 +163,7 @@ npx electron-builder --win dir
 ```powershell
 npx electron-builder --win portable --prepackaged "build/win-unpacked"
 npx electron-builder --win nsis --prepackaged "build/win-unpacked"
-node scripts/test-packaged.js "build/Trove-1.5.0-portable.exe"
+node scripts/test-packaged.js "build/Trove-<版本>-portable.exe"
 ```
 
 不要对最终 portable 或安装包运行 rcedit：它们包含自解压附加数据，改 PE 资源可能破坏整个包，即使工具退出码为 0。

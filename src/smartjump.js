@@ -89,10 +89,30 @@
 
   // ---------- 参考文献表识别与条目匹配 ----------
 
-  // 行文本是否是「参考文献」标题。允许整行就是这个词（前后可带少量装饰）。
+  /*
+   * 行文本是否是「参考文献」标题。
+   *
+   * 真实 PDF 里这一行的写法比「一行只有 References」多得多，早先只认最干净的那一种，
+   * 于是正文里明明有参考文献表却报「没找到标题」，程序退回「最后几页」硬拆，
+   * 拆出来的是正文句子（用户看到的就是「把正文当参考文献入库」）。这里把常见的几种都认下：
+   *   - 章节编号前缀："7 References" / "VII. References" / "6. 参考文献"
+   *   - 中英并写："参考文献（References）" / "References (参考文献)"
+   *   - 变体："References and Notes" / "References Cited" / "Literature Cited" / "Works Cited"
+   *   - 中文标题被 PDF 拆成带空格的字："参 考 文 献"
+   */
+  const BIB_HEAD_RE = /^(?:references?|bibliography|works cited|reference list|literature cited|references cited|reference cited|cited literature|references and notes|notes and references|参考文献|參考文獻|参考文献表|引用文献|引用文獻|主要参考文献|參考文獻表)$/i;
+
   function isBibHeading(text) {
-    const t = String(text || '').trim().replace(/^[—–-\s]+|[—–-\s:.]+$/g, '');
-    return /^(references|bibliography|works cited|reference list|literature cited|参考文献|參考文獻|参考文献表)$/i.test(t);
+    let t = String(text || '').trim().replace(/^[—–-\s]+|[—–-\s:.。]+$/g, '');
+    // 章节号/序号前缀（"7 "、"VII. "、"第6章 "）。必须带分隔空白，否则 "12.Writer" 这种条目会被误剥。
+    t = t.replace(/^(?:\d{1,2}|[IVXLC]{1,6}|第[一二三四五六七八九十百\d]{1,4}[章节部分])\s*[.)、:：]?\s+/i, '');
+    // 中文标题被逐字拆开时，字与字之间会多出空格
+    t = t.replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g, '$1');
+    t = t.replace(/\s+/g, ' ').trim();
+    if (BIB_HEAD_RE.test(t)) return true;
+    // 中英对照写法：「参考文献（References）」「References (参考文献)」
+    return /^(?:references?|bibliography)\s*[(（]\s*(?:参考文献|參考文獻)\s*[)）]$/i.test(t)
+      || /^(?:参考文献|參考文獻)\s*[(（]\s*(?:references?|bibliography)\s*[)）]$/i.test(t);
   }
 
   // 行文本是否是参考文献里编号为 num 的条目："12." / "12)" / "[12]" / "12 " 开头

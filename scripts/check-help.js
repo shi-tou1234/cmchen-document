@@ -30,6 +30,7 @@ const CONTROLS = {
   'help-next': 'help-center', 'help-x': 'help-center',
   'btn-zoom-out': 'read-zoom', 'btn-zoom-in': 'read-zoom', 'scale-select': 'read-zoom',
   'btn-prev': 'read-views', 'btn-next': 'read-views', 'page-input': 'read-views', 'btn-spread': 'read-views',
+  'btn-spread-zoom': 'read-views',
   'btn-speak': 'read-speech', 'btn-speak-stop': 'read-speech',
   'btn-print': 'read-output',
   'btn-rotate-left': 'read-rotate', 'btn-rotate-right': 'read-rotate',
@@ -44,8 +45,8 @@ const CONTROLS = {
   'btn-ruler': 'read-ruler',
   'search-box': 'search-doc',
 
-  // 标注
-  'more-btn': 'draw-tools', 'note-color': 'draw-tools', 'note-width': 'draw-tools',
+  // 标注（第二排工具全部平铺：形状与印章现在也是常驻按钮，不再有「更多」）
+  'note-color': 'draw-tools', 'note-width': 'draw-tools',
   'btn-undo': 'edit-anno', 'btn-clear-page': 'edit-anno',
   'btn-archive': 'anno-export', 'btn-save': 'anno-export',
   'text-editor': 'text-note', 'sel-color': 'anno-select',
@@ -60,6 +61,18 @@ const CONTROLS = {
   'lib-dup': 'dup', 'dup-close': 'dup', 'dup-close2': 'dup',
   'lib-import-refs': 'refio', 'lib-export-refs': 'refio',
   'lib-bib': 'bib', 'lib-review': 'review-draft', 'lib-new-note': 'note-editor',
+  'lib-more-btn': 'dup',   'btn-to-lib': 'lib-add',
+  'import-lib-current': 'lib-add', 'import-lib-refs': 'refimport', 'import-lib-x': 'lib-add',
+  // v1.6.3 分组下拉：页面布局已改为常驻小按钮，只剩导出会在窄窗收进「更多」
+  'tb-output-btn': 'read-output', 'tb-overflow-btn': 'ui-tour',
+  'btn-vm-scroll': 'read-views', 'btn-vm-page': 'read-views',
+  'sel-more-btn': 'anno-select',
+  'lib-filter-btn': 'builder', 'lib-add-btn': 'lib-add',
+  'lib-output-btn': 'refio', 'lib-study-btn': 'feeds',
+  'ld-complete-btn': 'meta', 'ld-complete-file': 'meta',
+  'nv-heading-btn': 'note-editor', 'nv-list-btn': 'note-editor',
+  'nv-formula-btn': 'note-math', 'nv-insert-btn': 'note-editor',
+  'nv-tip-btn': 'note-editor', 'nv-extra-btn': 'note-editor',
   'lib-import': 'lib-add', 'lib-empty-trash': 'trash',
   'lib-feeds': 'feeds', 'lib-recall': 'recall', 'lib-stats': 'lib-stats',
   'lib-settings': 'settings', 'settings-close': 'settings', 'set-save': 'settings',

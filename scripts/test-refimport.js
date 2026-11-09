@@ -231,5 +231,42 @@ console.log('6. 上限与健壮性');
   eq('噪声输入不抛错', threw, null);
 }
 
+// ---------- 7. 标题行变体与「文末没有标题」的兜底 ----------
+console.log('7. 标题行与正文噪声');
+{
+  // 真实 PDF 里这一行常带章节号、中英并写、字间空格，早先只认最干净的「References」
+  const variants = ['7 References', 'VII. Bibliography', 'REFERENCES AND NOTES',
+    '参考文献（References）', 'References (参考文献)', '参 考 文 献', '6. 参考文献'];
+  for (const h of variants) {
+    const r = R.parseSection([h, '[1] A. One. Title one. Journal A, 2020.']);
+    ok('标题变体：' + h, r.heading === true && r.entries.length === 1,
+      JSON.stringify({ heading: r.heading, n: r.entries.length }));
+  }
+  eq('带编号的条目不会被当成标题', R.isHeading('12. Writer, B. 2019.'), false);
+
+  // 文末没有标题（或标题认不出）：正文句子必须被丢掉，别当参考文献导进库
+  const bodyText = [
+    'approach (α = Dynamic)',
+    'which continuously up-ranks: dates α throughout training. As shown in Figure 5, increasing α generally im- JMMLU (ja) · vol. 8, recent- marks. MAIN attains the best performance.',
+    'α values using the Falcon-RefinedWeb dataset',
+    'withARC_C Acc_norm 25 performance assessed on AlpacaEval and IFEval.TruthfulQA Mc2 Zero-shot Winogrande Acc 5 HellaSwag Acc 10 D Multilingual GeneralizationMMLU · vol. 9, Evaluation',
+    '12768 tings are identical',
+    'where instruc- logical consistency tions and responses tend to be tightly coupled and- natural language fluency logically recoverable; such pairs pass bidirectional · vol. 10, MMLU.',
+  ];
+  const junk = R.parseSection(bodyText);
+  eq('没有标题时：正文不算条目', junk.entries.length, 0);
+  ok('没有标题时：丢掉的段落有记录', junk.dropped >= 1, 'dropped=' + junk.dropped);
+  eq('没有标题时：heading=false', junk.heading, false);
+
+  // 没有标题、但确实是参考文献（以编号 / 作者开头）→ 保留
+  const noHead = R.parseSection([
+    'the following table presents the results of our experiments on the three datasets used in this paper.',
+    'Smith, J. A. (2019). A survey of PDF text extraction. Journal of Documentation, 75(3), 456-478.',
+    '[2] 张三, 李四. 基于深度学习的文档分析[J]. 计算机学报, 2020, 43(2): 123-135.',
+  ]);
+  eq('没有标题但开头像条目：留下两条', noHead.entries.length, 2);
+  eq('没有标题时正文那句被丢掉', noHead.dropped, 1);
+}
+
 console.log('test-refimport: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

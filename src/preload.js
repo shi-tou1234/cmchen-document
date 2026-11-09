@@ -1,5 +1,15 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// 标注 / 书签请求统一带「文档会话 id」：
+// 路径不是文档身份（同一个路径在不同时刻可以是两份不同的文件），改名后路径也会变，
+// 所以在途请求要靠会话 id 让主进程认回它现在该写哪一份 sidecar（J01 / J02 / J03）。
+// 没传会话 id 的调用（探针、老调用方）行为不变：主进程按传进来的路径直接定位。
+function annoPayload(payload, opts) {
+  const id = opts && opts.sessionId;
+  if (id) payload.sessionId = String(id);
+  return payload;
+}
+
 contextBridge.exposeInMainWorld('pdfBridge', {
   // 主应用窗口标记（main.js 的 additionalArguments）；独立测试窗口为 false
   isApp: process.argv.includes('--pdfreader-app'),
@@ -32,14 +42,22 @@ contextBridge.exposeInMainWorld('pdfBridge', {
   setTitle: (t) => ipcRenderer.send('set-title', t),
   // 标注自动保存 / 恢复（按文件路径）
   // opts.force 只在用户确认「重建标注文件」时传：主进程会先备份损坏的原文件再写
-  saveAnnos: (path, pages, opts) => ipcRenderer.invoke('anno-save', { path, pages, force: !!(opts && opts.force) }),
+  // opts.sessionId 是文档会话 id：改名后主进程据此把在途请求落到当前路径
+  saveAnnos: (path, pages, opts) => ipcRenderer.invoke('anno-save',
+    annoPayload({ path, pages, force: !!(opts && opts.force) }, opts)),
+  // 登记 / 更新 / 注销一份文档的会话（{ id, path, closed? }）。
+  // 必须在任何标注读写之前发出去：改名时主进程要按这份登记把在途请求落到新路径。
+  annoSession: (info) => ipcRenderer.send('anno-session', info || {}),
   onSaveError: (cb) => ipcRenderer.on('save-error', (_e, message) => cb(message)),
   // 只要标注数组（老调用方 / 探针的用法）；读失败也给空数组，但不带状态
-  loadAnnos: (path) => ipcRenderer.invoke('anno-load', { path })
+  loadAnnos: (path, opts) => ipcRenderer.invoke('anno-load', annoPayload({ path }, opts))
     .then((r) => (Array.isArray(r) ? r : (r && Array.isArray(r.pages) ? r.pages : []))),
   // 带状态的读法：{ ok, status: 'ok' | 'missing' | 'broken', pages, annoPath, error }
   // 渲染层必须用这个——「没有标注」和「读不出来」要分开，否则一次自动保存就把原文件覆盖了
-  loadAnnosState: (path) => ipcRenderer.invoke('anno-load', { path }),
+  loadAnnosState: (path, opts) => ipcRenderer.invoke('anno-load', annoPayload({ path }, opts)),
+  // 重试老标注的 ID 迁移（补 ID 已落盘、库里的标签关联还没写完时用）
+  // 返回 { ok, migration: 'ok' | 'failed' | 'library-failed' | 'broken', error }
+  migrateAnnos: (path, opts) => ipcRenderer.invoke('anno-migrate', annoPayload({ path }, opts)),
   // 标注条目化 —— 汇总所有文档的标注 + 给标注打标签
   listAnnotations: () => ipcRenderer.invoke('anno-list'),
   // 回顾（间隔重复）：卡片状态在 userData/recall.json，标注正文仍走 listAnnotations
@@ -74,8 +92,9 @@ contextBridge.exposeInMainWorld('pdfBridge', {
     ipcRenderer.on('refi-progress', h);
     return () => ipcRenderer.removeListener('refi-progress', h);
   },
-  bookmarksLoad: (path) => ipcRenderer.invoke('bookmarks-load', { path }),
-  bookmarksSave: (path, bookmarks) => ipcRenderer.invoke('bookmarks-save', { path, bookmarks }),
+  bookmarksLoad: (path, opts) => ipcRenderer.invoke('bookmarks-load', annoPayload({ path }, opts)),
+  bookmarksSave: (path, bookmarks, opts) => ipcRenderer.invoke('bookmarks-save',
+    annoPayload({ path, bookmarks }, opts)),
   readingStatsLoad: () => ipcRenderer.invoke('reading-stats-load'),
   readingStatsMerge: (stats) => ipcRenderer.invoke('reading-stats-merge', { stats }),
   setAnnoTags: (id, tags) => ipcRenderer.invoke('anno-set-tags', { id, tags }),

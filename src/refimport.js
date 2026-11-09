@@ -22,16 +22,17 @@ const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
 const MAX_ENTRIES = 400;
 const MAX_ENTRY_CHARS = 1600;
 
-// 参考文献区的标题行（与 smartjump 的 isBibHeading 保持一致的判定范围）
-const HEADING_RE = /^(references|bibliography|works cited|reference list|literature cited|references and notes|参考文献|參考文獻|参考文献表|引用文献|主要参考文献)$/i;
+// 参考文献区的标题行：判定只有一处实现（smartjump.isBibHeading），
+// 智能跳转与批量入库必须用同一把尺子 —— 两边各写一套正则，就会出现
+// 「点 [12] 跳不到」但「能批量入库」这种自相矛盾的行为。
+const SmartJump = require('./smartjump.js');
 
 function normSpace(s) {
   return String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 }
 
 function isHeading(text) {
-  const t = normSpace(text).replace(/^[—–\-\s]+|[—–\-\s:.。]+$/g, '');
-  return HEADING_RE.test(t);
+  return SmartJump.isBibHeading(text);
 }
 
 // 纯页码行（"12" / "- 12 -" / "12 / 340"）：参考文献区里到处都是，不能当条目也不能当续行
@@ -91,6 +92,51 @@ function guessYear(text) {
   // ③ 否则取最后一个看起来像年份的四位数（标题里出现年份时可能猜错，标注里会体现）
   const all = s.match(/\b(?:1[5-9]|20|21)\d{2}\b/g);
   return all && all.length ? all[all.length - 1] : '';
+}
+
+// ---------- 「这一条像不像参考文献」 ----------
+/*
+ * 为什么需要这一步：标题行找不到时程序会退回「最后几页」硬拆，
+ * 拆出来的其实是正文句子，却每条都能被塞进「标题」字段（界面上标成「仅标题」），
+ * 用户看到的就是「把正文当参考文献入库」。所以每条先过一遍打分：
+ * 有 DOI / arXiv / 文献类型标记 / 编号 / 年份 + 卷期页 的才算参考文献。
+ */
+function referenceScore(text) {
+  const t = normSpace(text);
+  if (!t) return 0;
+  let score = 0;
+  if (/^\[?\d{1,3}[\])．.、]\s?/.test(t)) score += 2;                 // [1] / 1. / 1)
+  if (doiIn(t)) score += 3;
+  if (arxivIn(t)) score += 3;
+  if (/https?:\/\//i.test(t)) score += 1;
+  if (/\b(?:1[5-9]|20|21)\d{2}\b/.test(t)) score += 1;              // 有年份
+  if (/\b(?:vol\.?|no\.?|pp?\.?|issue)\s*\.?\s*\d/i.test(t)) score += 1;
+  else if (/\d{1,4}\s*[-–—]\s*\d{1,4}\b/.test(t)) score += 1;      // 页码区间
+  if (/\bet\s+al\./i.test(t)) score += 1;
+  if (/[(（]\s*(?:1[5-9]|20|21)\d{2}[a-z]?\s*[)）]/.test(t)) score += 1;  // APA 的括号年份
+  if (/\[(?:EB|DB|J|M|C|D|R|S|N|P|G|Z|A)(?:\/OL)?\]/.test(t)) score += 3; // GB/T 文献类型标记
+  // 句末标点 + 够长：单独一条不足以判定（正文句子也有），只是加分项
+  if (/[.。]$/.test(t) && t.length >= 40) score += 1;
+  return score;
+}
+
+// 阈值 2：单个信号（例如只有年份）不算，两个以上才当参考文献。
+function looksLikeReference(text) {
+  return referenceScore(text) >= 2;
+}
+
+/*
+ * 条目「开头」是否像参考文献：编号 / 作者名 / 引号标题 / 文献类型标记 / DOI。
+ * 标题行没找到时用它兜底 —— 正文句子可能碰巧含年份和卷号（"… vol. 8 …"），
+ * 但它不会以「[12]」「Smith, J.」这样的作者-编号开头。
+ */
+function looksLikeRefHead(text) {
+  const t = normSpace(text);
+  if (!t) return false;
+  if (entryStart(t)) return true;
+  if (doiIn(t) || arxivIn(t)) return true;
+  if (/\[(?:EB|DB|J|M|C|D|R|S|N|P|G|Z|A)(?:\/OL)?\]/.test(t)) return true;
+  return /^[“"《（(]/.test(t);   // 引号/书名号起的条目（"Title," in Proc. …）
 }
 
 // ---------- 条目切分 ----------
@@ -515,6 +561,11 @@ function parseEntry(text) {
 
 /**
  * 参考文献区的行 → 条目数组。
+ *
+ * 标题行没找到时（from 未命中）整节的可信度是不确定的：这时候只保留
+ * 「明确像参考文献」的段落（打分 ≥ 2），正文句子会被直接丢掉，并把丢掉的条数
+ * 放进返回值，界面上可以如实说明「略过 N 段不像参考文献的文字」。
+ *
  * @param {string[]|{text:string}[]} lines 从标题行开始（含）到文末的行
  */
 function parseSection(lines, opts) {
@@ -534,13 +585,29 @@ function parseSection(lines, opts) {
     const alt = splitBySentence(body);
     if (alt.length > chunks.length) chunks = alt;
   }
+  // 标题确认过：正文里偶尔的残句留着（用户能取消勾选）；
+  // 标题没确认：既要有参考文献的「体征」（年份 / 卷期页 / DOI…），开头也得像条目，
+  // 否则会把正文整段当条目导进库里。
+  const kept = [];
+  let dropped = 0;
+  for (const t of chunks) {
+    const ok = heading ? referenceScore(t) >= 1
+      : (referenceScore(t) >= 2 && looksLikeRefHead(t));
+    if (ok) kept.push(t);
+    else dropped++;
+  }
   const cap = Math.max(1, Math.min(MAX_ENTRIES, Number(o.max) || MAX_ENTRIES));
-  const entries = chunks.slice(0, cap).map((t, i) => {
+  const entries = kept.slice(0, cap).map((t, i) => {
     const e = parseEntry(t);
     e.entryNo = i + 1;
     return e;
   });
-  return { entries, heading, lines: body.length, truncated: chunks.length > cap };
+  return {
+    entries, heading, lines: body.length,
+    truncated: kept.length > cap,
+    dropped,        // 被判为「不像参考文献」而丢掉的段数
+    looked: chunks.length,   // 切分出来的总段数（含被丢掉的）
+  };
 }
 
 /**
@@ -644,6 +711,6 @@ function toRecord(parsed) {
 module.exports = {
   parseSection, splitEntries, splitBySentence, parseEntry, plan, mergeMeta, toRecord,
   isHeading, isPageNumber, doiIn, arxivIn, guessYear, parseAuthors, foldTitle, titleKey,
-  normDoi, entryStart,
+  normDoi, entryStart, referenceScore, looksLikeReference, looksLikeRefHead,
   MAX_ENTRIES,
 };
