@@ -154,6 +154,12 @@ function computeScale() {
   return parseFloat(s.scaleMode) || 1;
 }
 
+// 「当前这一版布局是按多高的视口算出来的」。
+// 尺寸连续变化时（拖窗口边缘），ResizeObserver 会连报好几个尺寸，但页面尺寸要等重排才变；
+// 这段时间里视口高度已经变了、页面还是旧的 —— 算视线中心必须用「布局所属的那一版高度」，
+// 用最新高度会算到一个并不存在的中间状态上，连续拖动就会越拖越偏。
+let layoutViewerH = 0;
+
 // 布局：设置每页 CSS 尺寸（占位稳定，滚动不跳动），重排已渲染页
 function applyLayout() {
   const s = App.state;
@@ -182,7 +188,18 @@ function applyLayout() {
     if (rotEl) {
       rotEl.style.width = Math.round(u.w * ps) + 'px';
       rotEl.style.height = Math.round(u.h * ps) + 'px';
-      rotEl.style.transform = 'translate(-50%, -50%) rotate(' + normRot(s.rotation) + 'deg)';
+      // 不旋转时（绝大多数场合）不要挂 transform：一个 transform 会让每页多出一个
+      // 合成层，滚动时要为它单独做一次合成；旋转 0° 时居中偏移本来就是 0，
+      // 直接摆到页面左上角，画出来的位置一模一样。
+      if (normRot(s.rotation) === 0) {
+        rotEl.style.left = '0px';
+        rotEl.style.top = '0px';
+        rotEl.style.transform = 'none';
+      } else {
+        rotEl.style.left = '50%';
+        rotEl.style.top = '50%';
+        rotEl.style.transform = 'translate(-50%, -50%) rotate(' + normRot(s.rotation) + 'deg)';
+      }
     }
     const base = el.querySelector('.anno-base'), anno = el.querySelector('.anno');
     for (const svg of [base, anno]) { if (svg) { svg.style.width = Math.round(u.w * ps) + 'px'; svg.style.height = Math.round(u.h * ps) + 'px'; } }
@@ -198,6 +215,7 @@ function applyLayout() {
     }
   }
   App.els.zoom.textContent = Math.round(s.scale * 100) + '%';
+  layoutViewerH = App.els.viewer ? App.els.viewer.clientHeight : 0;
 }
 
 // ---------- 懒渲染 ----------
@@ -205,11 +223,61 @@ function applyLayout() {
 // 快速跳页时上一组的任务还在跑，rendered 仍是 false，但它们已经分配了画布（R02）。
 const activeRenders = new Set();
 
+/*
+ * 渲染串行化（滚动流畅度的关键）。
+ * 早先滚动时观察器一回调就直接开渲染：连续滚动会同时挂起好几页的 pdf.js 任务，
+ * 每页都要同步改一次画布尺寸（分配 + 清空几百万像素）再开画 —— 主线程被几份工作
+ * 交替抢用，滚轮就变成「一卡一卡」。
+ * 现在统一排进队列，最多两页并行，并按「离视口最近」优先。
+ * 页面盒子（.page 的宽高）是布局时就定死的，晚几十毫秒出图不会让页脚跳动。
+ */
+const renderQueue = [];
+let renderRunning = 0;
+// 同时在画的上限：1 会让「当前页 + 搭档页」这类场景排成串（低帧率环境下两页要等两轮），
+// 3 以上又会回到多份光栅化抢主线程的老问题。2 是这两头的折中。
+const RENDER_MAX_CONCURRENT = 2;
+
 function renderPageNum(n) {
   const s = App.state;
   if (s.mode !== 'pdf') return;
   const el = App.pageEl(n);
   if (!el || !el._pdfPage) return;
+  if (el._task) return;                                  // 这一页已经在画了
+  if (renderQueue.indexOf(n) < 0) renderQueue.push(n);
+  pumpRenderQueue();
+}
+
+function pumpRenderQueue() {
+  while (renderQueue.length && renderRunning < RENDER_MAX_CONCURRENT) {
+    // 队列里可能积压了好几页（快速滚动 / 快速跳页时）：先画「离视口最近」的那一页。
+    // 用视口距离而不是 currentPage：后者来自观察器，切换模式或快速滚动时会滞后，
+    // 拿它排序会把用户正看着的那一页排到最后。
+    const vr = App.els.viewer ? App.els.viewer.getBoundingClientRect() : null;
+    const dist = (n) => {
+      const el = App.pageEl(n);
+      if (!el) return Infinity;
+      if (vr) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom < vr.top) return vr.top - r.bottom;
+        if (r.top > vr.bottom) return r.top - vr.bottom;
+        return 0;   // 在视口里
+      }
+      return Math.abs(n - (App.state.currentPage || 1));
+    };
+    let bi = 0;
+    for (let i = 1; i < renderQueue.length; i++) {
+      if (dist(renderQueue[i]) < dist(renderQueue[bi])) bi = i;
+    }
+    const n = renderQueue.splice(bi, 1)[0];
+    const el = App.pageEl(n);
+    if (!el || !el._pdfPage || el._task) continue;
+    renderRunning++;
+    startRender(n, el);                                  // 完成回调里继续 pump
+  }
+}
+
+function startRender(n, el) {
+  const s = App.state;
   const dpr = window.devicePixelRatio || 1;
   const ps = pageScale(n);
   const viewport = el._pdfPage.getViewport({ scale: ps });
@@ -234,18 +302,43 @@ function renderPageNum(n) {
     activeRenders.delete(n);
     s.rendered.set(n, true);
     el._renderScale = ps;   // 记下这张位图是按多大的缩放画的，缩放变了要重画
-    buildTextLayer(n);   // 首次渲染后铺设可选中文本层（幂等）
-    paintSearchHl(n);    // 若该页有搜索命中，画高亮
+    scheduleTextLayer(n);   // 文本层不必卡在「出图这一刻」铺：交给空闲时间，别和滚动抢主线程
+    paintSearchHl(n);       // 若该页有搜索命中，画高亮
   }).catch((err) => {
     if (el._task === task && gen === loadSeq) { el._task = null; activeRenders.delete(n); }
     // 只把「主动取消」当正常；其余错误必须冒出来，否则会出现「页面永远空白」这类静默故障
     const msg = err && err.message ? err.message : String(err);
     if (!/cancel/i.test(msg)) console.error('[render] page ' + n + ' failed:', msg);
+  }).then(() => {
+    // 无论成功、取消还是换文档，都必须把名额还回去，否则后面的页永远排不上
+    renderRunning = Math.max(0, renderRunning - 1);
+    pumpRenderQueue();
   });
+}
+
+// 诊断用：渲染队列的实时状态（探针 / 排障时看「某一页为什么一直没画出来」）
+App.renderQueueState = () => ({
+  running: renderRunning,
+  queue: renderQueue.slice(),
+  queued: renderQueue.length,
+  active: Array.from(activeRenders),
+  freePending: Array.from(freeTimers.keys()),
+});
+
+// 文本层（可选中 / 可朗读的透明文字）延后一点点铺：一页几百个 span + 一次强制重排，
+// 铺在渲染完成的同一个回调里，等于「刚出图又卡一下」，连续滚动时尤其明显。
+// 延后上限 200ms：空闲就立刻铺，正忙也不会拖到用户想选字时还没铺上。
+function scheduleTextLayer(n) {
+  const run = () => buildTextLayer(n);
+  if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 200 });
+  else setTimeout(run, 120);
 }
 
 function freePage(n) {
   if (App.state.mode !== 'pdf') return;
+  const q = renderQueue.indexOf(n);
+  if (q >= 0) renderQueue.splice(q, 1);   // 还没开始画就不用画了
+  cancelFreePage(n);
   const el = App.pageEl(n);
   if (!el) return;
   if (el._task) { try { el._task.cancel(); } catch (_) {} el._task = null; }
@@ -254,6 +347,35 @@ function freePage(n) {
   if (canvas) { canvas.width = 0; canvas.height = 0; }
   el._renderScale = 0;
   App.state.rendered.set(n, false);
+}
+
+/*
+ * 位图的延迟回收（回滚抖动）。
+ * 早先一离开 600px 预渲染区就立刻 canvas.width = 0。小幅来回滚动（回看上一行、
+ * 滚过页边界又退回来）会让同一页反复「释放 → 重新渲染」，每次都是一次完整光栅化，
+ * 手感就是滚动时断断续续地卡。
+ * 现在晚 900ms 再放，期间这一页回到视野就直接取消释放。
+ */
+const freeTimers = new Map();
+function freePageSoon(n) {
+  if (freeTimers.has(n)) return;
+  freeTimers.set(n, setTimeout(() => {
+    freeTimers.delete(n);
+    // 到点再确认一次，三条都要挡住（每一条都是「这页现在还在用」的正当理由）：
+    //   1) 单页 / 对开模式下由 freePagesExcept 统一管回收，别在这里插手；
+    //   2) 观察器可能已经不更新了（刚切过模式），inView 会过期 —— 正在显示的页不能放；
+    //   3) 已经排队或在画：放掉画布等于把刚开的任务取消，页面就永远空白。
+    if (App.state.viewMode !== 'scroll') return;
+    if (activeRenders.has(n)) { freePageSoon(n); return; }
+    const el = App.pageEl(n);
+    if (el && (el.dataset.inView === '1' || el.classList.contains('is-current'))) return;
+    if (renderQueue.indexOf(n) >= 0) return;
+    freePage(n);
+  }, 900));
+}
+function cancelFreePage(n) {
+  const t = freeTimers.get(n);
+  if (t) { clearTimeout(t); freeTimers.delete(n); }
 }
 
 // 「这一页现在以正确尺寸渲染好了吗」：位图被释放过、或缩放变了（页级缩放各不相同），
@@ -278,10 +400,13 @@ function setupObserver() {
     for (const e of entries) {
       const n = +e.target.dataset.page;
       if (e.isIntersecting) {
+        e.target.dataset.inView = '1';
+        cancelFreePage(n);
         if (!App.state.rendered.get(n)) renderPageNum(n);
       } else {
-        // 远离视口的页释放位图内存（标注在 SVG 层，不受影响）
-        freePage(n);
+        e.target.dataset.inView = '0';
+        // 远离视口的页释放位图内存（标注在 SVG 层，不受影响）—— 延迟放，避免来回滚动时反复重画
+        freePageSoon(n);
       }
     }
   }, { root: App.els.viewer, rootMargin: '600px 0px' });
@@ -544,6 +669,12 @@ async function loadPdf(data, fileName, smoke, meta) {
     if (window.pdfBridge.setTitle) window.pdfBridge.setTitle(s.fileName);
     if (App.io) App.io.disconnect();
     if (App.vo) App.vo.disconnect();
+    // 上一份文档遗留的渲染队列 / 待释放定时器一律作废：它们的页码指向的是旧文档的页。
+    // renderRunning 不在这里复位——在跑的那个任务结束时自己会还名额（提前复位会让
+    // 新旧两份文档的渲染同时进行）。
+    renderQueue.length = 0;
+    for (const t of freeTimers.values()) clearTimeout(t);
+    freeTimers.clear();
     // 观察器必须先于页面块建立：buildPageBlocks 里会对每个页块调用 observe()，
     // 早先顺序颠倒导致首次加载时 App.io 仍为 null —— 一个元素都没被观察，
     // 滚轮滚动时后续页面永不渲染（◀▶/页码框因 scrollToPage 内部会强制渲染而看不出来）。
@@ -2164,10 +2295,16 @@ function initSidebar() {
   if (!sb || sb._inited) return;
   sb._inited = true;
   $('btn-sidebar').addEventListener('click', () => {
+    // 侧栏显隐改变 viewer 宽度，「适应宽度」要重排。重排前后必须把阅读位置锚回来，
+    // 否则页面按新宽度重排、scrollTop 却不动 —— 正在读的那一行被推走，看着就是「页面跳了」。
+    // 锚点要在改 hidden 之前取：改完宽度就变了，那时再取已经晚了。
+    const anchor = hasDoc(App.state) ? captureScrollAnchor() : null;
     sb.hidden = !sb.hidden;
     if (!sb.hidden) refreshSidebar();
-    // 侧栏显隐改变 viewer 宽度，适应宽度模式需要重排
-    setTimeout(applyLayout, 30);
+    setTimeout(() => {
+      applyLayout();
+      restoreScrollAnchor(anchor);
+    }, 30);
   });
   for (const tab of document.querySelectorAll('.sb-tab')) {
     tab.addEventListener('click', () => {
@@ -2522,8 +2659,12 @@ async function renderThumb(n) {
   } catch (err) { console.error('[thumb] page ' + n + ' failed:', err && err.message ? err.message : err); /* 取消/失败留占位 */ }
 }
 function markCurrentThumb() {
+  const host = $('sb-thumbs');
+  // 缩略图面板没打开时直接返回：滚动换页会频繁走到这里，
+  // 对几百个缩略图逐个 toggle class 纯属白烧主线程（正是滚动卡顿的一部分）。
+  if (!host || host.hidden || host.offsetParent === null) return;
   const cur = App.state.currentPage;
-  for (const t of $('sb-thumbs').querySelectorAll('.thumb')) t.classList.toggle('current', +t.dataset.page === cur);
+  for (const t of host.querySelectorAll('.thumb')) t.classList.toggle('current', +t.dataset.page === cur);
 }
 
 // 批注面板：当前文档全部标注列表（点击跳页 / 单条删除 / 加标签 / 搜索 / 导出）
@@ -3059,11 +3200,13 @@ App.scrollToPage = scrollToPage;   // 探针/外部跳页用
 // ---------- 专注阅读模式（F11） ----------
 App.setFocusMode = function (on) {
   const next = on === undefined ? !document.body.classList.contains('focus-mode') : !!on;
+  const had = hasDoc(App.state);
+  const anchor = had ? captureScrollAnchor() : null;
   document.body.classList.toggle('focus-mode', next);
-  if (next) {
-    toast('专注阅读模式：Esc 或 F11 退出');
-    setTimeout(applyLayout, 60);
-  }
+  if (next) toast('专注阅读模式：Esc 或 F11 退出');
+  // 进 / 出都会改 #viewer 的内边距（可用宽度、可用高度都变），「适应宽度 / 适应页面」
+  // 必须重算。早先只在进的时候重排，退出时页面停在旧尺寸上，直到下一次操作才跳一下。
+  if (had) setTimeout(() => { applyLayout(); restoreScrollAnchor(anchor); }, 60);
   return next;
 };
 
@@ -4020,14 +4163,16 @@ App.toggleSpread = toggleSpread;
 
 // 单页 / 对开模式的内存回收：只保留「当前页组」的位图，其余页一律释放。
 // 早先只释放上一张「当前页」，对开时搭档页（例如 2→4 时的 3）会一直留着位图；
-// 现在把「已渲染」和「正在渲染」都算进回收范围：快速跳页时上一组的任务还没结束，
-// 只清 rendered 会漏掉它们，任务完成后再把离屏页标成已渲染（R02）。
+// 现在把「已渲染」「正在渲染」「排队等着画」三种都算进回收范围：
+// 快速跳页时上一组的任务还没结束、或者还排在渲染队列里，只清 rendered 会漏掉它们，
+// 它们稍后照样把位图画出来，离屏页就留下了不该有的画布（R02）。
 function freePagesExcept(keep) {
   if (App.state.mode !== 'pdf') return 0;
   const keepSet = keep instanceof Set ? keep : new Set(keep || []);
   const targets = new Set();
   for (const [n, done] of App.state.rendered) if (done) targets.add(n);
   for (const n of activeRenders) targets.add(n);
+  for (const n of renderQueue) targets.add(n);
   let freed = 0;
   for (const n of targets) {
     if (keepSet.has(n)) continue;
@@ -4455,20 +4600,119 @@ function scheduleRefFollow() {
 }
 
 // ---------- 缩放控制 ----------
-// 缩放前后页面高度变了，滚动位置会漂；先记住当前页顶边相对视口的位置，改完再补回来
-function relayoutKeepingPosition() {
-  const keep = App.state.currentPage;
-  const el0 = App.pageEl(keep);
-  const vr0 = App.els.viewer.getBoundingClientRect();
-  const anchor = el0 ? (el0.getBoundingClientRect().top - vr0.top) : 0;
-  applyLayout();
-  const el1 = App.pageEl(keep);
-  if (el1) {
-    const vr1 = App.els.viewer.getBoundingClientRect();
-    const now = el1.getBoundingClientRect().top - vr1.top;
-    App.els.viewer.scrollTop += (now - anchor);
-  }
+/*
+ * 「阅读位置不跳」的唯一入口。
+ *
+ * 触发场景（任何改变 #viewer 尺寸或页面像素尺寸的操作）：
+ *   侧栏（目录 / 缩略图 / 批注）开关、窗口最大化 / 还原 / 拖边框、缩放档位切换、
+ *   Ctrl+滚轮 / Ctrl+±/0、双页独立缩放开关、分屏对照、旋转、专注模式。
+ *
+ * 早先的实现记的是「当前页顶边到视口顶边的像素距离」，改完再把这段像素补回来。
+ * 只要滚动位置落在页中间（页顶在视口上方），缩放后这个像素距离对应的就不是原来那行字：
+ * 放大时内容往下跑、缩小时往上蹿 —— 用户看到的就是「页面跳一下，找不到刚才读的地方」。
+ *
+ * 现在记「视口正中间那一点落在第几页、页内几分之几」，改完把同一点挪回视口正中。
+ * 页内比例在缩放时是线性不变的，所以无论放大缩小多少倍、页顶离视口多远，视线都不跑。
+ * 为什么用正中而不是页顶：正中是眼睛实际盯着的区域，按正中缩放时上下两半对称展开，
+ * 观感位移最小；按页顶锚（等于只保「页顶那一行」）会让正在看的中段整体往上/下漂。
+ */
+function pageUnderPoint(x, y) {
+  const host = document.elementFromPoint(x, y);
+  const el = host && host.closest ? host.closest('.page') : null;
+  return el && el.dataset && el.dataset.page ? el : null;
 }
+
+// 锚点取视口垂直方向的哪一处（0 = 顶边，0.5 = 正中）
+const ANCHOR_REF = 0.5;
+
+// refHeight：按哪个视口高度算「正中」。窗口尺寸变化时，ResizeObserver 的回调是在
+// viewer 已经变大 / 变小之后才到的，而里面的页面还是旧尺寸 —— 这时若拿新高度算中心，
+// 锚到的就不是用户刚才盯着的那一点，还原出来照样会跳。所以允许传「上一次布局时的视口高度」。
+function captureScrollAnchor(refHeight) {
+  const v = App.els.viewer;
+  if (!v) return null;
+  const vr = v.getBoundingClientRect();
+  const refH = Number.isFinite(refHeight) && refHeight > 0 ? refHeight : vr.height;
+  const vDenom = v.scrollHeight - v.clientHeight;
+  const hDenom = v.scrollWidth - v.clientWidth;
+  // 兜底：视口里连一页都定位不到时按滚动比例还原（比不动强）
+  const base = {
+    page: 0, frac: 0,
+    ratio: vDenom > 0 ? v.scrollTop / vDenom : 0,
+    hRatio: hDenom > 0 ? v.scrollLeft / hDenom : 0,
+  };
+  // 优先问「这一点下面真的是哪一页」：currentPage 来自观察器，快速滚动时会滞后一两页，
+  // 拿它当锚会锚到看不见的页上。上下试几个点，躲开页间空隙。
+  const cx = Math.round(vr.left + Math.min(vr.width - 6, Math.max(6, vr.width / 2)));
+  const refY = Math.round(vr.top + refH * ANCHOR_REF);
+  let el = null;
+  if (refY >= vr.top + 2 && refY <= vr.bottom - 4) {
+    for (const dy of [0, -24, 24, -Math.round(refH / 4), Math.round(refH / 4)]) {
+      const y = Math.round(Math.min(vr.bottom - 4, Math.max(vr.top + 2, refY + dy)));
+      el = pageUnderPoint(cx, y);
+      if (el) break;
+    }
+  }
+  // 几何法兜底（元素命中够不着时）：窗口刚变矮 / 变高时，参考点可能落在当前视口之外，
+  // 点不到任何东西，但每个页块的矩形仍然有效 —— 直接按矩形找包住这一点的页。
+  // 从「上一次的当前页」向两侧各找 12 页足够：视口高度的变化不会超过一两页。
+  if (!el) {
+    const start = Math.max(1, Math.min(App.state.numPages || 1, App.state.currentPage || 1));
+    for (let d = 0; d <= 12 && !el; d++) {
+      for (const k of (d === 0 ? [start] : [start - d, start + d])) {
+        if (k < 1 || k > (App.state.numPages || 0)) continue;
+        const cand = App.pageEl(k);
+        if (!cand) continue;
+        const r = cand.getBoundingClientRect();
+        if (r.height > 0 && refY >= r.top && refY <= r.bottom) { el = cand; break; }
+      }
+    }
+  }
+  if (!el) return base;
+  const r = el.getBoundingClientRect();
+  if (!(r.height > 0)) return base;
+  const frac = (refY - r.top) / r.height;
+  if (!isFinite(frac)) return base;
+  return { page: +el.dataset.page, frac, ratio: base.ratio, hRatio: base.hRatio };
+}
+
+function restoreScrollAnchor(a) {
+  const v = App.els.viewer;
+  if (!v || !a) return;
+  let done = false;
+  if (a.page) {
+    const el = App.pageEl(a.page);
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (r.height > 0) {
+        const vr = v.getBoundingClientRect();
+        // 参考点按「当前」视口高度算：分屏 / 专注模式 / 横向滚动条都会改视口高度，
+        // 拿旧高度还原等于把视线中心整体偏移一截。
+        const refY = vr.top + vr.height * ANCHOR_REF;
+        v.scrollTop += (r.top + a.frac * r.height) - refY;
+        done = true;
+      }
+    }
+  }
+  if (!done) {
+    const denom = Math.max(0, v.scrollHeight - v.clientHeight);
+    v.scrollTop = a.ratio * denom;
+  }
+  // 横向只在「页面本来就比视口宽」时按比例还原；否则页面是居中排列的，
+  // 强行写 scrollLeft 反而会把居中的页推到一边。
+  const hDenom = v.scrollWidth - v.clientWidth;
+  if (hDenom > 1 && a.hRatio) v.scrollLeft = a.hRatio * hDenom;
+}
+
+// 改布局但保持阅读位置：所有「会改变页面像素尺寸或阅读区宽度」的入口都必须走这里
+function relayoutKeepingPosition(anchor) {
+  if (!hasDoc(App.state)) { applyLayout(); return; }
+  const a = anchor || captureScrollAnchor();
+  applyLayout();
+  restoreScrollAnchor(a);
+}
+App.relayoutKeepingPosition = relayoutKeepingPosition;
+App.captureScrollAnchor = captureScrollAnchor;
 
 function setNumericScale(next) {
   const clamped = Math.min(6, Math.max(0.2, next));
@@ -5613,7 +5857,9 @@ function bind() {
 
   E.zoomIn.addEventListener('click', () => setNumericScale(App.state.scale * 1.25));
   E.zoomOut.addEventListener('click', () => setNumericScale(App.state.scale / 1.25));
-  E.scale.addEventListener('change', () => { App.state.scaleMode = E.scale.value; applyLayout(); });
+  // 缩放档位切换同样会改页块像素尺寸：必须带锚点重排，否则「适应宽度 ↔ 150%」之间
+  // 一来一回，正在读的那段就被推到视口外了
+  E.scale.addEventListener('change', () => { App.state.scaleMode = E.scale.value; relayoutKeepingPosition(); });
 
   E.prev.addEventListener('click', prevPage);
   E.next.addEventListener('click', nextPage);
@@ -5645,7 +5891,8 @@ function bind() {
       const on = !App.state.perPageZoom;
       App.state.perPageZoom = on;
       if (!on) clearPageZoom();     // 关掉就回到「两页一起缩放」，把各自的倍数归 1
-      applyLayout();
+      // 关掉独立缩放会把页级倍数清零 → 页块尺寸变回基准值，同样要锚住阅读位置
+      relayoutKeepingPosition();
       updateViewModeUI();
       toast(on ? '双页独立缩放：滚轮只放大鼠标所指的那一页' : '双页同步缩放：两页一起变大变小', 2600);
       try { window.pdfBridge.setSettings && window.pdfBridge.setSettings({ spreadPageZoom: on }); } catch (_) {}
@@ -5786,7 +6033,7 @@ function bind() {
       case 'End': scrollToPage(App.state.numPages, false, true); e.preventDefault(); break;
       case '+': case '=': if (e.ctrlKey) { setNumericScale(App.state.scale * 1.25); e.preventDefault(); } break;
       case '-': if (e.ctrlKey) { setNumericScale(App.state.scale / 1.25); e.preventDefault(); } break;
-      case '0': if (e.ctrlKey) { App.state.scaleMode = 'page-width'; E.scale.value = 'page-width'; applyLayout(); e.preventDefault(); } break;
+      case '0': if (e.ctrlKey) { App.state.scaleMode = 'page-width'; E.scale.value = 'page-width'; relayoutKeepingPosition(); e.preventDefault(); } break;
     }
   });
 
@@ -5993,14 +6240,69 @@ function bind() {
     openCtxMenu(e.clientX, e.clientY, items);
   });
 
-  let rt = null;
-  window.addEventListener('resize', () => {
-    clearTimeout(rt);
-    rt = setTimeout(() => {
-      if (App.state.scaleMode === 'page-width' || App.state.scaleMode === 'page-fit') applyLayout();
-      // v34：分屏宽度是百分比，窗口变化后参考页要按新宽度重排
+  // 阅读区尺寸变化统一入口（窗口最大化 / 还原 / 拖边框 / 侧栏开合 / 分屏对照 / 专注模式）。
+  // 早先只听 window.resize：一是要等 120ms 才重排，中间那段时间页面停在旧尺寸上；
+  // 二是侧栏、分屏这些「不经过窗口 resize」的宽度变化完全不走这条路，
+  // 宽度变了却没人重排 —— 等下次重排时一次性跳过去。用 ResizeObserver 盯住 viewer 本身，
+  // 上面这些路径就都收敛到一个地方了。
+  let viewportTimer = null;
+  let viewportBusy = false;
+  let lastVW = 0, lastVH = 0;
+  let relayoutStamp = 0;
+  let pendingViewportAnchor = null;
+  let viewportRecheck = null;
+  let viewportChase = 0;   // 「补一次」的次数上限：防滚动条引起的自激来回
+  function queueViewportRelayout() {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(() => {
+      if (!hasDoc(App.state)) return;
+      relayoutStamp = Date.now();
+      const anchor = pendingViewportAnchor;
+      pendingViewportAnchor = null;
+      viewportBusy = true;   // 重排会短暂改变滚动条，别让自己的观察器再触发一轮
+      try { relayoutKeepingPosition(anchor); } finally { viewportBusy = false; }
+      // 记下「重排之后」的真实尺寸：滚动条进出带来的那点宽度变化已经被这次重排吃掉了，
+      // 观察器再报同样的尺寸时就不该再排一次。
+      lastVW = App.els.viewer.clientWidth;
+      lastVH = App.els.viewer.clientHeight;
       if (App.state.split) refRender();
-    }, 120);
+    }, 70);
+  }
+  if (App.els.viewer && window.ResizeObserver) {
+    const ro = new ResizeObserver(() => {
+      if (viewportBusy) return;
+      // 「适应页面」下页面变高会带出竖向滚动条、变矮又收回去 —— 滚动条本身也算宽度变化，
+      // 于是重排 → 宽度变 → 再重排，可以自己追自己转个不停。上一步重排刚过去就跳过。
+      if (Date.now() - relayoutStamp < 200) {
+        // 但不能直接丢掉：万一是真的窗口变化（拖动窗口时很常见），跳过就会停在旧缩放上。
+        // 静默期过后补一次复核，最多补两次，防止真正的震荡把这里变成死循环。
+        if (!viewportRecheck && viewportChase < 2) {
+          viewportRecheck = setTimeout(() => {
+            viewportRecheck = null;
+            viewportChase++;
+            const w = App.els.viewer.clientWidth, h = App.els.viewer.clientHeight;
+            if (w === lastVW && h === lastVH) return;   // 确认是自己转的，收手
+            pendingViewportAnchor = hasDoc(App.state) ? captureScrollAnchor(layoutViewerH) : null;
+            queueViewportRelayout();
+          }, 220);
+        }
+        return;
+      }
+      const w = App.els.viewer.clientWidth, h = App.els.viewer.clientHeight;
+      if (w === lastVW && h === lastVH) return;
+      // 先把锚定下来（页面此刻还是旧尺寸、视口高度按上一次布局时的），再去排重排
+      pendingViewportAnchor = hasDoc(App.state) ? captureScrollAnchor(layoutViewerH) : null;
+      lastVW = w; lastVH = h;
+      viewportChase = 0;     // 真正的外部尺寸变化：重新给「补一次」的额度
+      queueViewportRelayout();
+    });
+    ro.observe(App.els.viewer);
+    App._viewerRO = ro;
+  }
+  // 兜底（拿不到 ResizeObserver 时仍按窗口变化走）+ 参考页按新宽度重绘
+  window.addEventListener('resize', () => {
+    if (!window.ResizeObserver) queueViewportRelayout();
+    else if (App.state.split) { clearTimeout(viewportTimer); viewportTimer = setTimeout(() => { if (App.state.split) refRender(); }, 120); }
   });
 
   // 拖拽打开

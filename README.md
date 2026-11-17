@@ -8,7 +8,7 @@
 
 ![文献库](docs/images/screenshot-library.png)
 
-**当前版本 1.7.0**（2026-11-09）。更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+**当前版本 1.7.1**（2026-11-17）。更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 目录
 

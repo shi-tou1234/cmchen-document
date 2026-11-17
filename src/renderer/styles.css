@@ -497,6 +497,10 @@ body.zoom-pan #viewer * { cursor: grabbing !important; user-select: none !import
   position: relative; background: #fff; overflow: hidden;
   box-shadow: var(--shadow-page); border-radius: 1px;
   display: flex; align-items: flex-start; justify-content: center;
+  /* 尺寸由 applyLayout 写在 inline style 上，页内内容不可能溢出（overflow:hidden 已经裁过）。
+     contain 让浏览器知道「这一页的布局和绘制与外界无关」：离屏的页可以直接跳过重排/重绘，
+     连续滚动时少做很多无用功（滚动卡顿的主要来源之一）。 */
+  contain: layout paint style;
 }
 /* v34 页面旋转：.page 是布局槽（按旋转后的外框占位），.page-rot 是未旋转的页面本体。
    画布、文本层、标注层都放在 .page-rot 里整体旋转，所以标注坐标仍是「未旋转页面坐标」，

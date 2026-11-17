@@ -45,7 +45,10 @@ module.exports = `(async () => {
     const rotEl = p1.querySelector('.page-rot');
     push('页面有独立旋转层', !!rotEl);
     push('初始旋转为 0', App.viewRotation() === 0, App.viewRotation());
-    push('初始旋转层为 0°', /rotate\\(0deg\\)/.test(rotEl.style.transform || ''), rotEl.style.transform);
+    // 0° 时不再挂 transform（每页少一个合成层，滚动更快），所以这里接受 none；
+    // 只要不是别的角度，就说明初始是正的
+    const t0 = rotEl.style.transform || '';
+    push('初始旋转层为 0°', t0 === 'none' || t0 === '' || /rotate\\(0deg\\)/.test(t0), t0);
 
     // 2. 顺时针 90°
     const r1 = App.rotateView(90);

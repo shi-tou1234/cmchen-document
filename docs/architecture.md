@@ -1,6 +1,6 @@
 # 架构与数据约定
 
-本文描述当前源码。应用版本为 1.7.0，库格式为 v8；二者独立演进。版本变化见 [CHANGELOG](../CHANGELOG.md)，使用说明见 [README](../README.md)。
+本文描述当前源码。应用版本为 1.7.1，库格式为 v8；二者独立演进。版本变化见 [CHANGELOG](../CHANGELOG.md)，使用说明见 [README](../README.md)。
 
 ## 进程与模块
 

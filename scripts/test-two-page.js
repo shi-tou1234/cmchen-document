@@ -110,7 +110,10 @@ let code = 0;
   await sleep(250);
   push('body 移除 view-spread', !document.body.classList.contains('view-spread'));
   push('滚动模式页恢复显示', getComputedStyle(document.getElementById('page-2')).display !== 'none');
-  push('滚动模式渲染恢复', App.state.rendered.get(2) === true);
+  // 隐藏窗口里 rAF 被降频，单页渲染要几百毫秒：这里等它画完，而不是死等 250ms。
+  // （旧版能瞬间通过，是因为「快速跳页」遗留的离屏位图把第 2 页顺手标成了已渲染。）
+  push('滚动模式渲染恢复', await waitFor(() => App.state.rendered.get(2) === true, 8000),
+    'page2=' + App.state.rendered.get(2));
 
   // 8) 设置持久化走 setSettings（值被白名单接受）
   const st = await pdfBridge.getSettings ? await pdfBridge.getSettings() : null;
